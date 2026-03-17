@@ -1,0 +1,50 @@
+# agent.yaml — Agent Platform configuration
+# Copy to agent.yaml and fill in your values.
+
+model:
+  provider: anthropic
+  model: claude-opus-4-6
+  api_key: ${ANTHROPIC_API_KEY}
+
+# Agent workspace directory. All *.md files in the root are auto-injected
+# as the system prompt. The agent can read/write files here via MCP.
+workspace: ./workspace
+
+# Optional: explicit ordering for system prompt files.
+# If omitted, all *.md files in workspace root are discovered alphabetically.
+# system_prompt:
+#   - ./workspace/SOUL.md
+#   - ./workspace/USER.md
+
+# User-provided MCP servers. Each gets exposed to the agent as tools.
+mcp_servers: {}
+  # home_assistant:
+  #   url: http://ha.home.arpa/mcp
+  #   headers:
+  #     Authorization: "Bearer ${HA_TOKEN}"
+  # custom_tool:
+  #   command: python3
+  #   args: ["./mcp-servers/custom.py"]
+
+channels:
+  signal:
+    account: "+1YOURACCOUNT"
+    signal_cli: http://signal-cli:8080
+    allow_from:
+      - "+1YOURPHONE"
+
+session:
+  store: ./sessions/
+  max_history_tokens: 100000
+
+heartbeat:
+  interval: 20m
+  prompt: "Check HEARTBEAT.md and decide if anything needs attention."
+
+# Heartbeat: the channel MCP server exposes POST /heartbeat on port 8100.
+# Set up a cron job or systemd timer to trigger it:
+#
+#   */20 * * * * curl -s -X POST http://localhost:8100/heartbeat
+#
+# In docker-compose, you can use a sidecar or host cron.
+# The agent's personality files (HEARTBEAT.md) define behavior.

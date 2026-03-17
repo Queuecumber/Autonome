@@ -1,0 +1,97 @@
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:latest
+    volumes:
+      - ./generated/litellm-config.yaml:/config/config.yaml
+      - ./workspace:/workspace:ro
+      - ./src/agent_platform/callbacks:/callbacks:ro
+    ports:
+      - "4000:4000"
+    command: ["--config", "/config/config.yaml"]
+    environment:
+      - PYTHONPATH=/callbacks
+      - WORKSPACE_DIR=/workspace
+    restart: unless-stopped
+
+  signal-adapter:
+    build:
+      context: .
+      dockerfile: src/adapters/signal/Dockerfile
+    volumes:
+      - ./workspace:/workspace
+      - ./sessions:/sessions
+      - ./agent.yaml:/app/agent.yaml:ro
+    environment:
+      - LITELLM_URL=http://litellm:4000
+      - AGENT_CONFIG=/app/agent.yaml
+      - CHANNEL_MCP_PORT=8100
+    ports:
+      - "8100:8100"
+    depends_on: [litellm, signal-cli]
+    restart: unless-stopped
+
+  signal-cli:
+    image: bbernhard/signal-cli-rest-api:latest
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+    ports:
+      - "8080:8080"
+    environment:
+      - MODE=json-rpc
+    restart: unless-stopped
+
+  workspace-fs-mcp:
+    image: python:3.12-slim
+    working_dir: /app
+    command: >
+      bash -c "pip install fastmcp mcp-server-filesystem &&
+      python -c \"
+      from fastmcp import FastMCP
+      from pathlib import Path
+      import os
+
+      mcp = FastMCP('workspace-fs')
+
+      WORKSPACE = Path(os.environ.get('WORKSPACE_DIR', '/workspace'))
+
+      @mcp.tool
+      def read_file(path: str) -> str:
+          target = (WORKSPACE / path).resolve()
+          if not str(target).startswith(str(WORKSPACE.resolve())):
+              return 'Error: path traversal not allowed'
+          return target.read_text()
+
+      @mcp.tool
+      def write_file(path: str, content: str) -> str:
+          target = (WORKSPACE / path).resolve()
+          if not str(target).startswith(str(WORKSPACE.resolve())):
+              return 'Error: path traversal not allowed'
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_text(content)
+          return f'Wrote {len(content)} bytes to {path}'
+
+      @mcp.tool
+      def list_directory(path: str = '.') -> list[str]:
+          target = (WORKSPACE / path).resolve()
+          if not str(target).startswith(str(WORKSPACE.resolve())):
+              return ['Error: path traversal not allowed']
+          return [str(p.relative_to(WORKSPACE)) for p in sorted(target.iterdir())]
+
+      @mcp.tool
+      def search_files(pattern: str, path: str = '.') -> list[str]:
+          target = (WORKSPACE / path).resolve()
+          if not str(target).startswith(str(WORKSPACE.resolve())):
+              return ['Error: path traversal not allowed']
+          return [str(p.relative_to(WORKSPACE)) for p in sorted(target.rglob(pattern))]
+
+      mcp.run(transport='http', host='0.0.0.0', port=8000)
+      \"
+      "
+    volumes:
+      - ./workspace:/workspace
+    environment:
+      - WORKSPACE_DIR=/workspace
+    restart: unless-stopped
+
+volumes:
+  signal-data:
