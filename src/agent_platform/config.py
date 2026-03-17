@@ -107,3 +107,31 @@ def write_litellm_config(litellm_config: dict, output_path: Path) -> None:
         f"# generated/litellm-config.yaml (DO NOT EDIT — generated from agent.yaml)\n\n"
         + yaml.dump(litellm_config, default_flow_style=False, sort_keys=False)
     )
+
+
+def cli():
+    """CLI entrypoint: generate LiteLLM config from agent.yaml."""
+    import sys
+
+    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("agent.yaml")
+    output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("generated/litellm-config.yaml")
+
+    if not config_path.exists():
+        print(f"Error: {config_path} not found", file=sys.stderr)
+        sys.exit(1)
+
+    config = load_config(config_path)
+    litellm_config = generate_litellm_config(config)
+
+    # Add system prompt callback reference (module.instance_name)
+    # LiteLLM imports this from PYTHONPATH — the callbacks dir is mounted in docker-compose
+    litellm_config["litellm_settings"] = {
+        "callbacks": "system_prompt.proxy_handler_instance",
+    }
+
+    write_litellm_config(litellm_config, output_path)
+    print(f"Generated LiteLLM config at {output_path}")
+
+
+if __name__ == "__main__":
+    cli()
