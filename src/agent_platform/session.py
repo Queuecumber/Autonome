@@ -1,4 +1,4 @@
-"""Session manager: JSONL history per contact with token-based truncation."""
+"""Session manager: JSONL history per (channel, session_id) with token-based truncation."""
 
 import json
 from pathlib import Path
@@ -13,12 +13,12 @@ class SessionManager:
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self.max_history_tokens = max_history_tokens
 
-    def _session_path(self, contact: str) -> Path:
-        return self.store_dir / f"{contact}.jsonl"
+    def _session_path(self, channel: str, session_id: str) -> Path:
+        safe_id = session_id.replace("/", "_").replace("\\", "_")
+        return self.store_dir / f"{channel}_{safe_id}.jsonl"
 
-    def load(self, contact: str) -> list[dict[str, Any]]:
-        """Load conversation history for a contact."""
-        path = self._session_path(contact)
+    def load(self, channel: str, session_id: str) -> list[dict[str, Any]]:
+        path = self._session_path(channel, session_id)
         if not path.exists():
             return []
         messages = []
@@ -27,16 +27,16 @@ class SessionManager:
                 messages.append(json.loads(line))
         return messages
 
-    def append(self, contact: str, messages: list[dict[str, Any]]) -> None:
-        """Append messages to a contact's session file."""
-        path = self._session_path(contact)
+    def append(self, channel: str, session_id: str, messages: list[dict[str, Any]]) -> None:
+        path = self._session_path(channel, session_id)
         with path.open("a") as f:
             for msg in messages:
                 f.write(json.dumps(msg) + "\n")
 
-    def load_truncated(self, contact: str, model: str = "claude-opus-4-6") -> list[dict[str, Any]]:
-        """Load history, truncating oldest complete exchanges if over token budget."""
-        messages = self.load(contact)
+    def load_truncated(
+        self, channel: str, session_id: str, model: str = "claude-opus-4-6"
+    ) -> list[dict[str, Any]]:
+        messages = self.load(channel, session_id)
         if not messages:
             return messages
 
@@ -45,7 +45,6 @@ class SessionManager:
             return messages
 
         exchanges = self._group_exchanges(messages)
-
         while exchanges and self._count_tokens(
             [m for ex in exchanges for m in ex], model
         ) > self.max_history_tokens:
@@ -54,7 +53,6 @@ class SessionManager:
         return [m for ex in exchanges for m in ex]
 
     def _group_exchanges(self, messages: list[dict]) -> list[list[dict]]:
-        """Group messages into exchanges, each starting with a user message."""
         exchanges: list[list[dict]] = []
         current: list[dict] = []
         for msg in messages:
@@ -67,7 +65,6 @@ class SessionManager:
         return exchanges
 
     def _count_tokens(self, messages: list[dict], model: str) -> int:
-        """Count tokens using LiteLLM's token counter with fallback."""
         try:
             return litellm.token_counter(model=model, messages=messages)
         except Exception:
