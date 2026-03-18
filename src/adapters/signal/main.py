@@ -1,46 +1,47 @@
-"""Entrypoint: starts Signal adapter + channel MCP server (with heartbeat route) in the same process."""
+"""Signal adapter: runs inbound listener + outbound MCP server."""
 
 import asyncio
 import logging
 import os
-from pathlib import Path
 
-from agent_platform.config import load_config
-from adapters.signal.adapter import SignalAdapter
-from adapters.signal.channel_mcp import create_channel_mcp
+from adapters.signal.inbound import SignalInbound
+from adapters.signal.outbound_mcp import SignalSender, create_signal_mcp
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
 async def main():
-    config_path = Path(os.environ.get("AGENT_CONFIG", "agent.yaml"))
-    config = load_config(config_path)
-
-    litellm_url = os.environ.get("LITELLM_URL", "http://localhost:4000")
-    session_dir = Path(config.get("session", {}).get("store", "./sessions"))
+    signal_cli_url = os.environ.get("SIGNAL_CLI_URL", "http://localhost:8080")
+    session_manager_url = os.environ.get("SESSION_MANAGER_URL", "http://localhost:5000")
+    account = os.environ.get("SIGNAL_ACCOUNT", "")
+    allow_from = os.environ.get("ALLOW_FROM", "").split(",") if os.environ.get("ALLOW_FROM") else []
     mcp_port = int(os.environ.get("CHANNEL_MCP_PORT", "8100"))
 
-    adapter = SignalAdapter(
-        config=config,
-        litellm_url=litellm_url,
-        session_dir=session_dir,
+    inbound = SignalInbound(
+        signal_cli_url=signal_cli_url,
+        session_manager_url=session_manager_url,
+        account=account,
+        allow_from=allow_from,
     )
 
-    # Create channel MCP server with heartbeat route on the same port
-    channel_mcp = create_channel_mcp(heartbeat_handler=adapter.handle_heartbeat)
+    sender = SignalSender(signal_cli_url=signal_cli_url, account=account)
+    mcp = create_signal_mcp(sender)
 
-    # Run adapter polling and MCP server concurrently
     async def run_mcp():
-        await channel_mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port)
+        await mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port)
 
     try:
         await asyncio.gather(
-            adapter.run(),
+            inbound.run(),
             run_mcp(),
         )
     finally:
-        await adapter.close()
+        await inbound.close()
+        await sender.close()
 
 
 if __name__ == "__main__":

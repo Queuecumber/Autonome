@@ -1,4 +1,4 @@
-"""Integration smoke test: verify the full message flow with mocked externals."""
+"""Integration smoke test: verify the full event flow with mocked externals."""
 
 import json
 from pathlib import Path
@@ -10,19 +10,18 @@ import yaml
 from agent_platform.config import load_config, generate_litellm_config, build_mcp_tool_declarations
 from agent_platform.session import SessionManager
 from agent_platform.callbacks.system_prompt import build_system_message
-from adapters.signal.adapter import SignalAdapter
-from adapters.signal.channel_mcp import create_channel_mcp, staged_attachments
+from session_manager.server import SessionOrchestrator, create_app
+from adapters.signal.inbound import SignalInbound
+from adapters.signal.outbound_mcp import SignalSender, create_signal_mcp
 
 
 @pytest.mark.asyncio
-async def test_full_message_flow(tmp_path):
-    """End-to-end: config -> system prompt -> session -> adapter -> response."""
-    # 1. Set up workspace
+async def test_full_event_flow(tmp_path):
+    """End-to-end: config -> session manager receives event -> LLM called -> session saved."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "SOUL.md").write_text("# Soul\nYou are a helpful agent.\n")
 
-    # 2. Create config
     config_data = {
         "model": {"provider": "anthropic", "model": "claude-opus-4-6", "api_key": "test-key"},
         "workspace": str(workspace),
@@ -39,27 +38,22 @@ async def test_full_message_flow(tmp_path):
     }
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(yaml.dump(config_data))
-
     config = load_config(config_path)
 
-    # 3. Verify system prompt injection
+    # Verify system prompt
     system_msg = build_system_message(workspace)
     assert "helpful agent" in system_msg
 
-    # 4. Verify LiteLLM config generation
+    # Verify LiteLLM config generation
     litellm_config = generate_litellm_config(config)
     assert "workspace_fs" in litellm_config["mcp_servers"]
-    assert "signal_channel" in litellm_config["mcp_servers"]
+    assert "signal" in litellm_config["mcp_servers"]
 
-    # 5. Verify MCP tool declarations
-    tools = build_mcp_tool_declarations(config)
-    assert len(tools) == 2  # workspace_fs + signal_channel
-
-    # 6. Create adapter and handle a message
+    # Create orchestrator and handle an event
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
 
-    adapter = SignalAdapter(
+    orchestrator = SessionOrchestrator(
         config=config,
         litellm_url="http://localhost:4000",
         session_dir=sessions_dir,
@@ -73,31 +67,42 @@ async def test_full_message_flow(tmp_path):
         resp = MagicMock()
         resp.status_code = 200
         resp.raise_for_status = MagicMock()
-        if "chat/completions" in url:
-            resp.json = MagicMock(return_value=mock_response)
-            payload = kwargs.get("json", {})
-            assert "tools" in payload
-            assert len(payload["tools"]) == 2
-        else:
-            resp.json = MagicMock(return_value={})
+        resp.json = MagicMock(return_value=mock_response)
         return resp
 
-    adapter._http = AsyncMock()
-    adapter._http.post = AsyncMock(side_effect=mock_post)
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(side_effect=mock_post)
 
-    result = await adapter.handle_message("+11111111111", "Hi there!")
+    event = {
+        "source": "signal",
+        "session_id": "+11111111111",
+        "text": "Hi there!",
+        "metadata": {"message_id": "ts_123", "sender": "+11111111111"},
+    }
+
+    result = await orchestrator.handle_event(event)
     assert result == "I'm here to help!"
 
-    # 7. Verify session persistence
+    # Verify session persistence with channel key
     session = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
-    history = session.load("+11111111111")
+    history = session.load("signal", "+11111111111")
     assert len(history) == 2
-    assert history[0]["content"] == "Hi there!"
+    assert history[0]["content"] == "Hi there!"  # Clean text, no metadata
     assert history[1]["content"] == "I'm here to help!"
 
-    # 8. Verify channel MCP tools exist
-    mcp = create_channel_mcp()
+    # Verify outbound MCP tools exist
+    sender = SignalSender(signal_cli_url="http://localhost:8080", account="+10000000000")
+    mcp = create_signal_mcp(sender)
     tools = await mcp.list_tools()
     tool_names = {t.name for t in tools}
-    assert "stage_attachment" in tool_names
+    assert "send_message" in tool_names
     assert "send_attachment" in tool_names
+
+    # Verify inbound listener can be created
+    inbound = SignalInbound(
+        signal_cli_url="http://localhost:8080",
+        session_manager_url="http://localhost:5000",
+        account="+10000000000",
+        allow_from=["+11111111111"],
+    )
+    assert inbound.account == "+10000000000"

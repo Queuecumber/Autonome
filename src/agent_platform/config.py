@@ -62,7 +62,7 @@ def generate_litellm_config(
                 "url": f"http://{fs_mcp_host}:{fs_mcp_port}/mcp",
                 "transport": "http",
             },
-            "signal_channel": {
+            "signal": {
                 "url": f"http://{adapter_host}:{adapter_mcp_port}/mcp",
                 "transport": "http",
             },
@@ -93,7 +93,7 @@ def build_mcp_tool_declarations(config: dict) -> list[dict]:
     """Build the MCP tool declarations list for chat completion requests."""
     tools = [
         {"type": "mcp", "server_label": "workspace_fs", "require_approval": "never"},
-        {"type": "mcp", "server_label": "signal_channel", "require_approval": "never"},
+        {"type": "mcp", "server_label": "signal", "require_approval": "never"},
     ]
     for name in config.get("mcp_servers", {}):
         tools.append({"type": "mcp", "server_label": name, "require_approval": "never"})

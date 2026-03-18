@@ -46,7 +46,7 @@ def test_generate_litellm_config_basic(sample_config):
     assert len(litellm["model_list"]) == 1
     assert litellm["model_list"][0]["model_name"] == "main"
     assert "workspace_fs" in litellm["mcp_servers"]
-    assert "signal_channel" in litellm["mcp_servers"]
+    assert "signal" in litellm["mcp_servers"]
 
 
 def test_generate_litellm_config_with_user_mcp(tmp_path, tmp_workspace):
@@ -88,5 +88,5 @@ def test_build_mcp_tool_declarations(sample_config):
 
     labels = [t["server_label"] for t in tools]
     assert "workspace_fs" in labels
-    assert "signal_channel" in labels
+    assert "signal" in labels
     assert all(t["require_approval"] == "never" for t in tools)

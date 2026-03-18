@@ -1,4 +1,20 @@
 services:
+  session-manager:
+    build:
+      context: .
+      dockerfile: src/session_manager/Dockerfile
+    volumes:
+      - ./sessions:/sessions
+      - ./agent.yaml:/app/agent.yaml:ro
+    ports:
+      - "5000:5000"
+    environment:
+      - LITELLM_URL=http://litellm:4000
+      - AGENT_CONFIG=/app/agent.yaml
+      - SESSION_MANAGER_PORT=5000
+    depends_on: [litellm]
+    restart: unless-stopped
+
   litellm:
     image: ghcr.io/berriai/litellm:latest
     volumes:
@@ -17,17 +33,15 @@ services:
     build:
       context: .
       dockerfile: src/adapters/signal/Dockerfile
-    volumes:
-      - ./workspace:/workspace
-      - ./sessions:/sessions
-      - ./agent.yaml:/app/agent.yaml:ro
-    environment:
-      - LITELLM_URL=http://litellm:4000
-      - AGENT_CONFIG=/app/agent.yaml
-      - CHANNEL_MCP_PORT=8100
     ports:
       - "8100:8100"
-    depends_on: [litellm, signal-cli]
+    environment:
+      - SESSION_MANAGER_URL=http://session-manager:5000
+      - SIGNAL_CLI_URL=http://signal-cli:8080
+      - SIGNAL_ACCOUNT=${SIGNAL_ACCOUNT}
+      - ALLOW_FROM=${SIGNAL_ALLOW_FROM}
+      - CHANNEL_MCP_PORT=8100
+    depends_on: [session-manager, signal-cli]
     restart: unless-stopped
 
   signal-cli:
