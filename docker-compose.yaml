@@ -41,52 +41,9 @@ services:
     restart: unless-stopped
 
   workspace-fs-mcp:
-    image: python:3.12-slim
-    working_dir: /app
-    command: >
-      bash -c "pip install fastmcp mcp-server-filesystem &&
-      python -c \"
-      from fastmcp import FastMCP
-      from pathlib import Path
-      import os
-
-      mcp = FastMCP('workspace-fs')
-
-      WORKSPACE = Path(os.environ.get('WORKSPACE_DIR', '/workspace'))
-
-      @mcp.tool
-      def read_file(path: str) -> str:
-          target = (WORKSPACE / path).resolve()
-          if not str(target).startswith(str(WORKSPACE.resolve())):
-              return 'Error: path traversal not allowed'
-          return target.read_text()
-
-      @mcp.tool
-      def write_file(path: str, content: str) -> str:
-          target = (WORKSPACE / path).resolve()
-          if not str(target).startswith(str(WORKSPACE.resolve())):
-              return 'Error: path traversal not allowed'
-          target.parent.mkdir(parents=True, exist_ok=True)
-          target.write_text(content)
-          return f'Wrote {len(content)} bytes to {path}'
-
-      @mcp.tool
-      def list_directory(path: str = '.') -> list[str]:
-          target = (WORKSPACE / path).resolve()
-          if not str(target).startswith(str(WORKSPACE.resolve())):
-              return ['Error: path traversal not allowed']
-          return [str(p.relative_to(WORKSPACE)) for p in sorted(target.iterdir())]
-
-      @mcp.tool
-      def search_files(pattern: str, path: str = '.') -> list[str]:
-          target = (WORKSPACE / path).resolve()
-          if not str(target).startswith(str(WORKSPACE.resolve())):
-              return ['Error: path traversal not allowed']
-          return [str(p.relative_to(WORKSPACE)) for p in sorted(target.rglob(pattern))]
-
-      mcp.run(transport='http', host='0.0.0.0', port=8000)
-      \"
-      "
+    build:
+      context: ./src/mcp_servers/workspace_fs
+      dockerfile: Dockerfile
     volumes:
       - ./workspace:/workspace
     environment:
