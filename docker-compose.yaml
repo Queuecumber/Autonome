@@ -64,5 +64,15 @@ services:
       - WORKSPACE_DIR=/workspace
     restart: unless-stopped
 
+  memory-mcp:
+    build:
+      context: ./src/mcp_servers/memory
+      dockerfile: Dockerfile
+    volumes:
+      - ./workspace/memory:/workspace/memory
+    environment:
+      - MEMORY_DIR=/workspace/memory
+    restart: unless-stopped
+
 volumes:
   signal-data:

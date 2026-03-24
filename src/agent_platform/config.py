@@ -40,6 +40,8 @@ def generate_litellm_config(
     adapter_mcp_port: int = 8100,
     fs_mcp_host: str = "workspace-fs-mcp",
     fs_mcp_port: int = 8000,
+    memory_mcp_host: str = "memory-mcp",
+    memory_mcp_port: int = 8001,
 ) -> dict:
     """Generate LiteLLM config.yaml content from agent config."""
     model = config["model"]
@@ -60,6 +62,10 @@ def generate_litellm_config(
         "mcp_servers": {
             "workspace_fs": {
                 "url": f"http://{fs_mcp_host}:{fs_mcp_port}/mcp",
+                "transport": "http",
+            },
+            "memory": {
+                "url": f"http://{memory_mcp_host}:{memory_mcp_port}/mcp",
                 "transport": "http",
             },
             "signal": {
@@ -93,6 +99,7 @@ def build_mcp_tool_declarations(config: dict) -> list[dict]:
     """Build the MCP tool declarations list for chat completion requests."""
     tools = [
         {"type": "mcp", "server_label": "workspace_fs", "require_approval": "never"},
+        {"type": "mcp", "server_label": "memory", "require_approval": "never"},
         {"type": "mcp", "server_label": "signal", "require_approval": "never"},
     ]
     for name in config.get("mcp_servers", {}):
