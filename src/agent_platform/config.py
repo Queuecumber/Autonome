@@ -167,7 +167,7 @@ def cli():
     # Add system prompt callback reference (module.instance_name)
     # LiteLLM imports this from PYTHONPATH — the callbacks dir is mounted in docker-compose
     litellm_config["litellm_settings"] = {
-        "callbacks": "system_prompt.proxy_handler_instance",
+        "callbacks": ["system_prompt.proxy_handler_instance"],
     }
 
     write_litellm_config(litellm_config, output_path)
