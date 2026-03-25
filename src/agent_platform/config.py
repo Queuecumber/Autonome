@@ -103,13 +103,21 @@ def generate_litellm_config(
 
 def build_mcp_tool_declarations(config: dict) -> list[dict]:
     """Build the MCP tool declarations list for chat completion requests."""
+    def _mcp_tool(label: str) -> dict:
+        return {
+            "type": "mcp",
+            "server_label": label,
+            "server_url": "litellm_proxy",
+            "require_approval": "never",
+        }
+
     tools = [
-        {"type": "mcp", "server_label": "workspace_fs", "require_approval": "never"},
-        {"type": "mcp", "server_label": "memory", "require_approval": "never"},
-        {"type": "mcp", "server_label": "signal", "require_approval": "never"},
+        _mcp_tool("workspace_fs"),
+        _mcp_tool("memory"),
+        _mcp_tool("signal"),
     ]
     for name in config.get("mcp_servers", {}):
-        tools.append({"type": "mcp", "server_label": name, "require_approval": "never"})
+        tools.append(_mcp_tool(name))
     return tools
 
 
