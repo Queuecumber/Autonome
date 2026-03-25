@@ -49,14 +49,20 @@ def generate_litellm_config(
     model_name = model["model"]
     api_key = model.get("api_key", "")
 
+    litellm_params: dict[str, Any] = {
+        "model": f"{provider}/{model_name}",
+        "api_key": api_key,
+    }
+    if model.get("api_base"):
+        litellm_params["api_base"] = model["api_base"]
+    if model.get("extra_headers"):
+        litellm_params["extra_headers"] = model["extra_headers"]
+
     litellm_config: dict[str, Any] = {
         "model_list": [
             {
                 "model_name": "main",
-                "litellm_params": {
-                    "model": f"{provider}/{model_name}",
-                    "api_key": api_key,
-                },
+                "litellm_params": litellm_params,
             }
         ],
         "mcp_servers": {
@@ -116,6 +122,23 @@ def write_litellm_config(litellm_config: dict, output_path: Path) -> None:
     )
 
 
+def _convert_env_refs_to_litellm(obj: Any) -> Any:
+    """Convert ${VAR} references to LiteLLM's os.environ/VAR format."""
+    if isinstance(obj, str):
+        return re.sub(r"\$\{(\w+)\}", r"os.environ/\1", obj)
+    if isinstance(obj, dict):
+        return {k: _convert_env_refs_to_litellm(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert_env_refs_to_litellm(item) for item in obj]
+    return obj
+
+
+def load_config_raw(config_path: Path) -> dict:
+    """Load agent.yaml WITHOUT env var substitution (for config generation)."""
+    raw = Path(config_path).read_text()
+    return yaml.safe_load(raw)
+
+
 def cli():
     """CLI entrypoint: generate LiteLLM config from agent.yaml."""
     import sys
@@ -127,8 +150,11 @@ def cli():
         print(f"Error: {config_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    config = load_config(config_path)
+    # Load raw config (no env var substitution) so we can convert
+    # ${VAR} to LiteLLM's os.environ/VAR format in the generated output
+    config = load_config_raw(config_path)
     litellm_config = generate_litellm_config(config)
+    litellm_config = _convert_env_refs_to_litellm(litellm_config)
 
     # Add system prompt callback reference (module.instance_name)
     # LiteLLM imports this from PYTHONPATH — the callbacks dir is mounted in docker-compose
