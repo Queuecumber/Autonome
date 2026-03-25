@@ -1,15 +1,17 @@
-"""Signal inbound listener: polls signal-cli and pushes events to session manager."""
+"""Signal inbound listener: connects to signal-cli WebSocket and pushes events to session manager."""
 
 import asyncio
+import json
 import logging
 
 import httpx
+import websockets
 
 logger = logging.getLogger(__name__)
 
 
 class SignalInbound:
-    """Polls signal-cli for messages and pushes events to the session manager."""
+    """Connects to signal-cli WebSocket for messages and pushes events to the session manager."""
 
     def __init__(
         self,
@@ -24,53 +26,62 @@ class SignalInbound:
         self.allow_from = allow_from or []
         self._http = httpx.AsyncClient(timeout=60)
 
-    async def poll_messages(self) -> None:
-        try:
-            resp = await self._http.get(
-                f"{self.signal_cli_url}/v1/receive/{self.account}",
-            )
-            resp.raise_for_status()
-            messages = resp.json()
-        except Exception as e:
-            logger.error(f"Failed to poll signal-cli: {e}")
+        # Convert http:// to ws:// for WebSocket
+        ws_url = self.signal_cli_url.replace("http://", "ws://").replace("https://", "wss://")
+        self.ws_url = f"{ws_url}/v1/receive/{self.account}"
+
+    async def _handle_envelope(self, envelope: dict) -> None:
+        """Process a single signal-cli envelope and push event to session manager."""
+        data_msg = envelope.get("envelope", {}).get("dataMessage")
+        if not data_msg or not data_msg.get("message"):
             return
 
-        for envelope in messages:
-            data_msg = envelope.get("envelope", {}).get("dataMessage")
-            if not data_msg or not data_msg.get("message"):
-                continue
+        sender = envelope["envelope"].get("source")
+        if self.allow_from and sender not in self.allow_from:
+            logger.debug(f"Ignoring message from unauthorized sender: {sender}")
+            return
 
-            sender = envelope["envelope"].get("source")
-            if self.allow_from and sender not in self.allow_from:
-                logger.debug(f"Ignoring message from unauthorized sender: {sender}")
-                continue
+        text = data_msg["message"]
+        timestamp = str(data_msg.get("timestamp", ""))
 
-            text = data_msg["message"]
-            timestamp = str(data_msg.get("timestamp", ""))
+        event = {
+            "source": "signal",
+            "session_id": sender,
+            "text": text,
+            "metadata": {
+                "message_id": timestamp,
+                "sender": sender,
+            },
+        }
 
-            event = {
-                "source": "signal",
-                "session_id": sender,
-                "text": text,
-                "metadata": {
-                    "message_id": timestamp,
-                    "sender": sender,
-                },
-            }
+        logger.info(f"Received message from {sender}: {text[:50]}...")
 
-            try:
-                await self._http.post(
-                    f"{self.session_manager_url}/event",
-                    json=event,
-                )
-            except Exception as e:
-                logger.error(f"Failed to push event to session manager: {e}")
+        try:
+            await self._http.post(
+                f"{self.session_manager_url}/event",
+                json=event,
+            )
+        except Exception as e:
+            logger.error(f"Failed to push event to session manager: {e}")
 
-    async def run(self, poll_interval: float = 1.0) -> None:
-        logger.info(f"Signal inbound listener started. Account: {self.account}")
+    async def run(self) -> None:
+        """Connect to signal-cli WebSocket and stream messages."""
+        logger.info(f"Signal inbound connecting to {self.ws_url}")
         while True:
-            await self.poll_messages()
-            await asyncio.sleep(poll_interval)
+            try:
+                async with websockets.connect(self.ws_url) as ws:
+                    logger.info("Signal WebSocket connected")
+                    async for raw_msg in ws:
+                        try:
+                            envelope = json.loads(raw_msg)
+                            await self._handle_envelope(envelope)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Non-JSON message from signal-cli: {raw_msg[:100]}")
+                        except Exception as e:
+                            logger.error(f"Error processing envelope: {e}")
+            except Exception as e:
+                logger.error(f"WebSocket connection failed: {e}, reconnecting in 5s...")
+                await asyncio.sleep(5)
 
     async def close(self) -> None:
         await self._http.aclose()
