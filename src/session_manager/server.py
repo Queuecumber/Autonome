@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from agent_platform.callbacks.system_prompt import build_system_message
 from agent_platform.config import build_mcp_tool_declarations
 from agent_platform.session import SessionManager
 
@@ -31,6 +32,7 @@ class SessionOrchestrator:
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
         self.mcp_tools = build_mcp_tool_declarations(config)
+        self.workspace_dir = Path(config.get("workspace", "./workspace"))
 
         self.heartbeat_prompt = config.get("heartbeat", {}).get(
             "prompt", "Check HEARTBEAT.md"
@@ -89,8 +91,10 @@ class SessionOrchestrator:
             # Store clean text in history (no metadata noise on replay)
             stored_msg = {"role": "user", "content": text}
 
-            # Build chat completion request
-            messages = history + [enriched_msg]
+            # Build chat completion request with system prompt
+            system_content = build_system_message(self.workspace_dir)
+            system_msg = [{"role": "system", "content": system_content}] if system_content else []
+            messages = system_msg + history + [enriched_msg]
             payload = {
                 "model": self.model,
                 "messages": messages,
