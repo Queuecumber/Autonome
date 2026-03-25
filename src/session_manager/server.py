@@ -98,6 +98,8 @@ class SessionOrchestrator:
             }
 
             # Call LiteLLM
+            logger.info(f"Sending to LiteLLM: {len(messages)} messages, {len(self.mcp_tools)} tools")
+            logger.debug(f"Tools: {json.dumps(self.mcp_tools)}")
             try:
                 resp = await self._http.post(
                     f"{self.litellm_url}/v1/chat/completions",
@@ -105,6 +107,7 @@ class SessionOrchestrator:
                 )
                 resp.raise_for_status()
                 result = resp.json()
+                logger.info(f"LiteLLM response: {json.dumps(result, indent=2)[:500]}")
             except Exception as e:
                 logger.error(f"LiteLLM request failed: {e}")
                 return None
