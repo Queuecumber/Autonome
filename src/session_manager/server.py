@@ -180,12 +180,18 @@ class SessionOrchestrator:
         metadata = event.get("metadata", {})
 
         async with self._get_lock(source, session_id):
-            # Load session history
+            # Load session history and sanitize empty content fields
             history = self.session.load_truncated(
                 channel=source,
                 session_id=session_id,
                 model=self.model,
             )
+            for msg in history:
+                if not msg.get("content"):
+                    if msg.get("tool_calls"):
+                        msg["content"] = "(calling tools)"
+                    elif msg.get("role") == "assistant":
+                        msg["content"] = "(no text response)"
 
             # Build user message with metadata context
             context_prefix = f"[{source}]"
@@ -253,9 +259,10 @@ class SessionOrchestrator:
 
                 # No tool calls — final response
                 assistant_text = assistant_msg.content or ""
-                all_new_messages.append({"role": "assistant", "content": assistant_text})
+                if assistant_text:
+                    all_new_messages.append({"role": "assistant", "content": assistant_text})
 
-                # Save full exchange to session
+                # Save full exchange to session (skip if only empty messages remain)
                 self.session.append(source, session_id, all_new_messages)
 
                 logger.info(f"Final response: {assistant_text[:200]}")
