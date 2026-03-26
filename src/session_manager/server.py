@@ -233,6 +233,9 @@ class SessionOrchestrator:
                 if choice.finish_reason == "tool_calls" or (assistant_msg.tool_calls and len(assistant_msg.tool_calls) > 0):
                     # Add assistant message (with tool_calls) to conversation
                     assistant_dict = assistant_msg.model_dump()
+                    # Bedrock requires non-empty content even on tool_call messages
+                    if not assistant_dict.get("content"):
+                        assistant_dict["content"] = "(calling tools)"
                     messages.append(assistant_dict)
                     all_new_messages.append(assistant_dict)
 
