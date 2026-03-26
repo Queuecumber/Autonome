@@ -56,6 +56,12 @@ class SignalInbound:
 
         logger.info(f"Received message from {sender}: {text[:50]}...")
 
+        # Send read receipt
+        await self._send_receipt(sender, int(timestamp) if timestamp else 0)
+
+        # Start typing indicator
+        await self._set_typing(sender, True)
+
         try:
             await self._http.post(
                 f"{self.session_manager_url}/event",
@@ -63,6 +69,38 @@ class SignalInbound:
             )
         except Exception as e:
             logger.error(f"Failed to push event to session manager: {e}")
+        finally:
+            # Stop typing indicator (agent's send_message will also implicitly stop it)
+            await self._set_typing(sender, False)
+
+    async def _send_receipt(self, sender: str, timestamp: int) -> None:
+        """Send a read receipt for a message."""
+        if not timestamp:
+            return
+        try:
+            await self._http.post(
+                f"{self.signal_cli_url}/v1/receipts/{self.account}",
+                json={
+                    "receipt_type": "read",
+                    "target_author": sender,
+                    "timestamps": [timestamp],
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Failed to send read receipt: {e}")
+
+    async def _set_typing(self, recipient: str, enabled: bool) -> None:
+        """Send typing indicator start/stop."""
+        try:
+            await self._http.put(
+                f"{self.signal_cli_url}/v1/typing-indicator/{self.account}",
+                json={
+                    "recipient": recipient,
+                    "stop": not enabled,
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Failed to set typing indicator: {e}")
 
     async def run(self) -> None:
         """Connect to signal-cli WebSocket and stream messages."""

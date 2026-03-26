@@ -44,13 +44,22 @@ async def test_handle_envelope_pushes_event(inbound):
 
     await inbound._handle_envelope(envelope)
 
-    inbound._http.post.assert_called_once()
-    call_args = inbound._http.post.call_args
-    assert "/event" in call_args.args[0]
-    event = call_args.kwargs["json"]
+    # Should have: read receipt POST + event POST (and typing PUT calls)
+    post_calls = inbound._http.post.call_args_list
+    event_calls = [c for c in post_calls if "/event" in c.args[0]]
+    receipt_calls = [c for c in post_calls if "/receipts" in c.args[0]]
+
+    assert len(event_calls) == 1
+    event = event_calls[0].kwargs["json"]
     assert event["source"] == "signal"
     assert event["session_id"] == "+11111111111"
     assert event["text"] == "Hello from Signal"
+
+    assert len(receipt_calls) == 1
+
+    # Typing indicator: start + stop
+    put_calls = inbound._http.put.call_args_list
+    assert len(put_calls) == 2  # start + stop
 
 
 @pytest.mark.asyncio
