@@ -111,6 +111,7 @@ class SessionOrchestrator:
         self.api_key = model_config.get("api_key", "")
         self.api_base = model_config.get("api_base")
         self.extra_headers = model_config.get("extra_headers")
+        self.reasoning_effort = model_config.get("reasoning_effort")
 
         session_config = config.get("session", {})
         max_tokens = session_config.get("max_history_tokens", 100000)
@@ -212,18 +213,23 @@ class SessionOrchestrator:
         metadata = event.get("metadata", {})
 
         async with self._get_lock(source, session_id):
-            # Load session history and sanitize empty content fields
-            history = self.session.load_truncated(
+            # Load session history, filter non-conversational entries, sanitize empty content
+            raw_history = self.session.load_truncated(
                 channel=source,
                 session_id=session_id,
                 model=self.model,
             )
-            for msg in history:
+            history = []
+            for msg in raw_history:
+                # Skip thinking entries — they're for logging, not conversation
+                if msg.get("role") == "thinking":
+                    continue
                 if not msg.get("content"):
                     if msg.get("tool_calls"):
                         msg["content"] = "(calling tools)"
                     elif msg.get("role") == "assistant":
                         msg["content"] = "(no text response)"
+                history.append(msg)
 
             # Build user message with metadata context
             context_prefix = f"[{source}]"
@@ -244,6 +250,8 @@ class SessionOrchestrator:
                 "messages": messages,
                 "api_key": self.api_key,
             }
+            if self.reasoning_effort:
+                call_kwargs["reasoning_effort"] = self.reasoning_effort
             if self.api_base:
                 call_kwargs["api_base"] = self.api_base
             if self.extra_headers:
@@ -266,6 +274,14 @@ class SessionOrchestrator:
                 assistant_msg = choice.message
 
                 logger.info(f"LLM response (iter {iteration}): finish_reason={choice.finish_reason}")
+
+                # Capture thinking/reasoning if present (not passed back in history)
+                thinking = getattr(assistant_msg, "thinking", None)
+                if thinking is None:
+                    thinking = getattr(assistant_msg, "reasoning_content", None)
+                if thinking and isinstance(thinking, str) and thinking.strip():
+                    logger.info(f"  Thinking: {thinking[:300]}")
+                    all_new_messages.append({"role": "thinking", "content": thinking})
 
                 # If the model wants to call tools
                 if choice.finish_reason == "tool_calls" or (assistant_msg.tool_calls and len(assistant_msg.tool_calls) > 0):
