@@ -49,6 +49,17 @@ class SignalSender:
         except Exception as e:
             logger.warning(f"Failed to clean up {file_path}: {e}")
 
+    async def send_reaction(self, recipient: str, emoji: str, target_author: str, timestamp: int) -> None:
+        await self._http.post(
+            f"{self.signal_cli_url}/v1/reactions/{self.account}",
+            json={
+                "reaction": emoji,
+                "recipient": recipient,
+                "target_author": target_author,
+                "timestamp": timestamp,
+            },
+        )
+
     async def send_receipt(self, sender: str, timestamp: int) -> None:
         await self._http.post(
             f"{self.signal_cli_url}/v1/receipts/{self.account}",
@@ -108,9 +119,13 @@ def create_signal_mcp(sender: SignalSender) -> FastMCP:
             return f"Error sending attachment: {e}"
 
     @mcp.tool
-    async def react(message_id: str, emoji: str) -> str:
-        """React to a message with an emoji."""
-        return f"Reacted with {emoji} to {message_id} (stub — signal-cli wiring TODO)"
+    async def react(recipient: str, emoji: str, target_author: str, message_timestamp: int) -> str:
+        """React to a message with an emoji. target_author is who sent the message, message_timestamp identifies which message."""
+        try:
+            await sender.send_reaction(recipient, emoji, target_author, message_timestamp)
+            return f"Reacted with {emoji}"
+        except Exception as e:
+            return f"Error reacting: {e}"
 
     @mcp.tool
     async def read_receipt(message_sender: str, message_timestamp: int) -> str:
