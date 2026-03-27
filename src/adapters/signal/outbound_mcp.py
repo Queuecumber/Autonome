@@ -1,4 +1,4 @@
-"""Signal outbound MCP server: tools for sending messages, attachments, reactions."""
+"""Signal outbound MCP server: tools for sending messages, attachments, reactions, receipts, typing."""
 
 import base64
 import logging
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class SignalSender:
-    """Handles sending messages via signal-cli REST API."""
+    """Handles sending messages and signals via signal-cli REST API."""
 
     def __init__(self, signal_cli_url: str, account: str):
         self.signal_cli_url = signal_cli_url.rstrip("/")
@@ -49,6 +49,25 @@ class SignalSender:
         except Exception as e:
             logger.warning(f"Failed to clean up {file_path}: {e}")
 
+    async def send_receipt(self, sender: str, timestamp: int) -> None:
+        await self._http.post(
+            f"{self.signal_cli_url}/v1/receipts/{self.account}",
+            json={
+                "receipt_type": "read",
+                "target_author": sender,
+                "timestamps": [timestamp],
+            },
+        )
+
+    async def set_typing(self, recipient: str, stop: bool = False) -> None:
+        await self._http.put(
+            f"{self.signal_cli_url}/v1/typing-indicator/{self.account}",
+            json={
+                "recipient": recipient,
+                "stop": stop,
+            },
+        )
+
     async def close(self) -> None:
         await self._http.aclose()
 
@@ -59,7 +78,9 @@ def create_signal_mcp(sender: SignalSender) -> FastMCP:
         "Signal messaging. Use these tools to communicate with users on Signal. "
         "You must call send_message to deliver responses — text you generate without "
         "calling send_message is not seen by anyone. The recipient is the phone number "
-        "from the event metadata."
+        "from the event metadata. "
+        "When you receive a message, send a read_receipt to acknowledge it, then "
+        "start the typing_indicator before composing your response."
     ))
 
     @mcp.tool
@@ -85,12 +106,25 @@ def create_signal_mcp(sender: SignalSender) -> FastMCP:
     @mcp.tool
     async def react(message_id: str, emoji: str) -> str:
         """React to a message with an emoji."""
-        return f"Reacted with {emoji} to {message_id} (stub)"
+        return f"Reacted with {emoji} to {message_id} (stub — signal-cli wiring TODO)"
 
     @mcp.tool
-    async def set_typing(recipient: str, enabled: bool) -> str:
-        """Show or hide the typing indicator for a recipient."""
-        status = "started" if enabled else "stopped"
-        return f"Typing {status} for {recipient} (stub)"
+    async def read_receipt(sender: str, message_timestamp: int) -> str:
+        """Send a read receipt for a message. Call this when you've read a message."""
+        try:
+            await sender.send_receipt(sender, message_timestamp)
+            return f"Read receipt sent to {sender}"
+        except Exception as e:
+            return f"Error sending read receipt: {e}"
+
+    @mcp.tool
+    async def typing_indicator(recipient: str, stop: bool = False) -> str:
+        """Show or hide the typing indicator. Call with stop=False before composing, stop=True when done."""
+        try:
+            await sender.set_typing(recipient, stop=stop)
+            status = "stopped" if stop else "started"
+            return f"Typing indicator {status} for {recipient}"
+        except Exception as e:
+            return f"Error setting typing indicator: {e}"
 
     return mcp

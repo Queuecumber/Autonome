@@ -32,4 +32,5 @@ async def test_mcp_has_expected_tools():
     assert "send_message" in tool_names
     assert "send_attachment" in tool_names
     assert "react" in tool_names
-    assert "set_typing" in tool_names
+    assert "read_receipt" in tool_names
+    assert "typing_indicator" in tool_names
