@@ -109,11 +109,11 @@ def create_signal_mcp(sender: SignalSender) -> FastMCP:
         return f"Reacted with {emoji} to {message_id} (stub — signal-cli wiring TODO)"
 
     @mcp.tool
-    async def read_receipt(sender: str, message_timestamp: int) -> str:
+    async def read_receipt(message_sender: str, message_timestamp: int) -> str:
         """Send a read receipt for a message. Call this when you've read a message."""
         try:
-            await sender.send_receipt(sender, message_timestamp)
-            return f"Read receipt sent to {sender}"
+            await sender.send_receipt(message_sender, message_timestamp)
+            return f"Read receipt sent to {message_sender}"
         except Exception as e:
             return f"Error sending read receipt: {e}"
 
