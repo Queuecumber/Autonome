@@ -11,7 +11,11 @@ from fastmcp import FastMCP
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
-mcp = FastMCP("workspace-fs")
+mcp = FastMCP("workspace-fs", instructions=(
+    "Workspace filesystem access. Contains your personality files (SOUL.md, USER.md, etc.), "
+    "configuration (HEARTBEAT.md, TOOLS.md), and other workspace files. "
+    "Use at startup to read your identity and context. Paths are relative to workspace root."
+))
 
 
 def _safe_resolve(path: str) -> Path | None:

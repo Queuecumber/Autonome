@@ -55,7 +55,12 @@ class SignalSender:
 
 def create_signal_mcp(sender: SignalSender) -> FastMCP:
     """Create the Signal outbound MCP server."""
-    mcp = FastMCP("signal")
+    mcp = FastMCP("signal", instructions=(
+        "Signal messaging. Use these tools to communicate with users on Signal. "
+        "You must call send_message to deliver responses — text you generate without "
+        "calling send_message is not seen by anyone. The recipient is the phone number "
+        "from the event metadata."
+    ))
 
     @mcp.tool
     async def send_message(recipient: str, text: str) -> str:

@@ -26,39 +26,58 @@ logger = logging.getLogger(__name__)
 class MCPConnection:
     """Manages a persistent connection to an MCP server."""
 
-    def __init__(self, name: str, url: str):
+    def __init__(self, name: str, url: str, prefix: str = "aptool"):
         self.name = name
         self.url = url
+        self.prefix = prefix
         self.session: ClientSession | None = None
         self.tools: list[dict] = []
+        self.instructions: str = ""
+        # Maps prefixed name → original MCP tool name
+        self._original_names: dict[str, str] = {}
         self._context = None
         self._read = None
         self._write = None
 
     async def connect(self) -> None:
-        """Establish connection and discover tools."""
+        """Establish connection, get server instructions, and discover tools."""
         from litellm.experimental_mcp_client import load_mcp_tools
 
         self._context = streamablehttp_client(self.url)
         self._read, self._write, _ = await self._context.__aenter__()
         self.session = ClientSession(self._read, self._write)
         await self.session.__aenter__()
-        await self.session.initialize()
+        init_result = await self.session.initialize()
 
-        # Discover tools in OpenAI format
-        self.tools = await load_mcp_tools(session=self.session, format="openai")
-        logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools discovered")
+        # Grab server instructions if available
+        if hasattr(init_result, "instructions") and init_result.instructions:
+            self.instructions = init_result.instructions
+
+        # Discover tools in OpenAI format and prefix names
+        raw_tools = await load_mcp_tools(session=self.session, format="openai")
+        self.tools = []
+        for t in raw_tools:
+            original_name = t["function"]["name"]
+            prefixed_name = f"{self.prefix}-{self.name}-{original_name}"
+            self._original_names[prefixed_name] = original_name
+            t["function"]["name"] = prefixed_name
+            self.tools.append(t)
+
+        logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools, instructions={'yes' if self.instructions else 'no'}")
         for t in self.tools:
             logger.info(f"  - {t['function']['name']}")
 
-    async def call_tool(self, name: str, arguments: str) -> str:
+    async def call_tool(self, prefixed_name: str, arguments: str) -> str:
         """Execute a tool call and return the result as a string."""
         if self.session is None:
             return f"Error: MCP server {self.name} not connected"
 
+        # Map prefixed name back to original MCP tool name
+        original_name = self._original_names.get(prefixed_name, prefixed_name)
+
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
-            result = await self.session.call_tool(name, args)
+            result = await self.session.call_tool(original_name, args)
             # Extract text content from MCP result
             parts = []
             for content in result.content:
@@ -149,11 +168,24 @@ class SessionOrchestrator:
         return self._locks[key]
 
     def _build_system_prompt(self) -> str:
-        """Read AGENTS.md from workspace for system prompt. Agent bootstraps the rest itself."""
+        """Build system prompt from AGENTS.md + MCP server instructions."""
+        parts = []
+
+        # AGENTS.md — the agent's operating instructions
         agents_path = self.workspace_dir / "AGENTS.md"
         if agents_path.exists():
-            return agents_path.read_text()
-        return ""
+            parts.append(agents_path.read_text())
+
+        # MCP server instructions — auto-injected descriptions of available tool groups
+        server_docs = []
+        for conn in self.mcp_connections.values():
+            if conn.instructions:
+                tool_names = ", ".join(t["function"]["name"] for t in conn.tools)
+                server_docs.append(f"### {conn.name}\n{conn.instructions}\nTools: {tool_names}")
+        if server_docs:
+            parts.append("## Available Tool Servers\n\n" + "\n\n".join(server_docs))
+
+        return "\n\n".join(parts)
 
     async def _execute_tool_call(self, tool_call) -> dict:
         """Execute a single tool call via the appropriate MCP server."""

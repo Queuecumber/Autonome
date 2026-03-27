@@ -14,7 +14,12 @@ from fastmcp import FastMCP
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/workspace/memory")).resolve()
 
-mcp = FastMCP("memory")
+mcp = FastMCP("memory", instructions=(
+    "Your long-term memory system. Daily entries are stored by date (YYYY-MM-DD), "
+    "and a global MEMORY.md serves as your curated long-term index. "
+    "Read recent daily memories and global memory at startup for context. "
+    "Write memories to preserve important events, decisions, and learnings."
+))
 
 
 def _safe_date_path(date_str: str) -> Path | None:
