@@ -54,8 +54,8 @@ class SignalSender:
             f"{self.signal_cli_url}/v1/receipts/{self.account}",
             json={
                 "receipt_type": "read",
-                "target_author": sender,
-                "timestamps": [timestamp],
+                "recipient": sender,
+                "timestamp": timestamp,
             },
         )
 
