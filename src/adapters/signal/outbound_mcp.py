@@ -85,7 +85,11 @@ def create_signal_mcp(sender: SignalSender) -> FastMCP:
 
     @mcp.tool
     async def send_message(recipient: str, text: str) -> str:
-        """Send a text message to a recipient on Signal."""
+        """Send a text message to a recipient on Signal. Automatically stops typing indicator."""
+        try:
+            await sender.set_typing(recipient, stop=True)
+        except Exception:
+            pass
         try:
             await sender.send_text(recipient, text)
             return f"Sent message to {recipient}"
