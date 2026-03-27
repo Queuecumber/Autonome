@@ -221,14 +221,17 @@ class SessionOrchestrator:
             )
             history = []
             for msg in raw_history:
-                # Skip thinking entries — they're for logging, not conversation
-                if msg.get("role") == "thinking":
+                # Skip non-conversational entries
+                if msg.get("role") not in ("user", "assistant", "tool", "system"):
                     continue
                 if not msg.get("content"):
                     if msg.get("tool_calls"):
                         msg["content"] = "(calling tools)"
                     elif msg.get("role") == "assistant":
                         msg["content"] = "(no text response)"
+                # Strip thinking/provider fields before passing to model
+                for key in ("reasoning_content", "thinking_blocks", "provider_specific_fields", "function_call"):
+                    msg.pop(key, None)
                 history.append(msg)
 
             # Build user message with metadata context
@@ -275,14 +278,6 @@ class SessionOrchestrator:
                 assistant_msg = choice.message
 
                 logger.info(f"LLM response (iter {iteration}): finish_reason={choice.finish_reason}")
-
-                # Capture thinking/reasoning if present (not passed back in history)
-                thinking = getattr(assistant_msg, "thinking", None)
-                if thinking is None:
-                    thinking = getattr(assistant_msg, "reasoning_content", None)
-                if thinking and isinstance(thinking, str) and thinking.strip():
-                    logger.info(f"  Thinking: {thinking[:300]}")
-                    all_new_messages.append({"role": "thinking", "content": thinking})
 
                 # If the model wants to call tools
                 if choice.finish_reason == "tool_calls" or (assistant_msg.tool_calls and len(assistant_msg.tool_calls) > 0):
