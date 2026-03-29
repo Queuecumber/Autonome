@@ -1,7 +1,7 @@
 """Session manager: central orchestrator that receives events and drives LLM calls.
 
-Uses litellm as a library (not proxy) for model calls, and connects to MCP
-servers directly for tool discovery and execution.
+Sends requests to LiteLLM proxy which handles model routing, MCP tool discovery,
+tool execution loop, and returns the final response.
 """
 
 import asyncio
@@ -10,114 +10,32 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import litellm
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from agent_platform.config import build_mcp_tool_declarations
 from agent_platform.session import SessionManager
 
 logger = logging.getLogger(__name__)
 
 
-class MCPConnection:
-    """Manages a persistent connection to an MCP server."""
-
-    def __init__(self, name: str, url: str, prefix: str = "aptool"):
-        self.name = name
-        self.url = url
-        self.prefix = prefix
-        self.session: ClientSession | None = None
-        self.tools: list[dict] = []
-        self.instructions: str = ""
-        # Maps prefixed name → original MCP tool name
-        self._original_names: dict[str, str] = {}
-        self._context = None
-        self._read = None
-        self._write = None
-
-    async def connect(self) -> None:
-        """Establish connection, get server instructions, and discover tools."""
-        from litellm.experimental_mcp_client import load_mcp_tools
-
-        self._context = streamablehttp_client(self.url)
-        self._read, self._write, _ = await self._context.__aenter__()
-        self.session = ClientSession(self._read, self._write)
-        await self.session.__aenter__()
-        init_result = await self.session.initialize()
-
-        # Grab server instructions if available
-        if hasattr(init_result, "instructions") and init_result.instructions:
-            self.instructions = init_result.instructions
-
-        # Discover tools in OpenAI format and prefix names
-        raw_tools = await load_mcp_tools(session=self.session, format="openai")
-        self.tools = []
-        for t in raw_tools:
-            original_name = t["function"]["name"]
-            prefixed_name = f"{self.prefix}-{self.name}-{original_name}"
-            self._original_names[prefixed_name] = original_name
-            t["function"]["name"] = prefixed_name
-            self.tools.append(t)
-
-        logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools, instructions={'yes' if self.instructions else 'no'}")
-        for t in self.tools:
-            logger.info(f"  - {t['function']['name']}")
-
-    async def call_tool(self, prefixed_name: str, arguments: str) -> str:
-        """Execute a tool call and return the result as a string."""
-        if self.session is None:
-            return f"Error: MCP server {self.name} not connected"
-
-        # Map prefixed name back to original MCP tool name
-        original_name = self._original_names.get(prefixed_name, prefixed_name)
-
-        try:
-            args = json.loads(arguments) if isinstance(arguments, str) else arguments
-            result = await self.session.call_tool(original_name, args)
-            # Extract text content from MCP result
-            parts = []
-            for content in result.content:
-                if hasattr(content, "text"):
-                    parts.append(content.text)
-                else:
-                    parts.append(str(content))
-            return "\n".join(parts) if parts else ""
-        except Exception as e:
-            logger.error(f"MCP [{self.name}] tool {name} failed: {e}")
-            return f"Error: {e}"
-
-    async def close(self) -> None:
-        if self.session:
-            await self.session.__aexit__(None, None, None)
-        if self._context:
-            await self._context.__aexit__(None, None, None)
-
-
 class SessionOrchestrator:
-    """Receives events from adapters, maintains session history, drives LLM calls."""
+    """Receives events from adapters, maintains session history, calls LiteLLM proxy."""
 
-    def __init__(self, config: dict, session_dir: Path):
+    def __init__(self, config: dict, litellm_url: str, session_dir: Path):
         self.config = config
-
-        # Model config for litellm
-        model_config = config["model"]
-        provider = model_config["provider"]
-        model_name = model_config["model"]
-        self.model = f"{provider}/{model_name}"
-        self.api_key = model_config.get("api_key", "")
-        self.api_base = model_config.get("api_base")
-        self.extra_headers = model_config.get("extra_headers")
-        self.reasoning_effort = model_config.get("reasoning_effort")
+        self.litellm_url = litellm_url.rstrip("/")
 
         session_config = config.get("session", {})
         max_tokens = session_config.get("max_history_tokens", 100000)
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
+        self.mcp_tools = build_mcp_tool_declarations(config)
         self.workspace_dir = Path(config.get("workspace", "./workspace"))
+        self.model = "main"
 
         self.heartbeat_prompt = config.get("heartbeat", {}).get(
             "prompt", "Check HEARTBEAT.md"
@@ -133,34 +51,7 @@ class SessionOrchestrator:
         # Per-session locks for concurrency safety
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-        # MCP connections (populated by connect_mcp_servers)
-        self.mcp_connections: dict[str, MCPConnection] = {}
-        self.openai_tools: list[dict] = []
-        # Map tool name → MCP connection for routing tool calls
-        self._tool_to_mcp: dict[str, MCPConnection] = {}
-
-        # Max tool call iterations to prevent infinite loops
-        self.max_tool_iterations = 20
-
-    async def connect_mcp_servers(self, mcp_urls: dict[str, str]) -> None:
-        """Connect to all MCP servers and discover tools.
-
-        Args:
-            mcp_urls: mapping of server name → URL (e.g. {"workspace_fs": "http://...:8000/mcp"})
-        """
-        for name, url in mcp_urls.items():
-            conn = MCPConnection(name, url)
-            try:
-                await conn.connect()
-                self.mcp_connections[name] = conn
-                for tool in conn.tools:
-                    tool_name = tool["function"]["name"]
-                    self.openai_tools.append(tool)
-                    self._tool_to_mcp[tool_name] = conn
-            except Exception as e:
-                logger.error(f"Failed to connect to MCP server {name} at {url}: {e}")
-
-        logger.info(f"Connected to {len(self.mcp_connections)} MCP servers, {len(self.openai_tools)} tools total")
+        self._http = httpx.AsyncClient(timeout=300)
 
     def _get_lock(self, channel: str, session_id: str) -> asyncio.Lock:
         key = (channel, session_id)
@@ -169,41 +60,11 @@ class SessionOrchestrator:
         return self._locks[key]
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt from AGENTS.md + MCP server instructions."""
-        parts = []
-
-        # AGENTS.md — the agent's operating instructions
+        """Read AGENTS.md from workspace for system prompt. Agent bootstraps the rest itself."""
         agents_path = self.workspace_dir / "AGENTS.md"
         if agents_path.exists():
-            parts.append(agents_path.read_text())
-
-        # MCP server instructions — auto-injected descriptions of available tool groups
-        server_docs = []
-        for conn in self.mcp_connections.values():
-            if conn.instructions:
-                tool_names = ", ".join(t["function"]["name"] for t in conn.tools)
-                server_docs.append(f"### {conn.name}\n{conn.instructions}\nTools: {tool_names}")
-        if server_docs:
-            parts.append("## Available Tool Servers\n\n" + "\n\n".join(server_docs))
-
-        return "\n\n".join(parts)
-
-    async def _execute_tool_call(self, tool_call) -> dict:
-        """Execute a single tool call via the appropriate MCP server."""
-        func = tool_call.function
-        tool_name = func.name
-        conn = self._tool_to_mcp.get(tool_name)
-
-        if conn is None:
-            result_text = f"Error: unknown tool '{tool_name}'"
-        else:
-            result_text = await conn.call_tool(tool_name, func.arguments)
-
-        return {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": result_text,
-        }
+            return agents_path.read_text()
+        return ""
 
     async def handle_event(self, event: dict[str, Any]) -> str | None:
         """Process an inbound event from any adapter."""
@@ -217,11 +78,10 @@ class SessionOrchestrator:
             raw_history = self.session.load_truncated(
                 channel=source,
                 session_id=session_id,
-                model=self.model,
+                model=self.config["model"]["model"],
             )
             history = []
             for msg in raw_history:
-                # Skip non-conversational entries
                 if msg.get("role") not in ("user", "assistant", "tool", "system"):
                     continue
                 if not msg.get("content"):
@@ -229,7 +89,6 @@ class SessionOrchestrator:
                         msg["content"] = "(calling tools)"
                     elif msg.get("role") == "assistant":
                         msg["content"] = "(no text response)"
-                # Strip thinking/provider fields before passing to model
                 for key in ("reasoning_content", "thinking_blocks", "provider_specific_fields", "function_call"):
                     msg.pop(key, None)
                 history.append(msg)
@@ -247,75 +106,37 @@ class SessionOrchestrator:
             system_msg = [{"role": "system", "content": system_content}] if system_content else []
             messages = system_msg + history + [enriched_msg]
 
-            # Build litellm call kwargs
-            call_kwargs: dict[str, Any] = {
+            # Build request payload — proxy handles MCP tool discovery and execution loop
+            payload: dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
-                "api_key": self.api_key,
+                "tools": self.mcp_tools,
             }
-            if self.reasoning_effort:
-                call_kwargs["reasoning_effort"] = self.reasoning_effort
-                call_kwargs["allowed_openai_params"] = ["reasoning_effort"]
-            if self.api_base:
-                call_kwargs["api_base"] = self.api_base
-            if self.extra_headers:
-                call_kwargs["extra_headers"] = self.extra_headers
-            if self.openai_tools:
-                call_kwargs["tools"] = self.openai_tools
 
-            logger.info(f"Calling LLM: {len(messages)} messages, {len(self.openai_tools)} tools")
+            logger.info(f"Calling LiteLLM proxy: {len(messages)} messages, {len(self.mcp_tools)} MCP tool declarations")
 
-            # Tool execution loop
-            all_new_messages = [stored_msg]
-            for iteration in range(self.max_tool_iterations):
-                try:
-                    response = await litellm.acompletion(**call_kwargs)
-                except Exception as e:
-                    logger.error(f"LLM call failed: {e}")
-                    return None
+            try:
+                resp = await self._http.post(
+                    f"{self.litellm_url}/v1/chat/completions",
+                    json=payload,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+            except Exception as e:
+                logger.error(f"LiteLLM proxy request failed: {e}")
+                return None
 
-                choice = response.choices[0]
-                assistant_msg = choice.message
+            assistant_msg = result["choices"][0]["message"]
+            assistant_text = assistant_msg.get("content", "")
 
-                logger.info(f"LLM response (iter {iteration}): finish_reason={choice.finish_reason}")
+            # Save exchange to session
+            all_messages = [stored_msg]
+            if assistant_text:
+                all_messages.append({"role": "assistant", "content": assistant_text})
+            self.session.append(source, session_id, all_messages)
 
-                # If the model wants to call tools
-                if choice.finish_reason == "tool_calls" or (assistant_msg.tool_calls and len(assistant_msg.tool_calls) > 0):
-                    # Add assistant message (with tool_calls) to conversation
-                    assistant_dict = assistant_msg.model_dump()
-                    # Bedrock requires non-empty content even on tool_call messages
-                    if not assistant_dict.get("content"):
-                        assistant_dict["content"] = "(calling tools)"
-                    messages.append(assistant_dict)
-                    all_new_messages.append(assistant_dict)
-
-                    # Execute each tool call
-                    for tool_call in assistant_msg.tool_calls:
-                        logger.info(f"  Tool call: {tool_call.function.name}({tool_call.function.arguments[:100]})")
-                        tool_result = await self._execute_tool_call(tool_call)
-                        logger.info(f"  Result: {tool_result['content'][:200]}")
-                        messages.append(tool_result)
-                        all_new_messages.append(tool_result)
-
-                    # Update call_kwargs with extended messages for next iteration
-                    call_kwargs["messages"] = messages
-                    continue
-
-                # No tool calls — final response
-                assistant_text = assistant_msg.content or ""
-                if assistant_text:
-                    all_new_messages.append({"role": "assistant", "content": assistant_text})
-
-                # Save full exchange to session (skip if only empty messages remain)
-                self.session.append(source, session_id, all_new_messages)
-
-                logger.info(f"Final response: {assistant_text[:200]}")
-                return assistant_text
-
-            # Max iterations reached
-            logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
-            self.session.append(source, session_id, all_new_messages)
-            return None
+            logger.info(f"Response: {assistant_text[:200]}")
+            return assistant_text
 
     async def handle_heartbeat(self) -> str | None:
         """Process a heartbeat routed to the primary contact's session."""
@@ -328,8 +149,7 @@ class SessionOrchestrator:
         return await self.handle_event(event)
 
     async def close(self) -> None:
-        for conn in self.mcp_connections.values():
-            await conn.close()
+        await self._http.aclose()
 
 
 def create_app(orchestrator: SessionOrchestrator) -> Starlette:

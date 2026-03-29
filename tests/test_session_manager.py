@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from starlette.testclient import TestClient
@@ -38,37 +38,29 @@ def orchestrator_config(tmp_workspace):
     }
 
 
-def _mock_llm_response(content="I'll handle it!", tool_calls=None):
-    """Create a mock litellm response."""
-    message = MagicMock()
-    message.content = content
-    message.tool_calls = tool_calls or []
-    message.model_dump = MagicMock(return_value={
-        "role": "assistant",
-        "content": content,
-        "tool_calls": [tc.model_dump() for tc in (tool_calls or [])] if tool_calls else None,
+def _mock_proxy_response(content="I'll handle it!"):
+    """Create a mock httpx response mimicking LiteLLM proxy."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value={
+        "choices": [{"message": {"role": "assistant", "content": content}}],
     })
-
-    choice = MagicMock()
-    choice.message = message
-    choice.finish_reason = "tool_calls" if tool_calls else "stop"
-
-    response = MagicMock()
-    response.choices = [choice]
-    return response
+    return resp
 
 
 @pytest.fixture
 def orchestrator(orchestrator_config, tmp_path):
     return SessionOrchestrator(
         config=orchestrator_config,
+        litellm_url="http://localhost:4000",
         session_dir=tmp_path / "sessions",
     )
 
 
 def test_orchestrator_init(orchestrator):
-    assert orchestrator.model == "anthropic/claude-opus-4-6"
-    assert orchestrator.api_key == "test-key"
+    assert orchestrator.litellm_url == "http://localhost:4000"
+    assert len(orchestrator.mcp_tools) >= 1
 
 
 def test_heartbeat_routes_to_primary_contact(orchestrator):
@@ -77,9 +69,9 @@ def test_heartbeat_routes_to_primary_contact(orchestrator):
 
 
 @pytest.mark.asyncio
-@patch("session_manager.server.litellm")
-async def test_handle_event(mock_litellm, orchestrator):
-    mock_litellm.acompletion = AsyncMock(return_value=_mock_llm_response("I'll handle it!"))
+async def test_handle_event(orchestrator):
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(return_value=_mock_proxy_response())
 
     event = {
         "source": "signal",
@@ -99,10 +91,10 @@ async def test_handle_event(mock_litellm, orchestrator):
 
 
 @pytest.mark.asyncio
-@patch("session_manager.server.litellm")
-async def test_handle_event_sends_enriched_to_llm(mock_litellm, orchestrator):
-    """The LLM request includes metadata context."""
-    mock_litellm.acompletion = AsyncMock(return_value=_mock_llm_response())
+async def test_handle_event_sends_enriched_to_proxy(orchestrator):
+    """The proxy request includes metadata context."""
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(return_value=_mock_proxy_response())
 
     event = {
         "source": "signal",
@@ -113,23 +105,27 @@ async def test_handle_event_sends_enriched_to_llm(mock_litellm, orchestrator):
 
     await orchestrator.handle_event(event)
 
-    # Check what was sent to litellm
-    call_kwargs = mock_litellm.acompletion.call_args.kwargs
-    last_msg = call_kwargs["messages"][-1]
+    call_kwargs = orchestrator._http.post.call_args.kwargs
+    payload = call_kwargs["json"]
+    last_msg = payload["messages"][-1]
     assert "signal" in last_msg["content"]
     assert "ts_456" in last_msg["content"]
     assert "Hey" in last_msg["content"]
+    # Verify MCP tools are included
+    assert "tools" in payload
+    assert len(payload["tools"]) >= 1
 
 
 @pytest.mark.asyncio
-@patch("session_manager.server.litellm")
-async def test_handle_heartbeat(mock_litellm, orchestrator):
-    mock_litellm.acompletion = AsyncMock(return_value=_mock_llm_response())
+async def test_handle_heartbeat(orchestrator):
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(return_value=_mock_proxy_response())
 
     await orchestrator.handle_heartbeat()
 
-    call_kwargs = mock_litellm.acompletion.call_args.kwargs
-    last_msg = call_kwargs["messages"][-1]
+    call_kwargs = orchestrator._http.post.call_args.kwargs
+    payload = call_kwargs["json"]
+    last_msg = payload["messages"][-1]
     assert "HEARTBEAT" in last_msg["content"]
 
     history = orchestrator.session.load("signal", "+11111111111")
@@ -137,9 +133,9 @@ async def test_handle_heartbeat(mock_litellm, orchestrator):
 
 
 @pytest.mark.asyncio
-@patch("session_manager.server.litellm")
-async def test_handle_event_returns_none_on_failure(mock_litellm, orchestrator):
-    mock_litellm.acompletion = AsyncMock(side_effect=Exception("connection refused"))
+async def test_handle_event_returns_none_on_failure(orchestrator):
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(side_effect=Exception("connection refused"))
 
     event = {
         "source": "signal",
@@ -153,12 +149,11 @@ async def test_handle_event_returns_none_on_failure(mock_litellm, orchestrator):
 
 
 @pytest.mark.asyncio
-@patch("session_manager.server.litellm")
-async def test_system_prompt_is_agents_md_only(mock_litellm, orchestrator, tmp_workspace):
-    """Only AGENTS.md is injected as system prompt, not all workspace *.md files."""
-    mock_litellm.acompletion = AsyncMock(return_value=_mock_llm_response())
+async def test_system_prompt_is_agents_md_only(orchestrator, tmp_workspace):
+    """Only AGENTS.md is injected as system prompt."""
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(return_value=_mock_proxy_response())
 
-    # Create AGENTS.md in workspace
     (tmp_workspace / "AGENTS.md").write_text("# You are an agent\nUse tools to respond.")
 
     event = {
@@ -170,17 +165,17 @@ async def test_system_prompt_is_agents_md_only(mock_litellm, orchestrator, tmp_w
 
     await orchestrator.handle_event(event)
 
-    call_kwargs = mock_litellm.acompletion.call_args.kwargs
-    system_msg = call_kwargs["messages"][0]
+    call_kwargs = orchestrator._http.post.call_args.kwargs
+    payload = call_kwargs["json"]
+    system_msg = payload["messages"][0]
     assert system_msg["role"] == "system"
     assert "You are an agent" in system_msg["content"]
-    # Should NOT include SOUL.md or USER.md content (agent reads those itself)
     assert "I am a test agent" not in system_msg["content"]
 
 
-@patch("session_manager.server.litellm")
-def test_http_event_endpoint(mock_litellm, orchestrator):
-    mock_litellm.acompletion = AsyncMock(return_value=_mock_llm_response())
+def test_http_event_endpoint(orchestrator):
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(return_value=_mock_proxy_response())
 
     app = create_app(orchestrator)
     client = TestClient(app)
@@ -195,9 +190,9 @@ def test_http_event_endpoint(mock_litellm, orchestrator):
     assert "response" in resp.json()
 
 
-@patch("session_manager.server.litellm")
-def test_http_event_endpoint_returns_502_on_failure(mock_litellm, orchestrator):
-    mock_litellm.acompletion = AsyncMock(side_effect=Exception("fail"))
+def test_http_event_endpoint_returns_502_on_failure(orchestrator):
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(side_effect=Exception("fail"))
 
     app = create_app(orchestrator)
     client = TestClient(app)
@@ -211,9 +206,9 @@ def test_http_event_endpoint_returns_502_on_failure(mock_litellm, orchestrator):
     assert resp.status_code == 502
 
 
-@patch("session_manager.server.litellm")
-def test_http_heartbeat_endpoint(mock_litellm, orchestrator):
-    mock_litellm.acompletion = AsyncMock(return_value=_mock_llm_response())
+def test_http_heartbeat_endpoint(orchestrator):
+    orchestrator._http = AsyncMock()
+    orchestrator._http.post = AsyncMock(return_value=_mock_proxy_response())
 
     app = create_app(orchestrator)
     client = TestClient(app)
