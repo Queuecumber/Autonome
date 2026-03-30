@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-import litellm
+try:
+    import litellm
+except ImportError:
+    litellm = None
 
 
 class SessionManager:
@@ -65,8 +68,11 @@ class SessionManager:
         return exchanges
 
     def _count_tokens(self, messages: list[dict], model: str) -> int:
-        try:
-            return litellm.token_counter(model=model, messages=messages)
-        except Exception:
-            total_chars = sum(len(str(m.get("content", ""))) for m in messages)
-            return total_chars // 4
+        if litellm is not None:
+            try:
+                return litellm.token_counter(model=model, messages=messages)
+            except Exception:
+                pass
+        # Fallback: rough estimate of 4 chars per token
+        total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        return total_chars // 4
