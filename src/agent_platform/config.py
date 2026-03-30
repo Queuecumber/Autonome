@@ -164,12 +164,6 @@ def cli():
     litellm_config = generate_litellm_config(config)
     litellm_config = _convert_env_refs_to_litellm(litellm_config)
 
-    # Add system prompt callback reference (module.instance_name)
-    # LiteLLM imports this from PYTHONPATH — the callbacks dir is mounted in docker-compose
-    litellm_config["litellm_settings"] = {
-        "callbacks": ["system_prompt.proxy_handler_instance"],
-    }
-
     write_litellm_config(litellm_config, output_path)
     print(f"Generated LiteLLM config at {output_path}")
 
