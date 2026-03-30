@@ -140,6 +140,10 @@ class SessionOrchestrator:
                 )
                 resp.raise_for_status()
                 result = resp.json()
+                logger.info(f"Response payload: {json.dumps(result, indent=2, default=str)[:2000]}")
+            except httpx.HTTPStatusError as e:
+                logger.error(f"LiteLLM proxy request failed ({e.response.status_code}): {e.response.text[:500]}")
+                return None
             except Exception as e:
                 logger.error(f"LiteLLM proxy request failed: {e}")
                 return None
