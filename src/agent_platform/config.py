@@ -69,14 +69,17 @@ def generate_litellm_config(
             "workspace_fs": {
                 "url": f"http://{fs_mcp_host}:{fs_mcp_port}/mcp",
                 "transport": "http",
+                "allow_all_keys": True,
             },
             "memory": {
                 "url": f"http://{memory_mcp_host}:{memory_mcp_port}/mcp",
                 "transport": "http",
+                "allow_all_keys": True,
             },
             "signal": {
                 "url": f"http://{adapter_host}:{adapter_mcp_port}/mcp",
                 "transport": "http",
+                "allow_all_keys": True,
             },
         },
     }
@@ -96,6 +99,7 @@ def generate_litellm_config(
                 entry["args"] = server_config["args"]
             if "env" in server_config:
                 entry["env"] = server_config["env"]
+        entry["allow_all_keys"] = True
         litellm_config["mcp_servers"][name] = entry
 
     return litellm_config
