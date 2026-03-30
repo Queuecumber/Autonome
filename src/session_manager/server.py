@@ -1,7 +1,8 @@
 """Session manager: central orchestrator that receives events and drives LLM calls.
 
-Sends requests to LiteLLM proxy which handles model routing, MCP tool discovery,
-tool execution loop, and returns the final response.
+Sends requests to LiteLLM proxy /v1/responses endpoint which handles model routing,
+MCP tool discovery, tool execution loop (with require_approval=never), and returns
+the final response.
 """
 
 import asyncio
@@ -74,7 +75,7 @@ class SessionOrchestrator:
         metadata = event.get("metadata", {})
 
         async with self._get_lock(source, session_id):
-            # Load session history, filter non-conversational entries, sanitize empty content
+            # Load session history, filter non-conversational entries, sanitize
             raw_history = self.session.load_truncated(
                 channel=source,
                 session_id=session_id,
@@ -98,26 +99,43 @@ class SessionOrchestrator:
             if metadata:
                 context_prefix = f"[{source} | {json.dumps(metadata)}]"
             enriched_content = f"{context_prefix} {text}"
-            enriched_msg = {"role": "user", "content": enriched_content}
             stored_msg = {"role": "user", "content": text}
 
-            # Build system prompt (AGENTS.md only — agent bootstraps the rest)
+            # Build system prompt
             system_content = self._build_system_prompt()
-            system_msg = [{"role": "system", "content": system_content}] if system_content else []
-            messages = system_msg + history + [enriched_msg]
 
-            # Build request payload — proxy handles MCP tool discovery and execution loop
+            # Build Responses API input
+            input_items = []
+
+            # System prompt as first input
+            if system_content:
+                input_items.append({
+                    "role": "system",
+                    "content": system_content,
+                })
+
+            # History
+            for msg in history:
+                input_items.append(msg)
+
+            # New user message
+            input_items.append({
+                "role": "user",
+                "content": enriched_content,
+            })
+
+            # Build request payload for /v1/responses
             payload: dict[str, Any] = {
                 "model": self.model,
-                "messages": messages,
+                "input": input_items,
                 "tools": self.mcp_tools,
             }
 
-            logger.info(f"Calling LiteLLM proxy: {len(messages)} messages, {len(self.mcp_tools)} MCP tool declarations")
+            logger.info(f"Calling LiteLLM proxy /v1/responses: {len(input_items)} input items, {len(self.mcp_tools)} MCP tools")
 
             try:
                 resp = await self._http.post(
-                    f"{self.litellm_url}/v1/chat/completions",
+                    f"{self.litellm_url}/v1/responses",
                     json=payload,
                 )
                 resp.raise_for_status()
@@ -126,8 +144,14 @@ class SessionOrchestrator:
                 logger.error(f"LiteLLM proxy request failed: {e}")
                 return None
 
-            assistant_msg = result["choices"][0]["message"]
-            assistant_text = assistant_msg.get("content", "")
+            # Extract text from response output
+            assistant_text = ""
+            output = result.get("output", [])
+            for item in output:
+                if item.get("type") == "message":
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            assistant_text += content.get("text", "")
 
             # Save exchange to session
             all_messages = [stored_msg]
