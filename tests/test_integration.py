@@ -1,7 +1,7 @@
 """Integration smoke test: verify the full event flow with mocked externals."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -13,22 +13,29 @@ from adapters.signal.inbound import SignalInbound
 from adapters.signal.outbound_mcp import SignalSender, create_signal_mcp
 
 
-def _mock_proxy_response(content="I'm here to help!"):
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.raise_for_status = MagicMock()
-    resp.json = MagicMock(return_value={
-        "choices": [{"message": {"role": "assistant", "content": content}}],
-    })
-    return resp
+def _mock_llm_response(content="I'm here to help!"):
+    message = MagicMock()
+    message.content = content
+    message.tool_calls = []
+    message.model_dump = MagicMock(return_value={"role": "assistant", "content": content})
+
+    choice = MagicMock()
+    choice.message = message
+    choice.finish_reason = "stop"
+
+    response = MagicMock()
+    response.choices = [choice]
+    return response
 
 
 @pytest.mark.asyncio
-async def test_full_event_flow(tmp_path):
-    """End-to-end: config → orchestrator receives event → proxy called → session saved."""
+@patch("session_manager.server.litellm")
+async def test_full_event_flow(mock_litellm, tmp_path):
+    """End-to-end: config → orchestrator receives event → LLM called → session saved."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "AGENTS.md").write_text("# Agent\nUse tools to respond.\n")
+    (workspace / "SOUL.md").write_text("# Soul\nYou are a helpful agent.\n")
 
     config_data = {
         "model": {"provider": "anthropic", "model": "claude-opus-4-6", "api_key": "test-key"},
@@ -51,14 +58,10 @@ async def test_full_event_flow(tmp_path):
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
 
-    orchestrator = SessionOrchestrator(
-        config=config,
-        litellm_url="http://localhost:4000",
-        session_dir=sessions_dir,
-    )
+    orchestrator = SessionOrchestrator(config=config, session_dir=sessions_dir)
 
-    orchestrator._http = AsyncMock()
-    orchestrator._http.post = AsyncMock(return_value=_mock_proxy_response())
+    # Mock litellm
+    mock_litellm.acompletion = AsyncMock(return_value=_mock_llm_response())
 
     event = {
         "source": "signal",
@@ -70,14 +73,11 @@ async def test_full_event_flow(tmp_path):
     result = await orchestrator.handle_event(event)
     assert result == "I'm here to help!"
 
-    # Verify MCP tool declarations were sent to proxy
-    call_kwargs = orchestrator._http.post.call_args.kwargs
-    payload = call_kwargs["json"]
-    assert "tools" in payload
-    tool_labels = [t["server_label"] for t in payload["tools"]]
-    assert "workspace_fs" in tool_labels
-    assert "memory" in tool_labels
-    assert "signal" in tool_labels
+    # Verify system prompt is AGENTS.md only (not SOUL.md)
+    call_kwargs = mock_litellm.acompletion.call_args.kwargs
+    system_msg = call_kwargs["messages"][0]
+    assert "Use tools to respond" in system_msg["content"]
+    assert "helpful agent" not in system_msg["content"]  # SOUL.md not injected
 
     # Verify session persistence
     session = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
