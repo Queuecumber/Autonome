@@ -22,13 +22,11 @@ def test_inbound_init(inbound):
 
 
 def test_ws_url_construction(inbound):
-    """WebSocket URL is derived from HTTP URL."""
     assert inbound.ws_url == "ws://localhost:8080/v1/receive/+10000000000"
 
 
 @pytest.mark.asyncio
 async def test_handle_envelope_pushes_event(inbound):
-    """Valid envelopes are pushed to session manager."""
     inbound._http = AsyncMock()
     inbound._http.post = AsyncMock()
 
@@ -55,7 +53,6 @@ async def test_handle_envelope_pushes_event(inbound):
 
 @pytest.mark.asyncio
 async def test_handle_envelope_filters_unauthorized(inbound):
-    """Messages from unauthorized senders are not pushed."""
     inbound._http = AsyncMock()
     inbound._http.post = AsyncMock()
 
@@ -75,10 +72,69 @@ async def test_handle_envelope_filters_unauthorized(inbound):
 
 @pytest.mark.asyncio
 async def test_handle_envelope_skips_empty(inbound):
-    """Envelopes without dataMessage or text are skipped."""
     inbound._http = AsyncMock()
     inbound._http.post = AsyncMock()
 
     await inbound._handle_envelope({"envelope": {"source": "+11111111111"}})
     await inbound._handle_envelope({"envelope": {"source": "+11111111111", "dataMessage": {}}})
     inbound._http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_reaction(inbound):
+    """Reactions are pushed as events with reaction metadata."""
+    inbound._http = AsyncMock()
+    inbound._http.post = AsyncMock()
+
+    envelope = {
+        "envelope": {
+            "source": "+11111111111",
+            "dataMessage": {
+                "timestamp": 1234567890,
+                "reaction": {
+                    "emoji": "👍",
+                    "targetSentTimestamp": 9876543210,
+                    "targetAuthor": "+10000000000",
+                    "isRemove": False,
+                },
+            },
+        }
+    }
+
+    await inbound._handle_envelope(envelope)
+
+    inbound._http.post.assert_called_once()
+    event = inbound._http.post.call_args.kwargs["json"]
+    assert event["metadata"]["type"] == "reaction"
+    assert event["metadata"]["emoji"] == "👍"
+    assert "👍" in event["text"]
+
+
+@pytest.mark.asyncio
+async def test_handle_attachment_metadata(inbound):
+    """Attachments include metadata in the event."""
+    inbound._http = AsyncMock()
+    inbound._http.post = AsyncMock()
+
+    envelope = {
+        "envelope": {
+            "source": "+11111111111",
+            "dataMessage": {
+                "message": "Check this out",
+                "timestamp": 1234567890,
+                "attachments": [
+                    {
+                        "contentType": "application/pdf",
+                        "file": "/tmp/test.pdf",
+                        "fileName": "document.pdf",
+                    }
+                ],
+            },
+        }
+    }
+
+    await inbound._handle_envelope(envelope)
+
+    inbound._http.post.assert_called_once()
+    event = inbound._http.post.call_args.kwargs["json"]
+    assert "document.pdf" in event["text"]

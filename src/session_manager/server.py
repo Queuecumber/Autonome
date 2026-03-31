@@ -215,12 +215,25 @@ class SessionOrchestrator:
                     msg.pop(key, None)
                 history.append(msg)
 
-            # Build user message with metadata context
-            context_prefix = f"[{source}]"
+            # Build user message with metadata context + current timestamp
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            context_prefix = f"[{source} | time={now}]"
             if metadata:
-                context_prefix = f"[{source} | {json.dumps(metadata)}]"
-            enriched_content = f"{context_prefix} {text}"
-            enriched_msg = {"role": "user", "content": enriched_content}
+                context_prefix = f"[{source} | time={now} | {json.dumps(metadata)}]"
+            # Build user message — multimodal if images present
+            images = metadata.get("images", [])
+            if images:
+                # Multimodal content: text + images
+                content_parts: list[dict] = [{"type": "text", "text": f"{context_prefix} {text}"}]
+                for img in images:
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{img['type']};base64,{img['data']}"},
+                    })
+                enriched_msg = {"role": "user", "content": content_parts}
+            else:
+                enriched_msg = {"role": "user", "content": f"{context_prefix} {text}"}
             stored_msg = {"role": "user", "content": text}
 
             # Build system prompt (AGENTS.md + MCP server instructions)
