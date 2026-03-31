@@ -250,6 +250,7 @@ class SessionOrchestrator:
             if self.reasoning_effort:
                 call_kwargs["reasoning_effort"] = self.reasoning_effort
                 call_kwargs["allowed_openai_params"] = ["reasoning_effort"]
+            call_kwargs["timeout"] = 300  # 5 min — large context requests can be slow
             if self.api_base:
                 call_kwargs["api_base"] = self.api_base
             if self.extra_headers:
