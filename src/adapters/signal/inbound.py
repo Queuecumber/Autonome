@@ -4,7 +4,6 @@ import asyncio
 import base64
 import json
 import logging
-from pathlib import Path
 
 import httpx
 import websockets
@@ -79,29 +78,32 @@ class SignalInbound:
             "sender": sender,
         }
 
-        # Process attachments — build content parts for multimodal
+        # Process attachments — fetch from signal-cli API, base64 encode in memory
         image_data = []
         for att in attachments:
             content_type = att.get("contentType", "")
-            file_path = att.get("file")
+            att_id = att.get("id", "")
             filename = att.get("fileName", "attachment")
 
-            if file_path and content_type.startswith("image/"):
-                # Read image file and base64 encode for vision
+            if not att_id:
+                continue
+
+            if content_type.startswith("image/"):
                 try:
-                    path = Path(file_path)
-                    if path.exists():
-                        b64 = base64.b64encode(path.read_bytes()).decode()
-                        image_data.append({
-                            "type": content_type,
-                            "data": b64,
-                            "filename": filename,
-                        })
-                        logger.info(f"Processed image attachment: {filename} ({content_type})")
+                    resp = await self._http.get(
+                        f"{self.signal_cli_url}/v1/attachments/{att_id}",
+                    )
+                    resp.raise_for_status()
+                    b64 = base64.b64encode(resp.content).decode()
+                    image_data.append({
+                        "type": content_type,
+                        "data": b64,
+                        "filename": filename,
+                    })
+                    logger.info(f"Fetched image attachment: {filename} ({content_type}, {len(resp.content)} bytes)")
                 except Exception as e:
-                    logger.warning(f"Failed to read attachment {file_path}: {e}")
-            elif file_path:
-                # Non-image attachment — just note it in text
+                    logger.warning(f"Failed to fetch attachment {att_id}: {e}")
+            else:
                 text = f"{text}\n[Attachment: {filename} ({content_type})]" if text else f"[Attachment: {filename} ({content_type})]"
 
         if image_data:

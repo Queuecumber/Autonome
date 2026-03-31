@@ -125,7 +125,7 @@ async def test_handle_attachment_metadata(inbound):
                 "attachments": [
                     {
                         "contentType": "application/pdf",
-                        "file": "/tmp/test.pdf",
+                        "id": "abc123",
                         "fileName": "document.pdf",
                     }
                 ],
