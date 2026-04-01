@@ -1,14 +1,16 @@
-"""Signal interface — MCP tools + inbound event forwarding over SignalClient.
+"""Signal adapter — MCP interface + inbound event forwarding.
 
-This is the interface layer between the Signal data model and the rest of the
-platform. Outbound: MCP tools for the agent. Inbound: listens to the client's
-message stream and pushes events to the session manager.
+This is both the interface layer and the application entrypoint for the Signal
+adapter. It creates the SignalClient, registers MCP tools over it, and runs
+the inbound listener + MCP server.
 
-The client must be set via init() before tools are called.
+    python -m adapters.signal.mcp_server
 """
 
+import asyncio
 import base64
 import logging
+import os
 
 import httpx
 from fastmcp import FastMCP
@@ -17,11 +19,11 @@ from adapters.signal.model import SignalClient, Message
 
 logger = logging.getLogger(__name__)
 
-# ── Module state (set by init()) ────────────────────────
+# ── Client and state (created in main()) ─────────────────
 
-_client: SignalClient | None = None
-_session_manager_url: str = ""
-_http: httpx.AsyncClient | None = None
+client: SignalClient
+session_manager_url: str
+_http: httpx.AsyncClient
 
 mcp = FastMCP("signal", instructions=(
     "Signal messaging. Use these tools to communicate with users on Signal. "
@@ -33,25 +35,11 @@ mcp = FastMCP("signal", instructions=(
 ))
 
 
-def init(client: SignalClient, session_manager_url: str) -> None:
-    """Initialize the module with a SignalClient and session manager URL."""
-    global _client, _session_manager_url, _http
-    _client = client
-    _session_manager_url = session_manager_url
-    _http = httpx.AsyncClient(timeout=60)
-
-
-def _get_client() -> SignalClient:
-    assert _client is not None, "Signal MCP server not initialized — call init() first"
-    return _client
-
-
 # ── Tools ────────────────────────────────────────────────
 
 @mcp.tool
 async def send_message(recipient: str, text: str) -> str:
     """Send a text message to a recipient on Signal. Automatically stops typing indicator."""
-    client = _get_client()
     try:
         await client.set_typing(recipient, stop=True)
     except Exception:
@@ -69,7 +57,7 @@ async def send_attachment(
 ) -> str:
     """Send a file attachment to a recipient on Signal."""
     try:
-        await _get_client().send_attachment(recipient, file_path, mime_type, caption)
+        await client.send_attachment(recipient, file_path, mime_type, caption)
         return f"Sent {file_path} to {recipient}"
     except Exception as e:
         return f"Error sending attachment: {e}"
@@ -81,7 +69,7 @@ async def react(
 ) -> str:
     """React to a message with an emoji. target_author is who sent the message, message_timestamp identifies which message."""
     try:
-        await _get_client().send_reaction(recipient, emoji, target_author, message_timestamp)
+        await client.send_reaction(recipient, emoji, target_author, message_timestamp)
         return f"Reacted with {emoji}"
     except Exception as e:
         return f"Error reacting: {e}"
@@ -91,7 +79,7 @@ async def react(
 async def read_receipt(message_sender: str, message_timestamp: int) -> str:
     """Send a read receipt for a message. Call this when you've read a message."""
     try:
-        await _get_client().send_receipt(message_sender, message_timestamp)
+        await client.send_receipt(message_sender, message_timestamp)
         return f"Read receipt sent to {message_sender}"
     except Exception as e:
         return f"Error sending read receipt: {e}"
@@ -101,7 +89,7 @@ async def read_receipt(message_sender: str, message_timestamp: int) -> str:
 async def typing_indicator(recipient: str, stop: bool = False) -> str:
     """Show or hide the typing indicator. Call with stop=False before composing, stop=True when done."""
     try:
-        await _get_client().set_typing(recipient, stop=stop)
+        await client.set_typing(recipient, stop=stop)
         status = "stopped" if stop else "started"
         return f"Typing indicator {status} for {recipient}"
     except Exception as e:
@@ -113,14 +101,13 @@ async def typing_indicator(recipient: str, stop: bool = False) -> str:
 @mcp.resource("signal://attachments/{attachment_id}")
 async def get_attachment(attachment_id: str) -> bytes:
     """Retrieve a Signal attachment by ID."""
-    return await _get_client().fetch_attachment(attachment_id)
+    return await client.fetch_attachment(attachment_id)
 
 
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message) -> None:
     """Convert a Message to a session manager event and push it."""
-    client = _get_client()
     sender = msg.sender
     timestamp = str(msg.timestamp)
 
@@ -184,25 +171,44 @@ async def on_message(msg: Message) -> None:
 
 
 async def _push_event(event: dict) -> None:
-    assert _http is not None, "Signal MCP server not initialized"
     try:
-        await _http.post(f"{_session_manager_url}/event", json=event)
+        await _http.post(f"{session_manager_url}/event", json=event)
     except Exception as e:
         logger.error(f"Failed to push event to session manager: {e}")
 
 
-# ── Lifecycle ────────────────────────────────────────────
+# ── Entrypoint ───────────────────────────────────────────
 
-async def run_inbound() -> None:
-    """Start listening for inbound messages."""
-    await _get_client().listen(on_message)
+async def main():
+    global client, session_manager_url, _http
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
 
-async def run_mcp(host: str = "0.0.0.0", port: int = 8100) -> None:
-    """Start the MCP server."""
-    await mcp.run_async(transport="http", host=host, port=port)
+    signal_cli_url = os.environ.get("SIGNAL_CLI_URL", "http://localhost:8080")
+    session_manager_url = os.environ.get("SESSION_MANAGER_URL", "http://localhost:5000")
+    account = os.environ.get("SIGNAL_ACCOUNT", "")
+    allow_from = os.environ.get("ALLOW_FROM", "").split(",") if os.environ.get("ALLOW_FROM") else []
+    mcp_port = int(os.environ.get("CHANNEL_MCP_PORT", "8100"))
 
+    client = SignalClient(
+        signal_cli_url=signal_cli_url,
+        account=account,
+        allow_from=allow_from,
+    )
+    _http = httpx.AsyncClient(timeout=60)
 
-async def close() -> None:
-    if _http:
+    try:
+        await asyncio.gather(
+            client.listen(on_message),
+            mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port),
+        )
+    finally:
         await _http.aclose()
+        await client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

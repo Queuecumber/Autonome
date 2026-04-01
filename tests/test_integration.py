@@ -88,10 +88,11 @@ async def test_full_event_flow(mock_litellm, tmp_path):
 
     # Verify outbound MCP tools can be created
     signal_client = SignalClient(signal_cli_url="http://localhost:8080", account="+10000000000")
-    signal_mcp.init(signal_client, "http://localhost:5000")
+    signal_mcp.client = signal_client
+    signal_mcp.session_manager_url = "http://localhost:5000"
     tools = await signal_mcp.mcp.list_tools()
     tool_names = {t.name for t in tools}
     assert "send_message" in tool_names
 
     # Verify signal interface is initialized
-    assert signal_mcp._client.account == "+10000000000"
+    assert signal_mcp.client.account == "+10000000000"

@@ -10,4 +10,4 @@ COPY src/ ./src/
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "adapters.signal.main"]
+CMD ["python", "-m", "adapters.signal.mcp_server"]
