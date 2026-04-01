@@ -1,10 +1,10 @@
-"""Tests for Signal inbound listener."""
+"""Tests for Signal interface — inbound event forwarding."""
 
 import pytest
 from unittest.mock import AsyncMock
 
 from adapters.signal.model import SignalClient, Message, Reaction, Attachment
-from adapters.signal.inbound import SignalInbound
+from adapters.signal.mcp_server import SignalInterface
 
 
 @pytest.fixture
@@ -19,32 +19,32 @@ def client():
 
 
 @pytest.fixture
-def inbound(client):
-    ib = SignalInbound(client=client, session_manager_url="http://localhost:5000")
-    ib._http = AsyncMock()
-    ib._http.post = AsyncMock()
-    return ib
+def interface(client):
+    iface = SignalInterface(client=client, session_manager_url="http://localhost:5000")
+    iface._http = AsyncMock()
+    iface._http.post = AsyncMock()
+    return iface
 
 
-def test_inbound_init(inbound):
-    assert inbound.client.account == "+10000000000"
+def test_interface_init(interface):
+    assert interface.client.account == "+10000000000"
 
 
 @pytest.mark.asyncio
-async def test_on_message_pushes_event(inbound):
+async def test_on_message_pushes_event(interface):
     msg = Message(sender="+11111111111", timestamp=1234567890, text="Hello from Signal")
 
-    await inbound._on_message(msg)
+    await interface._on_message(msg)
 
-    inbound._http.post.assert_called_once()
-    event = inbound._http.post.call_args.kwargs["json"]
+    interface._http.post.assert_called_once()
+    event = interface._http.post.call_args.kwargs["json"]
     assert event["source"] == "signal"
     assert event["session_id"] == "+11111111111"
     assert event["text"] == "Hello from Signal"
 
 
 @pytest.mark.asyncio
-async def test_on_message_reaction(inbound):
+async def test_on_message_reaction(interface):
     msg = Message(
         sender="+11111111111",
         timestamp=123,
@@ -56,15 +56,15 @@ async def test_on_message_reaction(inbound):
         ),
     )
 
-    await inbound._on_message(msg)
+    await interface._on_message(msg)
 
-    event = inbound._http.post.call_args.kwargs["json"]
+    event = interface._http.post.call_args.kwargs["json"]
     assert event["metadata"]["type"] == "reaction"
     assert event["metadata"]["emoji"] == "👍"
 
 
 @pytest.mark.asyncio
-async def test_on_message_attachment(inbound):
+async def test_on_message_attachment(interface):
     msg = Message(
         sender="+11111111111",
         timestamp=123,
@@ -72,7 +72,7 @@ async def test_on_message_attachment(inbound):
         attachments=[Attachment(id="abc", content_type="application/pdf", filename="doc.pdf")],
     )
 
-    await inbound._on_message(msg)
+    await interface._on_message(msg)
 
-    event = inbound._http.post.call_args.kwargs["json"]
+    event = interface._http.post.call_args.kwargs["json"]
     assert "doc.pdf" in event["text"]

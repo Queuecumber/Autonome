@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from adapters.signal.model import SignalClient, Message, Attachment, Reaction
-from adapters.signal.mcp_server import create_mcp
+from adapters.signal.mcp_server import SignalInterface
 
 
 @pytest.fixture
@@ -103,8 +103,8 @@ def test_parse_filters_unauthorized(mock_client):
 @pytest.mark.asyncio
 async def test_mcp_has_expected_tools():
     client = SignalClient(signal_cli_url="http://localhost:8080", account="+10000000000")
-    mcp = create_mcp(client)
-    tools = await mcp.list_tools()
+    interface = SignalInterface(client=client, session_manager_url="http://localhost:5000")
+    tools = await interface.mcp.list_tools()
     tool_names = {t.name for t in tools}
     assert "send_message" in tool_names
     assert "send_attachment" in tool_names
