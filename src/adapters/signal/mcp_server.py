@@ -37,7 +37,7 @@ def init(client: SignalClient, session_manager_url: str) -> None:
     """Initialize the module with a SignalClient and session manager URL."""
     global _client, _session_manager_url, _http
     _client = client
-    _session_manager_url = session_manager_url.rstrip("/")
+    _session_manager_url = session_manager_url
     _http = httpx.AsyncClient(timeout=60)
 
 

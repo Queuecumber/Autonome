@@ -60,7 +60,7 @@ class SignalClient:
     """
 
     def __init__(self, signal_cli_url: str, account: str, allow_from: list[str] | None = None):
-        self.signal_cli_url = signal_cli_url.rstrip("/")
+        self.signal_cli_url = signal_cli_url
         self.account = account
         self.allow_from = allow_from or []
         self._http = httpx.AsyncClient(timeout=60)
