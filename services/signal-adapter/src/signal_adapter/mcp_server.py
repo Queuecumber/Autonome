@@ -4,7 +4,7 @@ This is both the interface layer and the application entrypoint for the Signal
 adapter. It creates the SignalClient, registers MCP tools over it, and runs
 the inbound listener + MCP server.
 
-    python -m adapters.signal.mcp_server
+    python -m signal_adapter.mcp_server
 """
 
 import asyncio
@@ -15,7 +15,7 @@ import os
 import httpx
 from fastmcp import FastMCP
 
-from adapters.signal.model import SignalClient, Message
+from signal_adapter.model import SignalClient, Message
 
 logger = logging.getLogger(__name__)
 

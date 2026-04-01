@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir ./services/signal-adapter
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "adapters.signal.mcp_server"]
+CMD ["python", "-m", "signal_adapter.mcp_server"]

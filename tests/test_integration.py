@@ -9,8 +9,8 @@ import yaml
 from agent_platform.config import load_config
 from agent_platform.session import SessionManager
 from session_manager.server import SessionOrchestrator
-from adapters.signal.model import SignalClient
-from adapters.signal import mcp_server as signal_mcp
+from signal_adapter.model import SignalClient
+from signal_adapter import mcp_server as signal_mcp
 
 
 def _mock_llm_response(content="I'm here to help!"):
