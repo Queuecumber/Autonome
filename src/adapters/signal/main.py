@@ -1,11 +1,12 @@
-"""Signal adapter: runs inbound listener + outbound MCP server."""
+"""Signal adapter: runs inbound listener + outbound MCP server over a shared SignalClient."""
 
 import asyncio
 import logging
 import os
 
+from adapters.signal.model import SignalClient
 from adapters.signal.inbound import SignalInbound
-from adapters.signal.outbound_mcp import SignalSender, create_signal_mcp
+from adapters.signal.mcp_server import create_mcp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,15 +22,15 @@ async def main():
     allow_from = os.environ.get("ALLOW_FROM", "").split(",") if os.environ.get("ALLOW_FROM") else []
     mcp_port = int(os.environ.get("CHANNEL_MCP_PORT", "8100"))
 
-    inbound = SignalInbound(
+    # One client for both reading and writing
+    client = SignalClient(
         signal_cli_url=signal_cli_url,
-        session_manager_url=session_manager_url,
         account=account,
         allow_from=allow_from,
     )
 
-    sender = SignalSender(signal_cli_url=signal_cli_url, account=account)
-    mcp = create_signal_mcp(sender)
+    inbound = SignalInbound(client=client, session_manager_url=session_manager_url)
+    mcp = create_mcp(client)
 
     async def run_mcp():
         await mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port)
@@ -41,7 +42,7 @@ async def main():
         )
     finally:
         await inbound.close()
-        await sender.close()
+        await client.close()
 
 
 if __name__ == "__main__":

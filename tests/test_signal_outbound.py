@@ -1,32 +1,109 @@
-"""Tests for Signal outbound MCP server."""
+"""Tests for Signal MCP server and client model."""
 
 import pytest
 from unittest.mock import AsyncMock
 
-from adapters.signal.outbound_mcp import create_signal_mcp, SignalSender
+from adapters.signal.model import SignalClient, Message, Attachment, Reaction
+from adapters.signal.mcp_server import create_mcp
 
 
 @pytest.fixture
-def mock_sender():
-    sender = SignalSender(
+def mock_client():
+    client = SignalClient(
         signal_cli_url="http://localhost:8080",
         account="+10000000000",
     )
-    sender._http = AsyncMock()
-    return sender
+    client._http = AsyncMock()
+    return client
 
 
-def test_signal_sender_init(mock_sender):
-    assert mock_sender.account == "+10000000000"
+def test_client_init(mock_client):
+    assert mock_client.account == "+10000000000"
+    assert mock_client.ws_url == "ws://localhost:8080/v1/receive/+10000000000"
+
+
+def test_message_dataclass():
+    msg = Message(sender="+1234", timestamp=123, text="hello")
+    assert msg.sender == "+1234"
+    assert msg.text == "hello"
+    assert msg.attachments == []
+    assert msg.reaction is None
+
+
+def test_attachment_is_image():
+    assert Attachment(id="1", content_type="image/jpeg").is_image
+    assert not Attachment(id="2", content_type="application/pdf").is_image
+
+
+def test_parse_text_message(mock_client):
+    envelope = {
+        "envelope": {
+            "source": "+11111111111",
+            "dataMessage": {"message": "Hello", "timestamp": 123},
+        }
+    }
+    msg = mock_client._parse_envelope(envelope)
+    assert msg is not None
+    assert msg.text == "Hello"
+    assert msg.sender == "+11111111111"
+
+
+def test_parse_reaction(mock_client):
+    envelope = {
+        "envelope": {
+            "source": "+11111111111",
+            "dataMessage": {
+                "timestamp": 123,
+                "reaction": {
+                    "emoji": "👍",
+                    "targetSentTimestamp": 456,
+                    "targetAuthor": "+10000000000",
+                    "isRemove": False,
+                },
+            },
+        }
+    }
+    msg = mock_client._parse_envelope(envelope)
+    assert msg is not None
+    assert msg.reaction is not None
+    assert msg.reaction.emoji == "👍"
+    assert msg.reaction.target_timestamp == 456
+
+
+def test_parse_attachment(mock_client):
+    envelope = {
+        "envelope": {
+            "source": "+11111111111",
+            "dataMessage": {
+                "message": "look",
+                "timestamp": 123,
+                "attachments": [
+                    {"id": "abc", "contentType": "image/png", "fileName": "photo.png"},
+                ],
+            },
+        }
+    }
+    msg = mock_client._parse_envelope(envelope)
+    assert msg is not None
+    assert len(msg.attachments) == 1
+    assert msg.attachments[0].is_image
+
+
+def test_parse_filters_unauthorized(mock_client):
+    mock_client.allow_from = ["+11111111111"]
+    envelope = {
+        "envelope": {
+            "source": "+19999999999",
+            "dataMessage": {"message": "nope", "timestamp": 123},
+        }
+    }
+    assert mock_client._parse_envelope(envelope) is None
 
 
 @pytest.mark.asyncio
 async def test_mcp_has_expected_tools():
-    sender = SignalSender(
-        signal_cli_url="http://localhost:8080",
-        account="+10000000000",
-    )
-    mcp = create_signal_mcp(sender)
+    client = SignalClient(signal_cli_url="http://localhost:8080", account="+10000000000")
+    mcp = create_mcp(client)
     tools = await mcp.list_tools()
     tool_names = {t.name for t in tools}
     assert "send_message" in tool_names

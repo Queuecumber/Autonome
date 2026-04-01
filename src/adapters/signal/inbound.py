@@ -1,110 +1,76 @@
-"""Signal inbound listener: connects to signal-cli WebSocket and pushes events to session manager."""
+"""Signal inbound listener — bridges SignalClient to the session manager.
 
-import asyncio
+Listens for messages via SignalClient.listen(), normalizes them into
+session manager events, and pushes them.
+"""
+
 import base64
-import json
 import logging
 
 import httpx
-import websockets
+
+from adapters.signal.model import SignalClient, Message
 
 logger = logging.getLogger(__name__)
 
 
 class SignalInbound:
-    """Connects to signal-cli WebSocket for messages and pushes events to the session manager."""
+    """Receives messages from SignalClient and pushes events to the session manager."""
 
-    def __init__(
-        self,
-        signal_cli_url: str,
-        session_manager_url: str,
-        account: str,
-        allow_from: list[str] | None = None,
-    ):
-        self.signal_cli_url = signal_cli_url.rstrip("/")
+    def __init__(self, client: SignalClient, session_manager_url: str):
+        self.client = client
         self.session_manager_url = session_manager_url.rstrip("/")
-        self.account = account
-        self.allow_from = allow_from or []
         self._http = httpx.AsyncClient(timeout=60)
 
-        ws_url = self.signal_cli_url.replace("http://", "ws://").replace("https://", "wss://")
-        self.ws_url = f"{ws_url}/v1/receive/{self.account}"
+    async def _on_message(self, msg: Message) -> None:
+        """Convert a Message to a session manager event and push it."""
+        sender = msg.sender
+        timestamp = str(msg.timestamp)
 
-    async def _handle_envelope(self, envelope: dict) -> None:
-        """Process a single signal-cli envelope and push event to session manager."""
-        env = envelope.get("envelope", {})
-        sender = env.get("source")
-
-        if self.allow_from and sender not in self.allow_from:
-            logger.debug(f"Ignoring message from unauthorized sender: {sender}")
-            return
-
-        data_msg = env.get("dataMessage")
-        if not data_msg:
-            return
-
-        timestamp = str(data_msg.get("timestamp", ""))
-
-        # Handle reactions
-        reaction = data_msg.get("reaction")
-        if reaction:
+        # Reaction event
+        if msg.reaction:
+            r = msg.reaction
             event = {
                 "source": "signal",
                 "session_id": sender,
-                "text": f"[reacted with {reaction.get('emoji', '?')} to message at {reaction.get('targetSentTimestamp', '?')}]",
+                "text": f"[reacted with {r.emoji} to message at {r.target_timestamp}]",
                 "metadata": {
                     "type": "reaction",
                     "sender": sender,
-                    "emoji": reaction.get("emoji", ""),
-                    "target_timestamp": str(reaction.get("targetSentTimestamp", "")),
-                    "target_author": reaction.get("targetAuthor", ""),
-                    "is_remove": reaction.get("isRemove", False),
+                    "emoji": r.emoji,
+                    "target_timestamp": str(r.target_timestamp),
+                    "target_author": r.target_author,
+                    "is_remove": r.is_remove,
                 },
             }
-            logger.info(f"Received reaction from {sender}: {reaction.get('emoji')}")
+            logger.info(f"Received reaction from {sender}: {r.emoji}")
             await self._push_event(event)
             return
 
-        # Handle text messages (with optional attachments)
-        text = data_msg.get("message", "")
-        attachments = data_msg.get("attachments", [])
-
-        # Skip if no text and no attachments
-        if not text and not attachments:
-            return
-
+        # Text + attachment event
+        text = msg.text
         metadata: dict = {
             "message_id": timestamp,
             "sender": sender,
         }
 
-        # Process attachments — fetch from signal-cli API, base64 encode in memory
+        # Fetch image attachments as base64
         image_data = []
-        for att in attachments:
-            content_type = att.get("contentType", "")
-            att_id = att.get("id", "")
-            filename = att.get("fileName", "attachment")
-
-            if not att_id:
-                continue
-
-            if content_type.startswith("image/"):
+        for att in msg.attachments:
+            if att.is_image:
                 try:
-                    resp = await self._http.get(
-                        f"{self.signal_cli_url}/v1/attachments/{att_id}",
-                    )
-                    resp.raise_for_status()
-                    b64 = base64.b64encode(resp.content).decode()
+                    raw = await self.client.fetch_attachment(att.id)
+                    b64 = base64.b64encode(raw).decode()
                     image_data.append({
-                        "type": content_type,
+                        "type": att.content_type,
                         "data": b64,
-                        "filename": filename,
+                        "filename": att.filename,
                     })
-                    logger.info(f"Fetched image attachment: {filename} ({content_type}, {len(resp.content)} bytes)")
+                    logger.info(f"Fetched image: {att.filename} ({att.content_type}, {len(raw)} bytes)")
                 except Exception as e:
-                    logger.warning(f"Failed to fetch attachment {att_id}: {e}")
+                    logger.warning(f"Failed to fetch attachment {att.id}: {e}")
             else:
-                text = f"{text}\n[Attachment: {filename} ({content_type})]" if text else f"[Attachment: {filename} ({content_type})]"
+                text = f"{text}\n[Attachment: {att.filename} ({att.content_type})]" if text else f"[Attachment: {att.filename} ({att.content_type})]"
 
         if image_data:
             metadata["images"] = image_data
@@ -120,7 +86,6 @@ class SignalInbound:
         }
 
         logger.info(f"Received message from {sender}: {text[:50]}{'...' if len(text) > 50 else ''}")
-
         await self._push_event(event)
 
     async def _push_event(self, event: dict) -> None:
@@ -134,23 +99,8 @@ class SignalInbound:
             logger.error(f"Failed to push event to session manager: {e}")
 
     async def run(self) -> None:
-        """Connect to signal-cli WebSocket and stream messages."""
-        logger.info(f"Signal inbound connecting to {self.ws_url}")
-        while True:
-            try:
-                async with websockets.connect(self.ws_url) as ws:
-                    logger.info("Signal WebSocket connected")
-                    async for raw_msg in ws:
-                        try:
-                            envelope = json.loads(raw_msg)
-                            await self._handle_envelope(envelope)
-                        except json.JSONDecodeError:
-                            logger.warning(f"Non-JSON message from signal-cli: {raw_msg[:100]}")
-                        except Exception as e:
-                            logger.error(f"Error processing envelope: {e}")
-            except Exception as e:
-                logger.error(f"WebSocket connection failed: {e}, reconnecting in 5s...")
-                await asyncio.sleep(5)
+        """Start listening — delegates to SignalClient.listen()."""
+        await self.client.listen(self._on_message)
 
     async def close(self) -> None:
         await self._http.aclose()

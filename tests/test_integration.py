@@ -9,8 +9,9 @@ import yaml
 from agent_platform.config import load_config
 from agent_platform.session import SessionManager
 from session_manager.server import SessionOrchestrator
+from adapters.signal.model import SignalClient
 from adapters.signal.inbound import SignalInbound
-from adapters.signal.outbound_mcp import SignalSender, create_signal_mcp
+from adapters.signal.mcp_server import create_mcp
 
 
 def _mock_llm_response(content="I'm here to help!"):
@@ -87,17 +88,12 @@ async def test_full_event_flow(mock_litellm, tmp_path):
     assert history[1]["content"] == "I'm here to help!"
 
     # Verify outbound MCP tools can be created
-    sender = SignalSender(signal_cli_url="http://localhost:8080", account="+10000000000")
-    mcp = create_signal_mcp(sender)
+    signal_client = SignalClient(signal_cli_url="http://localhost:8080", account="+10000000000")
+    mcp = create_mcp(signal_client)
     tools = await mcp.list_tools()
     tool_names = {t.name for t in tools}
     assert "send_message" in tool_names
 
     # Verify inbound listener can be created
-    inbound = SignalInbound(
-        signal_cli_url="http://localhost:8080",
-        session_manager_url="http://localhost:5000",
-        account="+10000000000",
-        allow_from=["+11111111111"],
-    )
-    assert inbound.account == "+10000000000"
+    inbound = SignalInbound(client=signal_client, session_manager_url="http://localhost:5000")
+    assert inbound.client.account == "+10000000000"
