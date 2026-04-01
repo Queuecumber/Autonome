@@ -10,7 +10,7 @@ from agent_platform.config import load_config
 from agent_platform.session import SessionManager
 from session_manager.server import SessionOrchestrator
 from adapters.signal.model import SignalClient
-from adapters.signal.mcp_server import SignalInterface
+from adapters.signal import mcp_server as signal_mcp
 
 
 def _mock_llm_response(content="I'm here to help!"):
@@ -88,11 +88,10 @@ async def test_full_event_flow(mock_litellm, tmp_path):
 
     # Verify outbound MCP tools can be created
     signal_client = SignalClient(signal_cli_url="http://localhost:8080", account="+10000000000")
-    interface = SignalInterface(client=signal_client, session_manager_url="http://localhost:5000")
-    mcp = interface.mcp
-    tools = await mcp.list_tools()
+    signal_mcp.init(signal_client, "http://localhost:5000")
+    tools = await signal_mcp.mcp.list_tools()
     tool_names = {t.name for t in tools}
     assert "send_message" in tool_names
 
-    # Verify interface handles both directions
-    assert interface.client.account == "+10000000000"
+    # Verify signal interface is initialized
+    assert signal_mcp._client.account == "+10000000000"

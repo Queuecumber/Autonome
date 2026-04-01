@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from adapters.signal.model import SignalClient, Message, Reaction, Attachment
-from adapters.signal.mcp_server import SignalInterface
+from adapters.signal import mcp_server
 
 
 @pytest.fixture
@@ -20,21 +20,21 @@ def client():
 
 @pytest.fixture
 def interface(client):
-    iface = SignalInterface(client=client, session_manager_url="http://localhost:5000")
-    iface._http = AsyncMock()
-    iface._http.post = AsyncMock()
-    return iface
+    mcp_server.init(client, "http://localhost:5000")
+    mcp_server._http = AsyncMock()
+    mcp_server._http.post = AsyncMock()
+    return mcp_server
 
 
 def test_interface_init(interface):
-    assert interface.client.account == "+10000000000"
+    assert interface._client.account == "+10000000000"
 
 
 @pytest.mark.asyncio
 async def test_on_message_pushes_event(interface):
     msg = Message(sender="+11111111111", timestamp=1234567890, text="Hello from Signal")
 
-    await interface._on_message(msg)
+    await interface.on_message(msg)
 
     interface._http.post.assert_called_once()
     event = interface._http.post.call_args.kwargs["json"]
@@ -56,7 +56,7 @@ async def test_on_message_reaction(interface):
         ),
     )
 
-    await interface._on_message(msg)
+    await interface.on_message(msg)
 
     event = interface._http.post.call_args.kwargs["json"]
     assert event["metadata"]["type"] == "reaction"
@@ -72,7 +72,7 @@ async def test_on_message_attachment(interface):
         attachments=[Attachment(id="abc", content_type="application/pdf", filename="doc.pdf")],
     )
 
-    await interface._on_message(msg)
+    await interface.on_message(msg)
 
     event = interface._http.post.call_args.kwargs["json"]
     assert "doc.pdf" in event["text"]

@@ -1,11 +1,11 @@
-"""Signal adapter: runs SignalInterface (inbound + outbound MCP) over a shared SignalClient."""
+"""Signal adapter: runs inbound listener + outbound MCP server over a shared SignalClient."""
 
 import asyncio
 import logging
 import os
 
 from adapters.signal.model import SignalClient
-from adapters.signal.mcp_server import SignalInterface
+from adapters.signal import mcp_server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,15 +27,15 @@ async def main():
         allow_from=allow_from,
     )
 
-    interface = SignalInterface(client=client, session_manager_url=session_manager_url)
+    mcp_server.init(client, session_manager_url)
 
     try:
         await asyncio.gather(
-            interface.run_inbound(),
-            interface.run_mcp(port=mcp_port),
+            mcp_server.run_inbound(),
+            mcp_server.run_mcp(port=mcp_port),
         )
     finally:
-        await interface.close()
+        await mcp_server.close()
         await client.close()
 
 
