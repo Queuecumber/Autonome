@@ -12,7 +12,7 @@ def memory_server(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()
     monkeypatch.setenv("MEMORY_DIR", str(memory_dir))
-    import mcp_servers.memory.server as mod
+    import memory_mcp.server as mod
     importlib.reload(mod)
     return mod
 

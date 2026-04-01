@@ -7,3 +7,4 @@ workspace/
 .env
 *.egg-info/
 dist/
+testbed/

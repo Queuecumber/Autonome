@@ -13,7 +13,7 @@ def workspace_server(tmp_workspace, monkeypatch):
     monkeypatch.setenv("WORKSPACE_DIR", str(tmp_workspace))
     # Need to reimport so WORKSPACE picks up the env var
     import importlib
-    import mcp_servers.workspace_fs.server as mod
+    import workspace_fs.server as mod
     importlib.reload(mod)
     return mod
 
