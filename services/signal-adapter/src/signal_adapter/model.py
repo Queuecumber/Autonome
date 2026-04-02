@@ -43,6 +43,60 @@ class Reaction:
 
 
 @dataclass
+class ImageData:
+    """A base64-encoded image fetched from an attachment."""
+    type: str  # mime type
+    data: str  # base64
+    filename: str
+
+
+@dataclass
+class EventMetadata:
+    """Metadata for a session manager event."""
+    message_id: str = ""
+    sender: str = ""
+    type: str = ""  # "reaction" for reaction events
+    emoji: str = ""
+    target_timestamp: str = ""
+    target_author: str = ""
+    is_remove: bool = False
+    images: list[ImageData] = field(default_factory=list)
+
+
+@dataclass
+class Event:
+    """An event to push to the session manager."""
+    source: str
+    session_id: str
+    text: str
+    metadata: EventMetadata = field(default_factory=EventMetadata)
+
+    def to_dict(self) -> dict:
+        """Convert to dict for JSON serialization."""
+        d: dict = {
+            "source": self.source,
+            "session_id": self.session_id,
+            "text": self.text,
+            "metadata": {},
+        }
+        # Only include non-default metadata fields
+        m = self.metadata
+        if m.message_id: d["metadata"]["message_id"] = m.message_id
+        if m.sender: d["metadata"]["sender"] = m.sender
+        if m.type: d["metadata"]["type"] = m.type
+        if m.emoji: d["metadata"]["emoji"] = m.emoji
+        if m.target_timestamp: d["metadata"]["target_timestamp"] = m.target_timestamp
+        if m.target_author: d["metadata"]["target_author"] = m.target_author
+        if m.is_remove: d["metadata"]["is_remove"] = m.is_remove
+        if m.images:
+            d["metadata"]["images"] = [
+                {"type": img.type, "data": img.data, "filename": img.filename}
+                for img in m.images
+            ]
+        return d
+
+
+@dataclass
 class Message:
     """An inbound Signal message."""
     sender: str
