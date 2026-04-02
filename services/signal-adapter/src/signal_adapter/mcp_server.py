@@ -86,12 +86,7 @@ async def get_attachment(attachment_id: str) -> bytes:
 
 async def on_message(msg: Message) -> None:
     """Push a message to the session manager. Attachments stay lazy — agent fetches via resource."""
-    if msg.reaction:
-        logger.info(f"Received reaction from {msg.sender}: {msg.reaction.emoji}")
-    else:
-        att_info = f" + {len(msg.attachments)} attachment(s)" if msg.attachments else ""
-        logger.info(f"Received message from {msg.sender}: {msg.text[:50]}{att_info}")
-
+    logger.info(f"Received: {msg}")
     try:
         await _http.post(f"{session_manager_url}/event", json=msg.to_event())
     except Exception as e:
