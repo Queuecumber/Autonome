@@ -86,7 +86,7 @@ async def get_attachment(attachment_id: str) -> bytes:
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message) -> None:
-    """Convert a Message to a structured Event and push it."""
+    """Convert a Message to a structured Event and push it to the session manager."""
     sender = msg.sender
     timestamp = str(msg.timestamp)
 
@@ -106,47 +106,41 @@ async def on_message(msg: Message) -> None:
             ),
         )
         logger.info(f"Received reaction from {sender}: {r.emoji}")
-        await _push_event(event)
-        return
+    else:
+        text = msg.text
+        images: list[ImageData] = []
 
-    text = msg.text
-    images: list[ImageData] = []
+        for att in msg.attachments:
+            if att.is_image:
+                try:
+                    raw = await client.fetch_attachment(att.id)
+                    images.append(ImageData(
+                        type=att.content_type,
+                        data=base64.b64encode(raw).decode(),
+                        filename=att.filename,
+                    ))
+                    logger.info(f"Fetched image: {att.filename} ({att.content_type}, {len(raw)} bytes)")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch attachment {att.id}: {e}")
+            else:
+                suffix = f"[Attachment: {att.filename} ({att.content_type})]"
+                text = f"{text}\n{suffix}" if text else suffix
 
-    for att in msg.attachments:
-        if att.is_image:
-            try:
-                raw = await client.fetch_attachment(att.id)
-                images.append(ImageData(
-                    type=att.content_type,
-                    data=base64.b64encode(raw).decode(),
-                    filename=att.filename,
-                ))
-                logger.info(f"Fetched image: {att.filename} ({att.content_type}, {len(raw)} bytes)")
-            except Exception as e:
-                logger.warning(f"Failed to fetch attachment {att.id}: {e}")
-        else:
-            suffix = f"[Attachment: {att.filename} ({att.content_type})]"
-            text = f"{text}\n{suffix}" if text else suffix
+        if not text:
+            text = "[sent an image]"
 
-    if not text:
-        text = "[sent an image]"
+        event = Event(
+            source="signal",
+            session_id=sender,
+            text=text,
+            metadata=EventMetadata(
+                message_id=timestamp,
+                sender=sender,
+                images=images,
+            ),
+        )
+        logger.info(f"Received message from {sender}: {text[:50]}{'...' if len(text) > 50 else ''}")
 
-    event = Event(
-        source="signal",
-        session_id=sender,
-        text=text,
-        metadata=EventMetadata(
-            message_id=timestamp,
-            sender=sender,
-            images=images,
-        ),
-    )
-
-    logger.info(f"Received message from {sender}: {text[:50]}{'...' if len(text) > 50 else ''}")
-    await _push_event(event)
-
-
-async def _push_event(event: Event) -> None:
     try:
         await _http.post(f"{session_manager_url}/event", json=event.to_dict())
     except Exception as e:
