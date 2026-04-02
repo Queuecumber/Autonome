@@ -15,7 +15,7 @@ import os
 import httpx
 from fastmcp import FastMCP
 
-from signal_adapter.model import SignalClient, Message, Event, EventMetadata, ImageData
+from signal_adapter.model import SignalClient, Message
 
 logger = logging.getLogger(__name__)
 
@@ -86,63 +86,31 @@ async def get_attachment(attachment_id: str) -> bytes:
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message) -> None:
-    """Convert a Message to a structured Event and push it to the session manager."""
-    sender = msg.sender
-    timestamp = str(msg.timestamp)
+    """Resolve lazy attachments and push the message to the session manager."""
+    # Resolve image attachments (lazy → base64)
+    for att in msg.attachments:
+        if att.is_image:
+            try:
+                raw = await client.fetch_attachment(att.id)
+                msg.resolved_images.append({
+                    "type": att.content_type,
+                    "data": base64.b64encode(raw).decode(),
+                    "filename": att.filename,
+                })
+                logger.info(f"Fetched image: {att.filename} ({att.content_type}, {len(raw)} bytes)")
+            except Exception as e:
+                logger.warning(f"Failed to fetch attachment {att.id}: {e}")
+        else:
+            suffix = f"[Attachment: {att.filename} ({att.content_type})]"
+            msg.text = f"{msg.text}\n{suffix}" if msg.text else suffix
 
     if msg.reaction:
-        r = msg.reaction
-        event = Event(
-            source="signal",
-            session_id=sender,
-            text=f"[reacted with {r.emoji} to message at {r.target_timestamp}]",
-            metadata=EventMetadata(
-                type="reaction",
-                sender=sender,
-                emoji=r.emoji,
-                target_timestamp=str(r.target_timestamp),
-                target_author=r.target_author,
-                is_remove=r.is_remove,
-            ),
-        )
-        logger.info(f"Received reaction from {sender}: {r.emoji}")
+        logger.info(f"Received reaction from {msg.sender}: {msg.reaction.emoji}")
     else:
-        text = msg.text
-        images: list[ImageData] = []
-
-        for att in msg.attachments:
-            if att.is_image:
-                try:
-                    raw = await client.fetch_attachment(att.id)
-                    images.append(ImageData(
-                        type=att.content_type,
-                        data=base64.b64encode(raw).decode(),
-                        filename=att.filename,
-                    ))
-                    logger.info(f"Fetched image: {att.filename} ({att.content_type}, {len(raw)} bytes)")
-                except Exception as e:
-                    logger.warning(f"Failed to fetch attachment {att.id}: {e}")
-            else:
-                suffix = f"[Attachment: {att.filename} ({att.content_type})]"
-                text = f"{text}\n{suffix}" if text else suffix
-
-        if not text:
-            text = "[sent an image]"
-
-        event = Event(
-            source="signal",
-            session_id=sender,
-            text=text,
-            metadata=EventMetadata(
-                message_id=timestamp,
-                sender=sender,
-                images=images,
-            ),
-        )
-        logger.info(f"Received message from {sender}: {text[:50]}{'...' if len(text) > 50 else ''}")
+        logger.info(f"Received message from {msg.sender}: {msg.text[:50]}{'...' if len(msg.text) > 50 else ''}")
 
     try:
-        await _http.post(f"{session_manager_url}/event", json=event.to_dict())
+        await _http.post(f"{session_manager_url}/event", json=msg.to_event())
     except Exception as e:
         logger.error(f"Failed to push event to session manager: {e}")
 

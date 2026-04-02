@@ -9,9 +9,9 @@ import asyncio
 import base64
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Awaitable
+from typing import Any, Callable, Awaitable
 
 import httpx
 import websockets
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Attachment:
-    """An attachment on a Signal message."""
+    """An attachment on a Signal message. Content is lazy — fetch via SignalClient."""
     id: str
     content_type: str
     filename: str = "attachment"
@@ -43,67 +43,51 @@ class Reaction:
 
 
 @dataclass
-class ImageData:
-    """A base64-encoded image fetched from an attachment."""
-    type: str  # mime type
-    data: str  # base64
-    filename: str
-
-
-@dataclass
-class EventMetadata:
-    """Metadata for a session manager event."""
-    message_id: str = ""
-    sender: str = ""
-    type: str = ""  # "reaction" for reaction events
-    emoji: str = ""
-    target_timestamp: str = ""
-    target_author: str = ""
-    is_remove: bool = False
-    images: list[ImageData] = field(default_factory=list)
-
-
-@dataclass
-class Event:
-    """An event to push to the session manager."""
-    source: str
-    session_id: str
-    text: str
-    metadata: EventMetadata = field(default_factory=EventMetadata)
-
-    def to_dict(self) -> dict:
-        """Convert to dict for JSON serialization."""
-        d: dict = {
-            "source": self.source,
-            "session_id": self.session_id,
-            "text": self.text,
-            "metadata": {},
-        }
-        # Only include non-default metadata fields
-        m = self.metadata
-        if m.message_id: d["metadata"]["message_id"] = m.message_id
-        if m.sender: d["metadata"]["sender"] = m.sender
-        if m.type: d["metadata"]["type"] = m.type
-        if m.emoji: d["metadata"]["emoji"] = m.emoji
-        if m.target_timestamp: d["metadata"]["target_timestamp"] = m.target_timestamp
-        if m.target_author: d["metadata"]["target_author"] = m.target_author
-        if m.is_remove: d["metadata"]["is_remove"] = m.is_remove
-        if m.images:
-            d["metadata"]["images"] = [
-                {"type": img.type, "data": img.data, "filename": img.filename}
-                for img in m.images
-            ]
-        return d
-
-
-@dataclass
 class Message:
-    """An inbound Signal message."""
+    """An inbound Signal message.
+
+    This is the core data type for both inbound events and session history.
+    The session manager receives this serialized as JSON.
+    """
     sender: str
     timestamp: int
     text: str = ""
     attachments: list[Attachment] = field(default_factory=list)
     reaction: Reaction | None = None
+    # Resolved image content — populated by the adapter before pushing to session manager
+    resolved_images: list[dict] = field(default_factory=list)
+
+    def to_event(self, source: str = "signal") -> dict:
+        """Serialize as a session manager event."""
+        if self.reaction:
+            r = self.reaction
+            return {
+                "source": source,
+                "session_id": self.sender,
+                "text": f"[reacted with {r.emoji} to message at {r.target_timestamp}]",
+                "metadata": {
+                    "type": "reaction",
+                    "sender": self.sender,
+                    "emoji": r.emoji,
+                    "target_timestamp": str(r.target_timestamp),
+                    "target_author": r.target_author,
+                    "is_remove": r.is_remove,
+                },
+            }
+
+        metadata: dict = {
+            "message_id": str(self.timestamp),
+            "sender": self.sender,
+        }
+        if self.resolved_images:
+            metadata["images"] = self.resolved_images
+
+        return {
+            "source": source,
+            "session_id": self.sender,
+            "text": self.text or "[sent an image]",
+            "metadata": metadata,
+        }
 
 
 class SignalClient:
@@ -159,7 +143,6 @@ class SignalClient:
 
         timestamp = data_msg.get("timestamp", 0)
 
-        # Reaction
         reaction_data = data_msg.get("reaction")
         if reaction_data:
             return Message(
@@ -174,7 +157,6 @@ class SignalClient:
                 ),
             )
 
-        # Text + attachments
         text = data_msg.get("message", "")
         raw_attachments = data_msg.get("attachments", [])
         attachments = [

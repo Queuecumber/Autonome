@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 
-from signal_adapter.model import SignalClient, Message, Reaction, Attachment, Event
+from signal_adapter.model import SignalClient, Message, Reaction, Attachment
 from signal_adapter import mcp_server as signal_mcp
 
 
