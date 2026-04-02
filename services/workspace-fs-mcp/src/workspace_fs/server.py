@@ -19,11 +19,11 @@ mcp = FastMCP("workspace-fs", instructions=(
 ))
 
 
-def _safe_resolve(path: str) -> Path | None:
-    """Resolve a path relative to WORKSPACE, rejecting traversal."""
+def _safe_resolve(path: str) -> Path:
+    """Resolve a path relative to WORKSPACE. Raises ValueError on traversal."""
     target = (WORKSPACE / path).resolve()
     if not str(target).startswith(str(WORKSPACE)):
-        return None
+        raise ValueError(f"Path traversal not allowed: {path}")
     return target
 
 
@@ -31,12 +31,10 @@ def _safe_resolve(path: str) -> Path | None:
 def read_file(path: str) -> str:
     """Read a file from the workspace."""
     target = _safe_resolve(path)
-    if target is None:
-        return "Error: path traversal not allowed"
     if not target.exists():
-        return f"Error: {path} not found"
+        raise FileNotFoundError(f"{path} not found")
     if not target.is_file():
-        return f"Error: {path} is not a file"
+        raise IsADirectoryError(f"{path} is not a file")
     return target.read_text()
 
 
@@ -44,8 +42,6 @@ def read_file(path: str) -> str:
 def write_file(path: str, content: str) -> str:
     """Write content to a file in the workspace. Creates parent directories as needed."""
     target = _safe_resolve(path)
-    if target is None:
-        return "Error: path traversal not allowed"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content)
     return f"Wrote {len(content)} bytes to {path}"
@@ -55,12 +51,10 @@ def write_file(path: str, content: str) -> str:
 def list_directory(path: str = ".") -> list[str]:
     """List files and directories at a path in the workspace."""
     target = _safe_resolve(path)
-    if target is None:
-        return ["Error: path traversal not allowed"]
     if not target.exists():
-        return [f"Error: {path} not found"]
+        raise FileNotFoundError(f"{path} not found")
     if not target.is_dir():
-        return [f"Error: {path} is not a directory"]
+        raise NotADirectoryError(f"{path} is not a directory")
     return [str(p.relative_to(WORKSPACE)) for p in sorted(target.iterdir())]
 
 
@@ -68,10 +62,8 @@ def list_directory(path: str = ".") -> list[str]:
 def search_files(pattern: str, path: str = ".") -> list[str]:
     """Search for files matching a glob pattern within the workspace."""
     target = _safe_resolve(path)
-    if target is None:
-        return ["Error: path traversal not allowed"]
     if not target.exists():
-        return [f"Error: {path} not found"]
+        raise FileNotFoundError(f"{path} not found")
     return [str(p.relative_to(WORKSPACE)) for p in sorted(target.rglob(pattern)) if p.is_file()]
 
 

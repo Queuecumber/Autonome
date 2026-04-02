@@ -19,7 +19,6 @@ def memory_server(tmp_path, monkeypatch):
 
 @pytest.fixture
 def memory_dir(memory_server):
-    """The resolved memory directory path."""
     return memory_server.MEMORY_DIR
 
 
@@ -27,8 +26,8 @@ def memory_dir(memory_server):
 
 
 def test_read_memory_empty(memory_server):
-    result = memory_server.read_memory("2026-03-18")
-    assert "No memory entry" in result
+    with pytest.raises(FileNotFoundError):
+        memory_server.read_memory("2026-03-18")
 
 
 def test_edit_and_read_memory(memory_server, memory_dir):
@@ -46,21 +45,21 @@ def test_edit_memory_overwrites(memory_server):
 
 
 def test_read_memory_invalid_date(memory_server):
-    result = memory_server.read_memory("not-a-date")
-    assert "Error" in result
+    with pytest.raises(ValueError, match="Invalid date"):
+        memory_server.read_memory("not-a-date")
 
 
 def test_edit_memory_invalid_date(memory_server):
-    result = memory_server.edit_memory("13-99-2026", "bad")
-    assert "Error" in result
+    with pytest.raises(ValueError, match="Invalid date"):
+        memory_server.edit_memory("13-99-2026", "bad")
 
 
 # --- global memory ---
 
 
 def test_read_global_memory_empty(memory_server):
-    result = memory_server.read_global_memory()
-    assert "No global memory" in result
+    with pytest.raises(FileNotFoundError):
+        memory_server.read_global_memory()
 
 
 def test_edit_and_read_global_memory(memory_server, memory_dir):
@@ -74,8 +73,7 @@ def test_edit_and_read_global_memory(memory_server, memory_dir):
 
 
 def test_list_memories_empty(memory_server):
-    result = memory_server.list_memories()
-    assert result == []
+    assert memory_server.list_memories() == []
 
 
 def test_list_memories_returns_dates(memory_server):
@@ -88,7 +86,6 @@ def test_list_memories_returns_dates(memory_server):
 
 
 def test_list_memories_excludes_global(memory_server):
-    """MEMORY.md should not appear in the date list."""
     memory_server.edit_global_memory("global stuff")
     memory_server.edit_memory("2026-03-18", "daily stuff")
 
@@ -98,7 +95,6 @@ def test_list_memories_excludes_global(memory_server):
 
 
 def test_list_memories_ignores_non_date_files(memory_server, memory_dir):
-    """Non-date markdown files are ignored."""
     (memory_dir / "random-notes.md").write_text("not a date")
     memory_server.edit_memory("2026-03-18", "real entry")
 

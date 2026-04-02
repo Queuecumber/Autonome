@@ -22,13 +22,12 @@ mcp = FastMCP("memory", instructions=(
 ))
 
 
-def _safe_date_path(date_str: str) -> Path | None:
-    """Validate and resolve a date string to a memory file path."""
+def _validate_date(date_str: str) -> Path:
+    """Validate a date string and return the memory file path. Raises ValueError on bad format."""
     try:
-        # Validate it's a real date
         date.fromisoformat(date_str)
     except ValueError:
-        return None
+        raise ValueError(f"Invalid date format '{date_str}', expected YYYY-MM-DD")
     return MEMORY_DIR / f"{date_str}.md"
 
 
@@ -39,20 +38,16 @@ def _global_path() -> Path:
 @mcp.tool
 def read_memory(date: str) -> str:
     """Read the memory entry for a specific date (YYYY-MM-DD format)."""
-    path = _safe_date_path(date)
-    if path is None:
-        return f"Error: invalid date format '{date}', expected YYYY-MM-DD"
+    path = _validate_date(date)
     if not path.exists():
-        return f"No memory entry for {date}"
+        raise FileNotFoundError(f"No memory entry for {date}")
     return path.read_text()
 
 
 @mcp.tool
 def edit_memory(date: str, content: str) -> str:
     """Write or replace the memory entry for a specific date (YYYY-MM-DD format)."""
-    path = _safe_date_path(date)
-    if path is None:
-        return f"Error: invalid date format '{date}', expected YYYY-MM-DD"
+    path = _validate_date(date)
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return f"Updated memory for {date} ({len(content)} bytes)"
@@ -63,7 +58,7 @@ def read_global_memory() -> str:
     """Read the global MEMORY.md index file."""
     path = _global_path()
     if not path.exists():
-        return "No global memory file exists yet"
+        raise FileNotFoundError("No global memory file exists yet")
     return path.read_text()
 
 
