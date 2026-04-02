@@ -54,8 +54,9 @@ class Message:
     text: str = ""
     attachments: list[Attachment] = field(default_factory=list)
     reaction: Reaction | None = None
-    # Resolved image content — populated by the adapter before pushing to session manager
-    resolved_images: list[dict] = field(default_factory=list)
+    @property
+    def has_attachments(self) -> bool:
+        return len(self.attachments) > 0
 
     def to_event(self, source: str = "signal") -> dict:
         """Serialize as a session manager event."""
@@ -79,13 +80,22 @@ class Message:
             "message_id": str(self.timestamp),
             "sender": self.sender,
         }
-        if self.resolved_images:
-            metadata["images"] = self.resolved_images
+
+        text = self.text
+        if self.attachments:
+            metadata["attachments"] = [
+                {
+                    "id": att.id,
+                    "content_type": att.content_type,
+                    "filename": att.filename,
+                }
+                for att in self.attachments
+            ]
 
         return {
             "source": source,
             "session_id": self.sender,
-            "text": self.text or "[sent an image]",
+            "text": text or "",
             "metadata": metadata,
         }
 

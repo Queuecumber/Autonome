@@ -8,7 +8,6 @@ the inbound listener + MCP server.
 """
 
 import asyncio
-import base64
 import logging
 import os
 
@@ -86,28 +85,12 @@ async def get_attachment(attachment_id: str) -> bytes:
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message) -> None:
-    """Resolve lazy attachments and push the message to the session manager."""
-    # Resolve image attachments (lazy → base64)
-    for att in msg.attachments:
-        if att.is_image:
-            try:
-                raw = await client.fetch_attachment(att.id)
-                msg.resolved_images.append({
-                    "type": att.content_type,
-                    "data": base64.b64encode(raw).decode(),
-                    "filename": att.filename,
-                })
-                logger.info(f"Fetched image: {att.filename} ({att.content_type}, {len(raw)} bytes)")
-            except Exception as e:
-                logger.warning(f"Failed to fetch attachment {att.id}: {e}")
-        else:
-            suffix = f"[Attachment: {att.filename} ({att.content_type})]"
-            msg.text = f"{msg.text}\n{suffix}" if msg.text else suffix
-
+    """Push a message to the session manager. Attachments stay lazy — agent fetches via resource."""
     if msg.reaction:
         logger.info(f"Received reaction from {msg.sender}: {msg.reaction.emoji}")
     else:
-        logger.info(f"Received message from {msg.sender}: {msg.text[:50]}{'...' if len(msg.text) > 50 else ''}")
+        att_info = f" + {len(msg.attachments)} attachment(s)" if msg.attachments else ""
+        logger.info(f"Received message from {msg.sender}: {msg.text[:50]}{att_info}")
 
     try:
         await _http.post(f"{session_manager_url}/event", json=msg.to_event())

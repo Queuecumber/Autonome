@@ -74,4 +74,7 @@ async def test_on_message_attachment(setup_signal):
     await setup_signal.on_message(msg)
 
     event = setup_signal._http.post.call_args.kwargs["json"]
-    assert "doc.pdf" in event["text"]
+    assert event["text"] == "Check this"
+    assert len(event["metadata"]["attachments"]) == 1
+    assert event["metadata"]["attachments"][0]["filename"] == "doc.pdf"
+    assert event["metadata"]["attachments"][0]["id"] == "abc"
