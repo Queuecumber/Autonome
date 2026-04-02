@@ -38,62 +38,41 @@ mcp = FastMCP("signal", instructions=(
 # ── Tools ────────────────────────────────────────────────
 
 @mcp.tool
-async def send_message(recipient: str, text: str) -> str:
+async def send_message(recipient: str, text: str) -> None:
     """Send a text message to a recipient on Signal. Automatically stops typing indicator."""
     try:
         await client.set_typing(recipient, stop=True)
     except Exception:
         pass
-    try:
-        await client.send_message(recipient, text)
-        return f"Sent message to {recipient}"
-    except Exception as e:
-        return f"Error sending message: {e}"
+    await client.send_message(recipient, text)
 
 
 @mcp.tool
 async def send_attachment(
     recipient: str, file_path: str, mime_type: str, caption: str | None = None
-) -> str:
+) -> None:
     """Send a file attachment to a recipient on Signal."""
-    try:
-        await client.send_attachment(recipient, file_path, mime_type, caption)
-        return f"Sent {file_path} to {recipient}"
-    except Exception as e:
-        return f"Error sending attachment: {e}"
+    await client.send_attachment(recipient, file_path, mime_type, caption)
 
 
 @mcp.tool
 async def react(
     recipient: str, emoji: str, target_author: str, message_timestamp: int
-) -> str:
+) -> None:
     """React to a message with an emoji. target_author is who sent the message, message_timestamp identifies which message."""
-    try:
-        await client.send_reaction(recipient, emoji, target_author, message_timestamp)
-        return f"Reacted with {emoji}"
-    except Exception as e:
-        return f"Error reacting: {e}"
+    await client.send_reaction(recipient, emoji, target_author, message_timestamp)
 
 
 @mcp.tool
-async def read_receipt(message_sender: str, message_timestamp: int) -> str:
+async def read_receipt(message_sender: str, message_timestamp: int) -> None:
     """Send a read receipt for a message. Call this when you've read a message."""
-    try:
-        await client.send_receipt(message_sender, message_timestamp)
-        return f"Read receipt sent to {message_sender}"
-    except Exception as e:
-        return f"Error sending read receipt: {e}"
+    await client.send_receipt(message_sender, message_timestamp)
 
 
 @mcp.tool
-async def typing_indicator(recipient: str, stop: bool = False) -> str:
+async def typing_indicator(recipient: str, stop: bool = False) -> None:
     """Show or hide the typing indicator. Call with stop=False before composing, stop=True when done."""
-    try:
-        await client.set_typing(recipient, stop=stop)
-        status = "stopped" if stop else "started"
-        return f"Typing indicator {status} for {recipient}"
-    except Exception as e:
-        return f"Error setting typing indicator: {e}"
+    await client.set_typing(recipient, stop=stop)
 
 
 # ── Resources ────────────────────────────────────────────
