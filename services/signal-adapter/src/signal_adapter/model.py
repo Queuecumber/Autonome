@@ -160,7 +160,6 @@ class SignalClient:
         timestamp = data_msg.get("timestamp")
         if not timestamp:
             return None
-        raw_attachments = data_msg.get("attachments") or []
         attachments = [
             Attachment(
                 id=att["id"],
@@ -168,7 +167,7 @@ class SignalClient:
                 filename=att.get("fileName"),
                 size=att.get("size"),
             )
-            for att in raw_attachments
+            for att in data_msg.get("attachments", [])
             if att.get("id")
         ]
 
