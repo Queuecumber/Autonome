@@ -113,8 +113,8 @@ class SignalClient:
                     logger.info("Signal WebSocket connected")
                     async for raw in ws:
                         try:
-                            envelope = json.loads(raw)
-                            msg = self._parse_envelope(envelope)
+                            raw_msg = json.loads(raw)
+                            msg = self._parse_message(raw_msg)
                             if msg is not None:
                                 await on_message(msg)
                         except json.JSONDecodeError:
@@ -125,15 +125,15 @@ class SignalClient:
                 logger.error(f"WebSocket connection failed: {e}, reconnecting in 5s...")
                 await asyncio.sleep(5)
 
-    def _parse_envelope(self, envelope: dict) -> Message | Reaction | None:
-        """Parse a signal-cli envelope into a Message, Reaction, or None if irrelevant."""
-        env = envelope.get("envelope", {})
-        sender = env.get("source")
+    def _parse_message(self, raw: dict) -> Message | Reaction | None:
+        """Parse a raw signal-cli WebSocket message into a Message, Reaction, or None."""
+        envelope = raw.get("envelope", {})
+        sender = envelope.get("source")
 
         if self.allow_from and sender not in self.allow_from:
             return None
 
-        data_msg = env.get("dataMessage")
+        data_msg = envelope.get("dataMessage")
         if not data_msg:
             return None
 
