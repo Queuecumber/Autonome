@@ -10,7 +10,6 @@ import base64
 import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlparse, urlunparse
 
@@ -207,21 +206,16 @@ class SignalClient:
         )
 
     async def send_attachment(
-        self, recipient: str, file_path: str, mime_type: str, caption: str | None = None
+        self, recipient: str, data: bytes, caption: str | None = None
     ) -> None:
         """Send a file attachment."""
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"{file_path} not found")
-
-        data = base64.b64encode(path.read_bytes()).decode()
         await self._http.post(
             f"{self.signal_cli_url}/v2/send",
             json={
                 "message": caption or "",
                 "number": self.account,
                 "recipients": [recipient],
-                "base64_attachments": [data],
+                "base64_attachments": [base64.b64encode(data).decode()],
             },
         )
 
