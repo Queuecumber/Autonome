@@ -48,14 +48,11 @@ async def send_message(recipient: str, text: str) -> None:
 
 @mcp.tool
 async def send_attachment(
-    recipient: str, file_path: str, caption: str | None = None
+    recipient: str, data: str, caption: str | None = None
 ) -> None:
-    """Send a file attachment to a recipient on Signal."""
-    from pathlib import Path
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"{file_path} not found")
-    await client.send_attachment(recipient, path.read_bytes(), caption)
+    """Send a file attachment to a recipient on Signal. Data is base64-encoded file content."""
+    import base64
+    await client.send_attachment(recipient, base64.b64decode(data), caption)
 
 
 @mcp.tool
