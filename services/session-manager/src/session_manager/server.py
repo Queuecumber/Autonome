@@ -41,6 +41,30 @@ def _mcp_tool_to_openai(tool) -> dict:
     }
 
 
+def _strip_binary_content(tool_result: dict) -> dict:
+    """Strip base64 image data from a tool result before saving to history."""
+    content = tool_result.get("content")
+    if isinstance(content, list):
+        # Multimodal content — replace image blocks with references
+        stripped = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "image_url":
+                stripped.append({"type": "text", "text": "[image content stripped from history]"})
+            else:
+                stripped.append(block)
+        return {**tool_result, "content": stripped}
+    if isinstance(content, str) and len(content) > 10000:
+        # Large text content (likely base64) — check if it's a JSON blob with base64
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict) and data.get("content_base64"):
+                data["content_base64"] = "[stripped from history]"
+                return {**tool_result, "content": json.dumps(data)}
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return tool_result
+
+
 class MCPConnection:
     """Manages a persistent connection to an MCP server."""
 
@@ -303,7 +327,7 @@ class SessionOrchestrator:
                         tool_result = await self._execute_tool_call(tool_call)
                         logger.info(f"  Result: {str(tool_result['content'])[:200]}")
                         messages.append(tool_result)
-                        all_new_messages.append(tool_result)
+                        all_new_messages.append(_strip_binary_content(tool_result))
 
                     call_kwargs["messages"] = messages
                     continue
