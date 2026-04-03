@@ -33,7 +33,7 @@ mcp = FastMCP("signal", instructions=(
     "When you receive a message, send a read_receipt to acknowledge it, then "
     "start the typing_indicator before composing your response. "
     "When a message has attachments, the metadata includes attachment IDs. "
-    "To view an attachment, read the resource at signal://attachments/{id}."
+    "To view an attachment, call get_attachment with the attachment ID."
 ))
 
 
