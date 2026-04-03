@@ -4,6 +4,7 @@ Exposes read_file, write_file, list_directory, search_files scoped to a
 workspace root. Path traversal outside the workspace is rejected.
 """
 
+import base64
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,22 @@ def read_file(path: str) -> str:
     if not target.is_file():
         raise IsADirectoryError(f"{path} is not a file")
     return target.read_text()
+
+
+@mcp.tool
+def read_file_base64(path: str) -> dict:
+    """Read a binary file from the workspace as base64. Returns content_type and data."""
+    target = _safe_resolve(path)
+    if not target.exists():
+        raise FileNotFoundError(f"{path} not found")
+    if not target.is_file():
+        raise IsADirectoryError(f"{path} is not a file")
+    import mimetypes
+    content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return {
+        "content_type": content_type,
+        "data": base64.b64encode(target.read_bytes()).decode(),
+    }
 
 
 @mcp.tool
