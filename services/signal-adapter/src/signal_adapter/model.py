@@ -27,9 +27,6 @@ class Attachment:
     filename: str = "attachment"
     size: int = 0
 
-    @property
-    def is_image(self) -> bool:
-        return self.content_type.startswith("image/")
 
 
 @dataclass

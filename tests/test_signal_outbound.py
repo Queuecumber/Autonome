@@ -30,10 +30,6 @@ def test_message_dataclass():
     assert msg.reaction is None
 
 
-def test_attachment_is_image():
-    assert Attachment(id="1", content_type="image/jpeg").is_image
-    assert not Attachment(id="2", content_type="application/pdf").is_image
-
 
 def test_parse_text_message(mock_client):
     envelope = {
@@ -86,7 +82,7 @@ def test_parse_attachment(mock_client):
     msg = mock_client._parse_envelope(envelope)
     assert msg is not None
     assert len(msg.attachments) == 1
-    assert msg.attachments[0].is_image
+    assert msg.attachments[0].content_type == "image/png"
 
 
 def test_parse_filters_unauthorized(mock_client):
