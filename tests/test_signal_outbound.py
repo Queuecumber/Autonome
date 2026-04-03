@@ -4,7 +4,6 @@ import pytest
 from unittest.mock import AsyncMock
 
 from signal_adapter.model import SignalClient, Message, Attachment, Reaction
-
 from signal_adapter import mcp_server as signal_mcp
 
 
@@ -30,13 +29,10 @@ def test_message_dataclass():
     assert msg.attachments == []
 
 
-
 def test_parse_text_message(mock_client):
     envelope = {
-        "envelope": {
-            "source": "+11111111111",
-            "dataMessage": {"message": "Hello", "timestamp": 123},
-        }
+        "source": "+11111111111",
+        "dataMessage": {"message": "Hello", "timestamp": 123},
     }
     msg = mock_client._parse_message(envelope)
     assert msg is not None
@@ -46,18 +42,16 @@ def test_parse_text_message(mock_client):
 
 def test_parse_reaction(mock_client):
     envelope = {
-        "envelope": {
-            "source": "+11111111111",
-            "dataMessage": {
-                "timestamp": 123,
-                "reaction": {
-                    "emoji": "👍",
-                    "targetSentTimestamp": 456,
-                    "targetAuthor": "+10000000000",
-                    "isRemove": False,
-                },
+        "source": "+11111111111",
+        "dataMessage": {
+            "timestamp": 123,
+            "reaction": {
+                "emoji": "👍",
+                "targetSentTimestamp": 456,
+                "targetAuthor": "+10000000000",
+                "isRemove": False,
             },
-        }
+        },
     }
     result = mock_client._parse_message(envelope)
     assert isinstance(result, Reaction)
@@ -68,16 +62,14 @@ def test_parse_reaction(mock_client):
 
 def test_parse_attachment(mock_client):
     envelope = {
-        "envelope": {
-            "source": "+11111111111",
-            "dataMessage": {
-                "message": "look",
-                "timestamp": 123,
-                "attachments": [
-                    {"id": "abc", "contentType": "image/png", "fileName": "photo.png"},
-                ],
-            },
-        }
+        "source": "+11111111111",
+        "dataMessage": {
+            "message": "look",
+            "timestamp": 123,
+            "attachments": [
+                {"id": "abc", "contentType": "image/png", "fileName": "photo.png"},
+            ],
+        },
     }
     msg = mock_client._parse_message(envelope)
     assert msg is not None
@@ -88,10 +80,8 @@ def test_parse_attachment(mock_client):
 def test_parse_filters_unauthorized(mock_client):
     mock_client.allow_from = ["+11111111111"]
     envelope = {
-        "envelope": {
-            "source": "+19999999999",
-            "dataMessage": {"message": "nope", "timestamp": 123},
-        }
+        "source": "+19999999999",
+        "dataMessage": {"message": "nope", "timestamp": 123},
     }
     assert mock_client._parse_message(envelope) is None
 
