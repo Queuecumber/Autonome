@@ -182,6 +182,24 @@ class SessionOrchestrator:
         else:
             result_text = await conn.call_tool(tool_name, func.arguments)
 
+        # Check if tool result contains image data — pass as multimodal content
+        try:
+            result_data = json.loads(result_text)
+            if isinstance(result_data, dict) and result_data.get("content_type", "").startswith("image/"):
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": [
+                        {"type": "text", "text": f"Attachment {result_data.get('id', '')}"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{result_data['content_type']};base64,{result_data['content_base64']}"},
+                        },
+                    ],
+                }
+        except (json.JSONDecodeError, KeyError):
+            pass
+
         return {
             "role": "tool",
             "tool_call_id": tool_call.id,

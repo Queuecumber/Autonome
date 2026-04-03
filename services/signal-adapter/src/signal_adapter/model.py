@@ -26,6 +26,7 @@ class Attachment:
     content_type: str | None = None
     filename: str | None = None
     size: int | None = None
+    content_base64: str | None = None
 
 
 @dataclass
@@ -184,13 +185,18 @@ class SignalClient:
             attachments=attachments,
         )
 
-    async def fetch_attachment(self, attachment_id: str) -> bytes:
-        """Download an attachment from signal-cli by ID."""
+    async def fetch_attachment(self, attachment_id: str) -> Attachment:
+        """Download an attachment from signal-cli by ID. Returns Attachment with content populated."""
         resp = await self._http.get(
             f"{self.signal_cli_url}/v1/attachments/{attachment_id}",
         )
         resp.raise_for_status()
-        return resp.content
+        content_type = resp.headers.get("content-type")
+        return Attachment(
+            id=attachment_id,
+            content_type=content_type,
+            content_base64=base64.b64encode(resp.content).decode(),
+        )
 
     # ── Writing ──────────────────────────────────────────────
 
