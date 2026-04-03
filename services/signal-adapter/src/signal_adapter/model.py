@@ -152,7 +152,9 @@ class SignalClient:
             )
 
         text = data_msg.get("message", "")
-        timestamp = data_msg.get("timestamp", 0)
+        timestamp = data_msg.get("timestamp")
+        if not timestamp:
+            return None
         raw_attachments = data_msg.get("attachments", [])
         attachments = [
             Attachment(
