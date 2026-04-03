@@ -8,6 +8,7 @@ the inbound listener + MCP server.
 """
 
 import asyncio
+import base64
 import logging
 import os
 
@@ -51,7 +52,6 @@ async def send_attachment(
     recipient: str, data: str, caption: str | None = None
 ) -> None:
     """Send a file attachment to a recipient on Signal. Data is base64-encoded file content."""
-    import base64
     await client.send_attachment(recipient, base64.b64decode(data), caption)
 
 
