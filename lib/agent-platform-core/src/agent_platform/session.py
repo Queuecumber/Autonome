@@ -4,11 +4,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-try:
-    import litellm
-except ImportError:
-    litellm = None
-
 
 class SessionManager:
     def __init__(self, store_dir: Path, max_history_tokens: int = 100000):
@@ -37,19 +32,19 @@ class SessionManager:
                 f.write(json.dumps(msg) + "\n")
 
     def load_truncated(
-        self, channel: str, session_id: str, model: str = "claude-opus-4-6"
+        self, channel: str, session_id: str, model: str = ""
     ) -> list[dict[str, Any]]:
         messages = self.load(channel, session_id)
         if not messages:
             return messages
 
-        token_count = self._count_tokens(messages, model)
+        token_count = self._count_tokens(messages)
         if token_count <= self.max_history_tokens:
             return messages
 
         exchanges = self._group_exchanges(messages)
         while exchanges and self._count_tokens(
-            [m for ex in exchanges for m in ex], model
+            [m for ex in exchanges for m in ex]
         ) > self.max_history_tokens:
             exchanges.pop(0)
 
@@ -67,12 +62,7 @@ class SessionManager:
             exchanges.append(current)
         return exchanges
 
-    def _count_tokens(self, messages: list[dict], model: str) -> int:
-        if litellm is not None:
-            try:
-                return litellm.token_counter(model=model, messages=messages)
-            except Exception:
-                pass
-        # Fallback: rough estimate of 4 chars per token
+    def _count_tokens(self, messages: list[dict]) -> int:
+        """Estimate token count. Rough heuristic: ~4 chars per token."""
         total_chars = sum(len(str(m.get("content", ""))) for m in messages)
         return total_chars // 4

@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "agent-platform-core",
-    "litellm>=1.80,<=1.82.6",
+    "openai>=2.0",
     "mcp>=1.0",
     "httpx>=0.27",
     "uvicorn>=0.30",

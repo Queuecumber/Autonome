@@ -43,7 +43,7 @@ def test_append_and_reload(tmp_sessions):
 
 
 def test_load_truncated_drops_oldest(tmp_sessions):
-    mgr = SessionManager(store_dir=tmp_sessions, max_history_tokens=50)
+    mgr = SessionManager(store_dir=tmp_sessions, max_history_tokens=100)
     messages = []
     for i in range(10):
         messages.extend([

@@ -1,18 +1,19 @@
 """Session manager: central orchestrator that receives events and drives LLM calls.
 
-Uses litellm as a library (not proxy) for model calls, and connects to MCP
-servers directly for tool discovery and execution.
+Uses the OpenAI Python SDK for model calls and connects to MCP servers
+directly for tool discovery and execution.
 """
 
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import litellm
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from openai import AsyncOpenAI
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -21,6 +22,23 @@ from starlette.routing import Route
 from agent_platform.session import SessionManager
 
 logger = logging.getLogger(__name__)
+
+
+def _mcp_tool_to_openai(tool) -> dict:
+    """Convert an MCP tool to OpenAI function tool format."""
+    schema = dict(tool.inputSchema) if tool.inputSchema else {}
+    if "type" not in schema:
+        schema["type"] = "object"
+    if "properties" not in schema:
+        schema["properties"] = {}
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": schema,
+        },
+    }
 
 
 class MCPConnection:
@@ -35,30 +53,27 @@ class MCPConnection:
         self.instructions: str = ""
         self._original_names: dict[str, str] = {}
         self._context = None
-        self._read = None
-        self._write = None
 
     async def connect(self) -> None:
         """Establish connection, get server instructions, and discover tools."""
-        from litellm.experimental_mcp_client import load_mcp_tools
-
         self._context = streamablehttp_client(self.url)
-        self._read, self._write, _ = await self._context.__aenter__()
-        self.session = ClientSession(self._read, self._write)
+        read, write, _ = await self._context.__aenter__()
+        self.session = ClientSession(read, write)
         await self.session.__aenter__()
         init_result = await self.session.initialize()
 
         if hasattr(init_result, "instructions") and init_result.instructions:
             self.instructions = init_result.instructions
 
-        raw_tools = await load_mcp_tools(session=self.session, format="openai")
+        result = await self.session.list_tools()
         self.tools = []
-        for t in raw_tools:
-            original_name = t["function"]["name"]
+        for t in result.tools:
+            openai_tool = _mcp_tool_to_openai(t)
+            original_name = openai_tool["function"]["name"]
             prefixed_name = f"{self.prefix}-{self.name}-{original_name}"
             self._original_names[prefixed_name] = original_name
-            t["function"]["name"] = prefixed_name
-            self.tools.append(t)
+            openai_tool["function"]["name"] = prefixed_name
+            self.tools.append(openai_tool)
 
         logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools, instructions={'yes' if self.instructions else 'no'}")
         for t in self.tools:
@@ -99,13 +114,15 @@ class SessionOrchestrator:
         self.config = config
 
         model_config = config["model"]
-        provider = model_config["provider"]
-        model_name = model_config["model"]
-        self.model = f"{provider}/{model_name}"
-        self.api_key = model_config.get("api_key", "")
-        self.api_base = model_config.get("api_base")
-        self.extra_headers = model_config.get("extra_headers")
+        self.model = model_config["model"]
         self.reasoning_effort = model_config.get("reasoning_effort")
+
+        self.llm = AsyncOpenAI(
+            api_key=model_config.get("api_key", ""),
+            base_url=model_config.get("api_base"),
+            default_headers=model_config.get("extra_headers"),
+            timeout=300,
+        )
 
         session_config = config.get("session", {})
         max_tokens = session_config.get("max_history_tokens", 100000)
@@ -234,7 +251,6 @@ class SessionOrchestrator:
                 history.append(msg)
 
             # Build user message with metadata context + current timestamp
-            from datetime import datetime, timezone
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             context_prefix = f"[{source} | time={now}]"
             if metadata:
@@ -247,20 +263,13 @@ class SessionOrchestrator:
             system_msg = [{"role": "system", "content": system_content}] if system_content else []
             messages = system_msg + history + [enriched_msg]
 
-            # Build litellm call kwargs
+            # Build API call kwargs
             call_kwargs: dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
-                "api_key": self.api_key,
             }
             if self.reasoning_effort:
                 call_kwargs["reasoning_effort"] = self.reasoning_effort
-                call_kwargs["allowed_openai_params"] = ["reasoning_effort"]
-            call_kwargs["timeout"] = 300  # 5 min — large context requests can be slow
-            if self.api_base:
-                call_kwargs["api_base"] = self.api_base
-            if self.extra_headers:
-                call_kwargs["extra_headers"] = self.extra_headers
             if self.openai_tools:
                 call_kwargs["tools"] = self.openai_tools
 
@@ -270,7 +279,7 @@ class SessionOrchestrator:
             all_new_messages = [stored_msg]
             for iteration in range(self.max_tool_iterations):
                 try:
-                    response = await litellm.acompletion(**call_kwargs)
+                    response = await self.llm.chat.completions.create(**call_kwargs)
                 except Exception as e:
                     logger.error(f"LLM call failed: {e}")
                     return None
@@ -292,7 +301,7 @@ class SessionOrchestrator:
                     for tool_call in assistant_msg.tool_calls:
                         logger.info(f"  Tool call: {tool_call.function.name}({tool_call.function.arguments[:100]})")
                         tool_result = await self._execute_tool_call(tool_call)
-                        logger.info(f"  Result: {tool_result['content'][:200]}")
+                        logger.info(f"  Result: {str(tool_result['content'])[:200]}")
                         messages.append(tool_result)
                         all_new_messages.append(tool_result)
 
