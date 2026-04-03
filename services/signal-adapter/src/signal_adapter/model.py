@@ -24,7 +24,7 @@ class Attachment:
     """An attachment on a Signal message. Content is lazy — fetch via SignalClient."""
     id: str
     content_type: str
-    filename: str = "attachment"
+    filename: str | None = None
     size: int = 0
 
 
@@ -149,7 +149,7 @@ class SignalClient:
             Attachment(
                 id=att.get("id", ""),
                 content_type=att.get("contentType", ""),
-                filename=att.get("fileName", "attachment"),
+                filename=att.get("fileName"),
                 size=att.get("size", 0),
             )
             for att in raw_attachments
