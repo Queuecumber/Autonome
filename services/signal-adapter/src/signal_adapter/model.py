@@ -128,22 +128,21 @@ class SignalClient:
                 logger.error(f"WebSocket connection failed: {e}, reconnecting in 5s...")
                 await asyncio.sleep(5)
 
-    def _parse_envelope(self, envelope: dict) -> Message | Reaction | None:
-        """Parse a signal-cli envelope into a Message, Reaction, or None.
+    def _parse_envelope(self, envelope: dict) -> Message | Reaction:
+        """Parse a signal-cli envelope into a Message or Reaction.
 
-        Returns None for envelopes that aren't relevant (no dataMessage, filtered sender,
-        empty content). Raises ValueError for malformed data.
+        Raises ValueError if the envelope can't be parsed for any reason.
         """
         sender = envelope.get("source")
         if not sender:
             raise ValueError("Envelope missing source")
 
         if self.allow_from and sender not in self.allow_from:
-            return None
+            raise ValueError(f"Sender {sender} not in allow list")
 
         data_msg = envelope.get("dataMessage")
         if not data_msg:
-            return None
+            raise ValueError(f"Envelope from {sender} has no dataMessage")
 
         reaction_data = data_msg.get("reaction")
         if reaction_data:
@@ -177,7 +176,7 @@ class SignalClient:
         ]
 
         if not text and not attachments:
-            return None
+            raise ValueError(f"Message from {sender} has no text or attachments")
 
         return Message(
             sender=sender,

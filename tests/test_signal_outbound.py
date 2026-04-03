@@ -83,7 +83,8 @@ def test_parse_filters_unauthorized(mock_client):
         "source": "+19999999999",
         "dataMessage": {"message": "nope", "timestamp": 123},
     }
-    assert mock_client._parse_envelope(envelope) is None
+    with pytest.raises(ValueError, match="not in allow list"):
+        mock_client._parse_envelope(envelope)
 
 
 @pytest.mark.asyncio
