@@ -90,11 +90,20 @@ async def get_attachment(attachment_id: str) -> dict:
 
 @mcp.tool
 async def update_profile(
-    name: str | None = None, about: str | None = None, avatar_base64: str | None = None
+    name: str | None = None, about: str | None = None
 ) -> None:
-    """Update the Signal profile. Set name, about text, and/or avatar image (base64-encoded)."""
-    avatar = base64.b64decode(avatar_base64) if avatar_base64 else None
-    await client.update_profile(name=name, about=about, avatar=avatar)
+    """Update the Signal profile name and/or about text."""
+    await client.update_profile(name=name, about=about)
+
+
+@mcp.tool
+async def update_profile_avatar(attachment_id: str) -> None:
+    """Set the Signal profile avatar from a Signal attachment ID. Send yourself the image first, then use its attachment ID."""
+    att = await client.fetch_attachment(attachment_id)
+    avatar = base64.b64decode(att.content_base64) if att.content_base64 else None
+    if not avatar:
+        raise ValueError("Attachment has no content")
+    await client.update_profile(avatar=avatar)
 
 
 # ── Inbound event forwarding ─────────────────────────────
