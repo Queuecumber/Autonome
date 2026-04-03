@@ -9,9 +9,9 @@ import asyncio
 import base64
 import json
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
 import httpx
 import websockets
