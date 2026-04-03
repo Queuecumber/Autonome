@@ -260,5 +260,21 @@ class SignalClient:
             },
         )
 
+    async def update_profile(
+        self, name: str | None = None, about: str | None = None, avatar: bytes | None = None
+    ) -> None:
+        """Update the Signal profile."""
+        payload: dict = {}
+        if name is not None:
+            payload["name"] = name
+        if about is not None:
+            payload["about"] = about
+        if avatar is not None:
+            payload["base64_avatar"] = base64.b64encode(avatar).decode()
+        await self._http.put(
+            f"{self.signal_cli_url}/v1/profiles/{self.account}",
+            json=payload,
+        )
+
     async def close(self) -> None:
         await self._http.aclose()

@@ -88,6 +88,15 @@ async def get_attachment(attachment_id: str) -> dict:
     }
 
 
+@mcp.tool
+async def update_profile(
+    name: str | None = None, about: str | None = None, avatar_base64: str | None = None
+) -> None:
+    """Update the Signal profile. Set name, about text, and/or avatar image (base64-encoded)."""
+    avatar = base64.b64decode(avatar_base64) if avatar_base64 else None
+    await client.update_profile(name=name, about=about, avatar=avatar)
+
+
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message | Reaction) -> None:
