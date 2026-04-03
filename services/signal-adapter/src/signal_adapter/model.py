@@ -129,10 +129,14 @@ class SignalClient:
                 await asyncio.sleep(5)
 
     def _parse_envelope(self, envelope: dict) -> Message | Reaction | None:
-        """Parse a signal-cli envelope into a Message, Reaction, or None."""
+        """Parse a signal-cli envelope into a Message, Reaction, or None.
+
+        Returns None for envelopes that aren't relevant (no dataMessage, filtered sender,
+        empty content). Raises ValueError for malformed data.
+        """
         sender = envelope.get("source")
         if not sender:
-            return None
+            raise ValueError("Envelope missing source")
 
         if self.allow_from and sender not in self.allow_from:
             return None
@@ -147,7 +151,7 @@ class SignalClient:
             target_author = reaction_data.get("targetAuthor")
             target_timestamp = reaction_data.get("targetSentTimestamp")
             if not emoji or not target_author or not target_timestamp:
-                return None
+                raise ValueError(f"Incomplete reaction from {sender}: {reaction_data}")
             return Reaction(
                 sender=sender,
                 emoji=emoji,
@@ -156,10 +160,11 @@ class SignalClient:
                 is_remove=reaction_data.get("isRemove", False),
             )
 
-        text = data_msg.get("message")
         timestamp = data_msg.get("timestamp")
         if not timestamp:
-            return None
+            raise ValueError(f"Message from {sender} missing timestamp")
+
+        text = data_msg.get("message")
         attachments = [
             Attachment(
                 id=att["id"],
