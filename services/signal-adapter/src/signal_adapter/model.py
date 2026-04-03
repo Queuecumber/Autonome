@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Awaitable
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 import websockets
@@ -94,8 +95,12 @@ class SignalClient:
         self.allow_from = allow_from or []
         self._http = httpx.AsyncClient(timeout=60)
 
-        ws_url = self.signal_cli_url.replace("http://", "ws://").replace("https://", "wss://")
-        self.ws_url = f"{ws_url}/v1/receive/{self.account}"
+        parsed = urlparse(self.signal_cli_url)
+        ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+        self.ws_url = urlunparse(parsed._replace(
+            scheme=ws_scheme,
+            path=f"/v1/receive/{self.account}",
+        ))
 
     # ── Reading ──────────────────────────────────────────────
 
