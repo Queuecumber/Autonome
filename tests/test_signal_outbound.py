@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from signal_adapter.model import SignalClient, Message, Attachment, Reaction
+
 from signal_adapter import mcp_server as signal_mcp
 
 
@@ -27,7 +28,6 @@ def test_message_dataclass():
     assert msg.sender == "+1234"
     assert msg.text == "hello"
     assert msg.attachments == []
-    assert msg.reaction is None
 
 
 
@@ -59,11 +59,11 @@ def test_parse_reaction(mock_client):
             },
         }
     }
-    msg = mock_client._parse_envelope(envelope)
-    assert msg is not None
-    assert msg.reaction is not None
-    assert msg.reaction.emoji == "👍"
-    assert msg.reaction.target_timestamp == 456
+    result = mock_client._parse_envelope(envelope)
+    assert isinstance(result, Reaction)
+    assert result.emoji == "👍"
+    assert result.target_timestamp == 456
+    assert result.sender == "+11111111111"
 
 
 def test_parse_attachment(mock_client):

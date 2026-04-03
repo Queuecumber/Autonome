@@ -14,7 +14,7 @@ import os
 import httpx
 from fastmcp import FastMCP
 
-from signal_adapter.model import SignalClient, Message
+from signal_adapter.model import SignalClient, Message, Reaction
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,8 @@ async def get_attachment(attachment_id: str) -> bytes:
 
 # ── Inbound event forwarding ─────────────────────────────
 
-async def on_message(msg: Message) -> None:
-    """Push a message to the session manager. Attachments stay lazy — agent fetches via resource."""
+async def on_message(msg: Message | Reaction) -> None:
+    """Push a message or reaction to the session manager."""
     logger.info(f"Received: {msg}")
     try:
         await _http.post(f"{session_manager_url}/event", json=msg.to_event())

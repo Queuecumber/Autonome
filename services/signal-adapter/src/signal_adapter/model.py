@@ -28,72 +28,56 @@ class Attachment:
     size: int = 0
 
 
-
-@dataclass
-class Reaction:
-    """A reaction to a Signal message."""
-    emoji: str
-    sender: str
-    target_author: str
-    target_timestamp: int
-    is_remove: bool = False
-
-
 @dataclass
 class Message:
-    """An inbound Signal message.
-
-    This is the core data type for both inbound events and session history.
-    The session manager receives this serialized as JSON.
-    """
+    """An inbound Signal message with optional attachments."""
     sender: str
     timestamp: int
     text: str = ""
     attachments: list[Attachment] = field(default_factory=list)
-    reaction: Reaction | None = None
-    @property
-    def has_attachments(self) -> bool:
-        return len(self.attachments) > 0
 
     def to_event(self, source: str = "signal") -> dict:
         """Serialize as a session manager event."""
-        if self.reaction:
-            r = self.reaction
-            return {
-                "source": source,
-                "session_id": self.sender,
-                "text": f"[reacted with {r.emoji} to message at {r.target_timestamp}]",
-                "metadata": {
-                    "type": "reaction",
-                    "sender": self.sender,
-                    "emoji": r.emoji,
-                    "target_timestamp": str(r.target_timestamp),
-                    "target_author": r.target_author,
-                    "is_remove": r.is_remove,
-                },
-            }
-
         metadata: dict = {
             "message_id": str(self.timestamp),
             "sender": self.sender,
         }
-
-        text = self.text
         if self.attachments:
             metadata["attachments"] = [
-                {
-                    "id": att.id,
-                    "content_type": att.content_type,
-                    "filename": att.filename,
-                }
+                {"id": att.id, "content_type": att.content_type, "filename": att.filename}
                 for att in self.attachments
             ]
-
         return {
             "source": source,
             "session_id": self.sender,
-            "text": text or "",
+            "text": self.text or "",
             "metadata": metadata,
+        }
+
+
+@dataclass
+class Reaction:
+    """A reaction to an existing Signal message."""
+    sender: str
+    emoji: str
+    target_author: str
+    target_timestamp: int
+    is_remove: bool = False
+
+    def to_event(self, source: str = "signal") -> dict:
+        """Serialize as a session manager event."""
+        return {
+            "source": source,
+            "session_id": self.sender,
+            "text": f"[reacted with {self.emoji} to message at {self.target_timestamp}]",
+            "metadata": {
+                "type": "reaction",
+                "sender": self.sender,
+                "emoji": self.emoji,
+                "target_timestamp": str(self.target_timestamp),
+                "target_author": self.target_author,
+                "is_remove": self.is_remove,
+            },
         }
 
 
@@ -115,8 +99,8 @@ class SignalClient:
 
     # ── Reading ──────────────────────────────────────────────
 
-    async def listen(self, on_message: Callable[[Message], Awaitable[None]]) -> None:
-        """Connect to signal-cli WebSocket and deliver parsed Messages."""
+    async def listen(self, on_message: Callable[[Message | Reaction], Awaitable[None]]) -> None:
+        """Connect to signal-cli WebSocket and deliver parsed Messages and Reactions."""
         logger.info(f"Signal client connecting to {self.ws_url}")
         while True:
             try:
@@ -136,8 +120,8 @@ class SignalClient:
                 logger.error(f"WebSocket connection failed: {e}, reconnecting in 5s...")
                 await asyncio.sleep(5)
 
-    def _parse_envelope(self, envelope: dict) -> Message | None:
-        """Parse a signal-cli envelope into a Message, or None if irrelevant."""
+    def _parse_envelope(self, envelope: dict) -> Message | Reaction | None:
+        """Parse a signal-cli envelope into a Message, Reaction, or None if irrelevant."""
         env = envelope.get("envelope", {})
         sender = env.get("source")
 
@@ -148,23 +132,18 @@ class SignalClient:
         if not data_msg:
             return None
 
-        timestamp = data_msg.get("timestamp", 0)
-
         reaction_data = data_msg.get("reaction")
         if reaction_data:
-            return Message(
+            return Reaction(
                 sender=sender,
-                timestamp=timestamp,
-                reaction=Reaction(
-                    emoji=reaction_data.get("emoji", ""),
-                    sender=sender,
-                    target_author=reaction_data.get("targetAuthor", ""),
-                    target_timestamp=reaction_data.get("targetSentTimestamp", 0),
-                    is_remove=reaction_data.get("isRemove", False),
-                ),
+                emoji=reaction_data.get("emoji", ""),
+                target_author=reaction_data.get("targetAuthor", ""),
+                target_timestamp=reaction_data.get("targetSentTimestamp", 0),
+                is_remove=reaction_data.get("isRemove", False),
             )
 
         text = data_msg.get("message", "")
+        timestamp = data_msg.get("timestamp", 0)
         raw_attachments = data_msg.get("attachments", [])
         attachments = [
             Attachment(

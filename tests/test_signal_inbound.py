@@ -44,18 +44,14 @@ async def test_on_message_pushes_event(setup_signal):
 
 @pytest.mark.asyncio
 async def test_on_message_reaction(setup_signal):
-    msg = Message(
+    reaction = Reaction(
         sender="+11111111111",
-        timestamp=123,
-        reaction=Reaction(
-            emoji="👍",
-            sender="+11111111111",
-            target_author="+10000000000",
-            target_timestamp=456,
-        ),
+        emoji="👍",
+        target_author="+10000000000",
+        target_timestamp=456,
     )
 
-    await setup_signal.on_message(msg)
+    await setup_signal.on_message(reaction)
 
     event = setup_signal._http.post.call_args.kwargs["json"]
     assert event["metadata"]["type"] == "reaction"
