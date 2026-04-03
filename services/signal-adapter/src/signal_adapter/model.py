@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 class Attachment:
     """An attachment on a Signal message. Content is lazy — fetch via SignalClient."""
     id: str
-    content_type: str
+    content_type: str | None = None
     filename: str | None = None
-    size: int = 0
+    size: int | None = None
 
 
 @dataclass
@@ -34,7 +34,7 @@ class Message:
     """An inbound Signal message with optional attachments."""
     sender: str
     timestamp: int
-    text: str = ""
+    text: str | None = None
     attachments: list[Attachment] = field(default_factory=list)
 
     def to_event(self, source: str = "signal") -> dict:
@@ -143,25 +143,30 @@ class SignalClient:
 
         reaction_data = data_msg.get("reaction")
         if reaction_data:
+            emoji = reaction_data.get("emoji")
+            target_author = reaction_data.get("targetAuthor")
+            target_timestamp = reaction_data.get("targetSentTimestamp")
+            if not emoji or not target_author or not target_timestamp:
+                return None
             return Reaction(
                 sender=sender,
-                emoji=reaction_data.get("emoji", ""),
-                target_author=reaction_data.get("targetAuthor", ""),
-                target_timestamp=reaction_data.get("targetSentTimestamp", 0),
+                emoji=emoji,
+                target_author=target_author,
+                target_timestamp=target_timestamp,
                 is_remove=reaction_data.get("isRemove", False),
             )
 
-        text = data_msg.get("message", "")
+        text = data_msg.get("message")
         timestamp = data_msg.get("timestamp")
         if not timestamp:
             return None
-        raw_attachments = data_msg.get("attachments", [])
+        raw_attachments = data_msg.get("attachments") or []
         attachments = [
             Attachment(
-                id=att.get("id", ""),
-                content_type=att.get("contentType", ""),
+                id=att["id"],
+                content_type=att.get("contentType"),
                 filename=att.get("fileName"),
-                size=att.get("size", 0),
+                size=att.get("size"),
             )
             for att in raw_attachments
             if att.get("id")
