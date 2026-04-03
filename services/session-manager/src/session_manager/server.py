@@ -272,6 +272,13 @@ class SessionOrchestrator:
                         msg["content"] = "(no text response)"
                 for key in ("reasoning_content", "thinking_blocks", "provider_specific_fields", "function_call"):
                     msg.pop(key, None)
+                # Strip broken/empty image_url blocks from multimodal content
+                content = msg.get("content")
+                if isinstance(content, list):
+                    msg["content"] = [
+                        block for block in content
+                        if not (isinstance(block, dict) and block.get("type") == "image_url")
+                    ] or "(image stripped)"
                 history.append(msg)
 
             # Build user message with metadata context + current timestamp
