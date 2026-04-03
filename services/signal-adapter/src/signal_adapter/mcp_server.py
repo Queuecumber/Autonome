@@ -77,11 +77,9 @@ async def typing_indicator(recipient: str, stop: bool = False) -> None:
     await client.set_typing(recipient, stop=stop)
 
 
-# ── Resources ────────────────────────────────────────────
-
-@mcp.resource("signal://attachments/{attachment_id}")
+@mcp.tool
 async def get_attachment(attachment_id: str) -> bytes:
-    """Retrieve a Signal attachment by ID."""
+    """Fetch a Signal attachment by ID. Returns the raw file content."""
     return await client.fetch_attachment(attachment_id)
 
 
