@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 client: SignalClient
 session_manager_url: str
-_http: httpx.AsyncClient
+_http: httpx.AsyncClient  # timeout must exceed LLM response time
 
 mcp = FastMCP("signal", instructions=(
     "Signal messaging. Use these tools to communicate with users on Signal. "
@@ -138,7 +138,7 @@ async def main():
         account=account,
         allow_from=allow_from,
     )
-    _http = httpx.AsyncClient(timeout=60)
+    _http = httpx.AsyncClient(timeout=600)
 
     try:
         await asyncio.gather(
