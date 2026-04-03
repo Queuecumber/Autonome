@@ -78,9 +78,10 @@ async def typing_indicator(recipient: str, stop: bool = False) -> None:
 
 
 @mcp.tool
-async def get_attachment(attachment_id: str) -> bytes:
-    """Fetch a Signal attachment by ID. Returns the raw file content."""
-    return await client.fetch_attachment(attachment_id)
+async def get_attachment(attachment_id: str) -> str:
+    """Fetch a Signal attachment by ID. Returns base64-encoded content."""
+    raw = await client.fetch_attachment(attachment_id)
+    return base64.b64encode(raw).decode()
 
 
 # ── Inbound event forwarding ─────────────────────────────
