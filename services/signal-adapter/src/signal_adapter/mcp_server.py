@@ -31,7 +31,9 @@ mcp = FastMCP("signal", instructions=(
     "calling send_message is not seen by anyone. The recipient is the phone number "
     "from the event metadata. "
     "When you receive a message, send a read_receipt to acknowledge it, then "
-    "start the typing_indicator before composing your response."
+    "start the typing_indicator before composing your response. "
+    "When a message has attachments, the metadata includes attachment IDs. "
+    "To view an attachment, read the resource at signal://attachments/{id}."
 ))
 
 
