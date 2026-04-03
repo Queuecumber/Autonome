@@ -34,7 +34,7 @@ def test_parse_text_message(mock_client):
         "source": "+11111111111",
         "dataMessage": {"message": "Hello", "timestamp": 123},
     }
-    msg = mock_client._parse_message(envelope)
+    msg = mock_client._parse_envelope(envelope)
     assert msg is not None
     assert msg.text == "Hello"
     assert msg.sender == "+11111111111"
@@ -53,7 +53,7 @@ def test_parse_reaction(mock_client):
             },
         },
     }
-    result = mock_client._parse_message(envelope)
+    result = mock_client._parse_envelope(envelope)
     assert isinstance(result, Reaction)
     assert result.emoji == "👍"
     assert result.target_timestamp == 456
@@ -71,7 +71,7 @@ def test_parse_attachment(mock_client):
             ],
         },
     }
-    msg = mock_client._parse_message(envelope)
+    msg = mock_client._parse_envelope(envelope)
     assert msg is not None
     assert len(msg.attachments) == 1
     assert msg.attachments[0].content_type == "image/png"
@@ -83,7 +83,7 @@ def test_parse_filters_unauthorized(mock_client):
         "source": "+19999999999",
         "dataMessage": {"message": "nope", "timestamp": 123},
     }
-    assert mock_client._parse_message(envelope) is None
+    assert mock_client._parse_envelope(envelope) is None
 
 
 @pytest.mark.asyncio

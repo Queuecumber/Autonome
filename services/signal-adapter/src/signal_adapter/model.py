@@ -11,7 +11,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Awaitable
+from typing import Awaitable, Callable
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -117,7 +117,7 @@ class SignalClient:
                             envelope = data.get("envelope")
                             if envelope is None:
                                 continue
-                            msg = self._parse_message(envelope)
+                            msg = self._parse_envelope(envelope)
                             if msg is not None:
                                 await on_message(msg)
                         except json.JSONDecodeError:
@@ -128,9 +128,11 @@ class SignalClient:
                 logger.error(f"WebSocket connection failed: {e}, reconnecting in 5s...")
                 await asyncio.sleep(5)
 
-    def _parse_message(self, envelope: dict) -> Message | Reaction | None:
+    def _parse_envelope(self, envelope: dict) -> Message | Reaction | None:
         """Parse a signal-cli envelope into a Message, Reaction, or None."""
         sender = envelope.get("source")
+        if not sender:
+            return None
 
         if self.allow_from and sender not in self.allow_from:
             return None
