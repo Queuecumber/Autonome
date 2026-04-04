@@ -33,13 +33,15 @@ def test_read_file_traversal(workspace_server):
 
 
 def test_write_file(workspace_server, tmp_workspace):
-    result = workspace_server.write_file("test.txt", "hello world")
+    from workspace_fs.server import File
+    result = workspace_server.write_file("test.txt", File(content_type="text/plain", data="hello world"))
     assert "11 chars" in result
     assert (tmp_workspace / "test.txt").read_text() == "hello world"
 
 
 def test_write_file_creates_parents(workspace_server, tmp_workspace):
-    workspace_server.write_file("subdir/deep/test.txt", "nested")
+    from workspace_fs.server import File
+    workspace_server.write_file("subdir/deep/test.txt", File(content_type="text/plain", data="nested"))
     assert (tmp_workspace / "subdir" / "deep" / "test.txt").read_text() == "nested"
 
 

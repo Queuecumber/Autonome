@@ -63,15 +63,15 @@ def read_file(path: str) -> File:
 
 
 @mcp.tool
-def write_file(path: str, data: str, content_type: str = "text/plain") -> str:
-    """Write a file to the workspace. For text files, data is the text content. For binary files, data is base64-encoded."""
+def write_file(path: str, file: File) -> str:
+    """Write a file to the workspace. Accepts a File with content_type and data."""
     target = _safe_resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if _is_text_type(content_type):
-        target.write_text(data)
-        return f"Wrote {len(data)} chars to {path}"
+    if _is_text_type(file.content_type):
+        target.write_text(file.data)
+        return f"Wrote {len(file.data)} chars to {path}"
     else:
-        raw = base64.b64decode(data)
+        raw = base64.b64decode(file.data)
         target.write_bytes(raw)
         return f"Wrote {len(raw)} bytes to {path}"
 
