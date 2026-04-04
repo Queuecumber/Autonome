@@ -1,6 +1,7 @@
 """Tests for memory MCP server."""
 
 import importlib
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,6 @@ import pytest
 
 @pytest.fixture
 def memory_server(tmp_path, monkeypatch):
-    """Import the memory server with MEMORY_DIR pointed at a temp directory."""
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()
     monkeypatch.setenv("MEMORY_DIR", str(memory_dir))
@@ -27,31 +27,21 @@ def memory_dir(memory_server):
 
 def test_read_memory_empty(memory_server):
     with pytest.raises(FileNotFoundError):
-        memory_server.read_memory("2026-03-18")
+        memory_server.read_memory(date(2026, 3, 18))
 
 
 def test_edit_and_read_memory(memory_server, memory_dir):
-    memory_server.edit_memory("2026-03-18", "# Today\nStuff happened.\n")
-    result = memory_server.read_memory("2026-03-18")
+    memory_server.edit_memory(date(2026, 3, 18), "# Today\nStuff happened.\n")
+    result = memory_server.read_memory(date(2026, 3, 18))
     assert "Stuff happened" in result
     assert (memory_dir / "2026-03-18.md").exists()
 
 
 def test_edit_memory_overwrites(memory_server):
-    memory_server.edit_memory("2026-03-18", "version 1")
-    memory_server.edit_memory("2026-03-18", "version 2")
-    result = memory_server.read_memory("2026-03-18")
+    memory_server.edit_memory(date(2026, 3, 18), "version 1")
+    memory_server.edit_memory(date(2026, 3, 18), "version 2")
+    result = memory_server.read_memory(date(2026, 3, 18))
     assert result == "version 2"
-
-
-def test_read_memory_invalid_date(memory_server):
-    with pytest.raises(ValueError, match="Invalid date"):
-        memory_server.read_memory("not-a-date")
-
-
-def test_edit_memory_invalid_date(memory_server):
-    with pytest.raises(ValueError, match="Invalid date"):
-        memory_server.edit_memory("13-99-2026", "bad")
 
 
 # --- global memory ---
@@ -77,26 +67,26 @@ def test_list_memories_empty(memory_server):
 
 
 def test_list_memories_returns_dates(memory_server):
-    memory_server.edit_memory("2026-03-16", "day 1")
-    memory_server.edit_memory("2026-03-18", "day 3")
-    memory_server.edit_memory("2026-03-17", "day 2")
+    memory_server.edit_memory(date(2026, 3, 16), "day 1")
+    memory_server.edit_memory(date(2026, 3, 18), "day 3")
+    memory_server.edit_memory(date(2026, 3, 17), "day 2")
 
     result = memory_server.list_memories()
-    assert result == ["2026-03-16", "2026-03-17", "2026-03-18"]
+    assert result == [date(2026, 3, 16), date(2026, 3, 17), date(2026, 3, 18)]
 
 
 def test_list_memories_excludes_global(memory_server):
     memory_server.edit_global_memory("global stuff")
-    memory_server.edit_memory("2026-03-18", "daily stuff")
+    memory_server.edit_memory(date(2026, 3, 18), "daily stuff")
 
     result = memory_server.list_memories()
-    assert "MEMORY" not in str(result)
-    assert "2026-03-18" in result
+    assert date(2026, 3, 18) in result
+    assert len(result) == 1
 
 
 def test_list_memories_ignores_non_date_files(memory_server, memory_dir):
     (memory_dir / "random-notes.md").write_text("not a date")
-    memory_server.edit_memory("2026-03-18", "real entry")
+    memory_server.edit_memory(date(2026, 3, 18), "real entry")
 
     result = memory_server.list_memories()
-    assert result == ["2026-03-18"]
+    assert result == [date(2026, 3, 18)]
