@@ -8,7 +8,6 @@ import base64
 import mimetypes
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -96,17 +95,6 @@ def search_files(pattern: str, path: str = ".") -> list[str]:
         raise FileNotFoundError(f"{path} not found")
     return [str(p.relative_to(WORKSPACE)) for p in sorted(target.rglob(pattern)) if p.is_file()]
 
-
-@mcp.tool
-def get_current_time(timezone_name: str = "UTC") -> str:
-    """Get the current date and time. Pass a timezone name like 'America/New_York' or 'UTC'."""
-    try:
-        import zoneinfo
-        tz = zoneinfo.ZoneInfo(timezone_name)
-    except Exception:
-        tz = timezone.utc
-    now = datetime.now(tz)
-    return now.strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
 
 
 if __name__ == "__main__":
