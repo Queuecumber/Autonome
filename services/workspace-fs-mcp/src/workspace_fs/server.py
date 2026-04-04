@@ -5,7 +5,9 @@ workspace root. Path traversal outside the workspace is rejected.
 """
 
 import base64
+import mimetypes
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +22,13 @@ mcp = FastMCP("workspace-fs", instructions=(
 ))
 
 
+@dataclass
+class File:
+    """A file's content with its MIME type."""
+    content_type: str
+    data: str
+
+
 def _safe_resolve(path: str) -> Path:
     """Resolve a path relative to WORKSPACE. Raises ValueError on traversal."""
     target = (WORKSPACE / path).resolve()
@@ -28,31 +37,40 @@ def _safe_resolve(path: str) -> Path:
     return target
 
 
+def _is_text_file(path: Path) -> bool:
+    """Check if a file is likely text based on MIME type."""
+    mime = mimetypes.guess_type(str(path))[0] or ""
+    return mime.startswith("text/") or mime in (
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+    )
+
+
 @mcp.tool
-def read_file(path: str) -> str:
-    """Read a file from the workspace."""
+def read_file(path: str) -> File:
+    """Read a file from the workspace. Returns content_type and data (text or base64 for binary)."""
     target = _safe_resolve(path)
     if not target.exists():
         raise FileNotFoundError(f"{path} not found")
     if not target.is_file():
         raise IsADirectoryError(f"{path} is not a file")
-    return target.read_text()
 
-
-@mcp.tool
-def read_file_base64(path: str) -> dict:
-    """Read a binary file from the workspace as base64. Returns content_type and data."""
-    target = _safe_resolve(path)
-    if not target.exists():
-        raise FileNotFoundError(f"{path} not found")
-    if not target.is_file():
-        raise IsADirectoryError(f"{path} is not a file")
-    import mimetypes
     content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-    return {
-        "content_type": content_type,
-        "data": base64.b64encode(target.read_bytes()).decode(),
-    }
+
+    # Try text first, fall back to base64 for binary
+    try:
+        data = target.read_text()
+        if content_type == "application/octet-stream" and _is_text_file(target):
+            content_type = "text/plain"
+        elif content_type == "application/octet-stream":
+            # Successfully read as text but unknown type — assume text
+            content_type = "text/plain"
+    except UnicodeDecodeError:
+        data = base64.b64encode(target.read_bytes()).decode()
+
+    return File(content_type=content_type, data=data)
 
 
 @mcp.tool
