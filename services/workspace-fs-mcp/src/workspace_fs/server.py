@@ -37,7 +37,7 @@ def _safe_resolve(path: str) -> Path:
     return target
 
 
-TEXT_TYPES = {"text/", "application/json", "application/xml", "application/yaml", "application/x-yaml"}
+TEXT_TYPES = {"application/json", "application/xml", "application/yaml", "application/x-yaml"}
 
 
 def _is_text_type(content_type: str) -> bool:
