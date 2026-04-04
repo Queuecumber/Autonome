@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
-MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/workspace/memory")).resolve()
+MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/memory")).resolve()
 
 mcp = FastMCP("memory", instructions=(
     "Your long-term memory system. Daily entries are stored by date (YYYY-MM-DD), "
