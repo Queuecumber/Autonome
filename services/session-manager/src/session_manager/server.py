@@ -274,8 +274,8 @@ class SessionOrchestrator:
                     msg.pop(key, None)
                 history.append(msg)
 
-            # Build user message with metadata context + current timestamp
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Build user message with metadata context + current timestamp (local time with tz)
+            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
             context_prefix = f"[{source} | time={now}]"
             if metadata:
                 context_prefix = f"[{source} | time={now} | {json.dumps(metadata)}]"
