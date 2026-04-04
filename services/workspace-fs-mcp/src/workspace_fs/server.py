@@ -24,9 +24,10 @@ mcp = FastMCP("workspace-fs", instructions=(
 
 @dataclass
 class File:
-    """A file's content with its MIME type."""
+    """A file's content with its MIME type and path."""
     content_type: str
     data: str
+    path: str | None = None
 
 
 def _safe_resolve(path: str) -> Path:
@@ -57,9 +58,9 @@ def read_file(path: str) -> File:
     content_type = mimetypes.guess_type(str(target))[0] or "text/plain"
 
     if _is_text_type(content_type):
-        return File(content_type=content_type, data=target.read_text())
+        return File(content_type=content_type, data=target.read_text(), path=path)
     else:
-        return File(content_type=content_type, data=base64.b64encode(target.read_bytes()).decode())
+        return File(content_type=content_type, data=base64.b64encode(target.read_bytes()).decode(), path=path)
 
 
 @mcp.tool
