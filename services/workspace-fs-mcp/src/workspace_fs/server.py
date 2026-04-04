@@ -37,15 +37,12 @@ def _safe_resolve(path: str) -> Path:
     return target
 
 
-def _is_text_file(path: Path) -> bool:
-    """Check if a file is likely text based on MIME type."""
-    mime = mimetypes.guess_type(str(path))[0] or ""
-    return mime.startswith("text/") or mime in (
-        "application/json",
-        "application/xml",
-        "application/yaml",
-        "application/x-yaml",
-    )
+TEXT_TYPES = {"text/", "application/json", "application/xml", "application/yaml", "application/x-yaml"}
+
+
+def _is_text_type(content_type: str) -> bool:
+    """Check if a MIME type represents text content."""
+    return content_type.startswith("text/") or content_type in TEXT_TYPES
 
 
 @mcp.tool
@@ -57,20 +54,12 @@ def read_file(path: str) -> File:
     if not target.is_file():
         raise IsADirectoryError(f"{path} is not a file")
 
-    content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    content_type = mimetypes.guess_type(str(target))[0] or "text/plain"
 
-    # Try text first, fall back to base64 for binary
-    try:
-        data = target.read_text()
-        if content_type == "application/octet-stream" and _is_text_file(target):
-            content_type = "text/plain"
-        elif content_type == "application/octet-stream":
-            # Successfully read as text but unknown type — assume text
-            content_type = "text/plain"
-    except UnicodeDecodeError:
-        data = base64.b64encode(target.read_bytes()).decode()
-
-    return File(content_type=content_type, data=data)
+    if _is_text_type(content_type):
+        return File(content_type=content_type, data=target.read_text())
+    else:
+        return File(content_type=content_type, data=base64.b64encode(target.read_bytes()).decode())
 
 
 @mcp.tool
