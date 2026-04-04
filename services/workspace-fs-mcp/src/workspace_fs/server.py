@@ -54,10 +54,13 @@ def read_file(path: str) -> File:
     if not target.is_file():
         raise IsADirectoryError(f"{path} is not a file")
 
-    content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    content_type = mimetypes.guess_type(str(target))[0] or "text/plain"
 
     if _is_text_type(content_type):
-        return File(content_type=content_type, data=target.read_text(), path=path)
+        try:
+            return File(content_type=content_type, data=target.read_text(), path=path)
+        except (UnicodeDecodeError, ValueError):
+            content_type = "application/octet-stream"
 
     return File(content_type=content_type, data=base64.b64encode(target.read_bytes()).decode(), path=path)
 
