@@ -34,7 +34,7 @@ def test_read_file_traversal(workspace_server):
 
 def test_write_file(workspace_server, tmp_workspace):
     result = workspace_server.write_file("test.txt", "hello world")
-    assert "11 bytes" in result
+    assert "11 chars" in result
     assert (tmp_workspace / "test.txt").read_text() == "hello world"
 
 
