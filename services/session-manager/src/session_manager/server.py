@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from agent_platform.session import SessionManager
+from session_manager.session import SessionManager
 
 logger = logging.getLogger(__name__)
 

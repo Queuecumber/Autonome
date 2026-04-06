@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from agent_platform.session import SessionManager
+from session_manager.session import SessionManager
 
 
 def test_load_empty_session(tmp_sessions):

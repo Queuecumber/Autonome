@@ -4,16 +4,6 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = []
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.24",
-    "agent-platform-core",
-    "agent-platform-session-manager",
-    "agent-platform-signal-adapter",
-    "agent-platform-workspace-fs-mcp",
-    "agent-platform-memory-mcp",
-]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -21,7 +11,6 @@ testpaths = ["tests"]
 
 [tool.uv.workspace]
 members = [
-    "lib/agent-platform-core",
     "services/session-manager",
     "services/signal-adapter",
     "services/workspace-fs-mcp",
@@ -29,12 +18,17 @@ members = [
 ]
 
 [tool.uv.sources]
-agent-platform-core = { workspace = true }
 agent-platform-session-manager = { workspace = true }
 agent-platform-signal-adapter = { workspace = true }
 agent-platform-workspace-fs-mcp = { workspace = true }
 agent-platform-memory-mcp = { workspace = true }
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "agent-platform-session-manager",
+    "agent-platform-signal-adapter",
+    "agent-platform-workspace-fs-mcp",
+    "agent-platform-memory-mcp",
+]

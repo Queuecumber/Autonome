@@ -5,7 +5,6 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "agent-platform",
-    "agent-platform-core",
     "agent-platform-memory-mcp",
     "agent-platform-session-manager",
     "agent-platform-signal-adapter",
@@ -15,11 +14,10 @@ members = [
 [[package]]
 name = "agent-platform"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
-    { name = "agent-platform-core" },
     { name = "agent-platform-memory-mcp" },
     { name = "agent-platform-session-manager" },
     { name = "agent-platform-signal-adapter" },
@@ -29,27 +27,16 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "agent-platform-core", marker = "extra == 'dev'", editable = "lib/agent-platform-core" },
-    { name = "agent-platform-memory-mcp", marker = "extra == 'dev'", editable = "services/memory-mcp" },
-    { name = "agent-platform-session-manager", marker = "extra == 'dev'", editable = "services/session-manager" },
-    { name = "agent-platform-signal-adapter", marker = "extra == 'dev'", editable = "services/signal-adapter" },
-    { name = "agent-platform-workspace-fs-mcp", marker = "extra == 'dev'", editable = "services/workspace-fs-mcp" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-]
-provides-extras = ["dev"]
 
-[[package]]
-name = "agent-platform-core"
-version = "0.1.0"
-source = { editable = "lib/agent-platform-core" }
-dependencies = [
-    { name = "pyyaml" },
+[package.metadata.requires-dev]
+dev = [
+    { name = "agent-platform-memory-mcp", editable = "services/memory-mcp" },
+    { name = "agent-platform-session-manager", editable = "services/session-manager" },
+    { name = "agent-platform-signal-adapter", editable = "services/signal-adapter" },
+    { name = "agent-platform-workspace-fs-mcp", editable = "services/workspace-fs-mcp" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "pyyaml", specifier = ">=6" }]
 
 [[package]]
 name = "agent-platform-memory-mcp"
@@ -67,20 +54,20 @@ name = "agent-platform-session-manager"
 version = "0.1.0"
 source = { editable = "services/session-manager" }
 dependencies = [
-    { name = "agent-platform-core" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "openai" },
+    { name = "pyyaml" },
     { name = "starlette" },
     { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-platform-core", editable = "lib/agent-platform-core" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.0" },
     { name = "openai", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "starlette", specifier = ">=0.40" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]

@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
+from typing import Any
 
 import uvicorn
+import yaml
 
-from agent_platform.config import load_config
 from session_manager.server import SessionOrchestrator, create_app
 
 logging.basicConfig(
@@ -15,6 +17,21 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def load_config(config_path: Path) -> dict:
+    """Load agent.yaml with ${VAR} environment variable substitution."""
+    def _substitute(obj: Any) -> Any:
+        if isinstance(obj, str):
+            return re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), m.group(0)), obj)
+        if isinstance(obj, dict):
+            return {k: _substitute(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_substitute(item) for item in obj]
+        return obj
+
+    config = yaml.safe_load(Path(config_path).read_text())
+    return _substitute(config)
 
 
 async def startup():
