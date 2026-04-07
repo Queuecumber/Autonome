@@ -7,6 +7,7 @@ directly for tool discovery and execution.
 import asyncio
 import json
 import logging
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -93,14 +94,13 @@ class MCPConnection:
         self.tools: list[dict] = []
         self.instructions: str = ""
         self._original_names: dict[str, str] = {}
-        self._context = None
+        self._exit_stack = AsyncExitStack()
 
     async def connect(self) -> None:
         """Establish connection, get server instructions, and discover tools."""
-        self._context = streamablehttp_client(self.url)
-        read, write, _ = await self._context.__aenter__()
-        self.session = ClientSession(read, write)
-        await self.session.__aenter__()
+        transport = await self._exit_stack.enter_async_context(streamablehttp_client(self.url))
+        read, write = transport[0], transport[1]
+        self.session = await self._exit_stack.enter_async_context(ClientSession(read, write))
         init_result = await self.session.initialize()
 
         if hasattr(init_result, "instructions") and init_result.instructions:
@@ -131,10 +131,7 @@ class MCPConnection:
         return result.content
 
     async def close(self) -> None:
-        if self.session:
-            await self.session.__aexit__(None, None, None)
-        if self._context:
-            await self._context.__aexit__(None, None, None)
+        await self._exit_stack.aclose()
 
 
 class SessionOrchestrator:
