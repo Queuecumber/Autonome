@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from session_manager.server import SessionOrchestrator
+from session_manager.orchestrator import SessionOrchestrator
 
 
 @pytest.fixture

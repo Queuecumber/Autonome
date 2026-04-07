@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from session_manager.server import SessionOrchestrator
+from session_manager.orchestrator import SessionOrchestrator
 
 logging.basicConfig(
     level=logging.INFO,

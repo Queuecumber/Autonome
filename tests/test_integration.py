@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from session_manager.session import SessionManager
-from session_manager.server import SessionOrchestrator
+from session_manager.orchestrator import SessionOrchestrator
 from signal_adapter.model import SignalClient
 from signal_adapter import mcp_server as signal_mcp
 
