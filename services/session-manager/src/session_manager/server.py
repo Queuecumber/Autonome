@@ -137,13 +137,12 @@ class SessionOrchestrator:
     def __init__(self, config: dict, session_dir: Path):
         self.config = config
 
-        model_config = config["model"]
-        self.model = model_config["model"]
+        model_config = config.get("model", {})
+        self.model = model_config.get("model", "")
         self.reasoning_effort = model_config.get("reasoning_effort")
 
+        # OpenAI SDK reads OPENAI_API_KEY and OPENAI_BASE_URL from env by default
         self.llm = AsyncOpenAI(
-            api_key=model_config.get("api_key", ""),
-            base_url=model_config.get("api_base"),
             default_headers=model_config.get("extra_headers"),
             timeout=300,
         )
@@ -154,15 +153,10 @@ class SessionOrchestrator:
 
         self.workspace_dir = Path(config.get("workspace", "./workspace"))
 
-        self.heartbeat_prompt = config.get("heartbeat", {}).get(
-            "prompt", "Check HEARTBEAT.md"
-        )
-
-        channels = config.get("channels", {})
-        signal_config = channels.get("signal", {})
-        allow_from = signal_config.get("allow_from", [])
-        self.heartbeat_source = "signal"
-        self.heartbeat_session_id = allow_from[0] if allow_from else "system"
+        heartbeat_config = config.get("heartbeat", {})
+        self.heartbeat_prompt = heartbeat_config.get("prompt", "Check HEARTBEAT.md")
+        self.heartbeat_source = heartbeat_config.get("source", "signal")
+        self.heartbeat_session_id = heartbeat_config.get("session_id", "system")
 
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 

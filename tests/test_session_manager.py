@@ -15,25 +15,16 @@ def orchestrator_config(tmp_workspace):
     return {
         "model": {
             "model": "claude-opus-4-6",
-            "api_key": "test-key",
-            "api_base": "https://inference-api.nvidia.com/v1",
         },
         "workspace": str(tmp_workspace),
-        "mcp_servers": {},
-        "channels": {
-            "signal": {
-                "account": "+10000000000",
-                "signal_cli": "http://localhost:8080",
-                "allow_from": ["+11111111111"],
-            }
-        },
         "session": {
             "store": "/tmp/test-sessions",
             "max_history_tokens": 100000,
         },
         "heartbeat": {
-            "interval": "20m",
             "prompt": "Check HEARTBEAT.md",
+            "source": "signal",
+            "session_id": "+11111111111",
         },
     }
 
@@ -59,7 +50,8 @@ def _mock_llm_response(content="I'll handle it!", tool_calls=None):
 
 
 @pytest.fixture
-def orchestrator(orchestrator_config, tmp_path):
+def orchestrator(orchestrator_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     orch = SessionOrchestrator(
         config=orchestrator_config,
         session_dir=tmp_path / "sessions",

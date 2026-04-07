@@ -28,25 +28,19 @@ def _mock_llm_response(content="I'm here to help!"):
 
 
 @pytest.mark.asyncio
-async def test_full_event_flow(tmp_path):
+async def test_full_event_flow(tmp_path, monkeypatch):
     """End-to-end: config → orchestrator receives event → LLM called → session saved."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "AGENTS.md").write_text("# Agent\nUse tools to respond.\n")
 
     config_data = {
-        "model": {"model": "claude-opus-4-6", "api_key": "test-key", "api_base": "http://localhost:4000/v1"},
+        "model": {"model": "claude-opus-4-6"},
         "workspace": str(workspace),
-        "mcp_servers": {},
-        "channels": {
-            "signal": {
-                "account": "+10000000000",
-                "signal_cli": "http://localhost:8080",
-                "allow_from": ["+11111111111"],
-            },
-        },
         "session": {"store": str(tmp_path / "sessions"), "max_history_tokens": 100000},
-        "heartbeat": {"interval": "20m", "prompt": "Check HEARTBEAT.md"},
+        "heartbeat": {"prompt": "Check HEARTBEAT.md", "source": "signal", "session_id": "+11111111111"},
     }
 
     sessions_dir = tmp_path / "sessions"
