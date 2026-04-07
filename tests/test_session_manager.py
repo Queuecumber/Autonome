@@ -21,11 +21,6 @@ def orchestrator_config(tmp_workspace):
             "store": "/tmp/test-sessions",
             "max_history_tokens": 100000,
         },
-        "heartbeat": {
-            "prompt": "Check HEARTBEAT.md",
-            "source": "signal",
-            "session_id": "+11111111111",
-        },
     }
 
 
@@ -68,11 +63,6 @@ def test_orchestrator_init(orchestrator):
     assert orchestrator.model == "claude-opus-4-6"
 
 
-def test_heartbeat_routes_to_primary_contact(orchestrator):
-    assert orchestrator.heartbeat_source == "signal"
-    assert orchestrator.heartbeat_session_id == "+11111111111"
-
-
 @pytest.mark.asyncio
 async def test_handle_event(orchestrator):
     event = {
@@ -107,18 +97,6 @@ async def test_handle_event_sends_enriched_to_llm(orchestrator):
     assert "signal" in last_msg["content"]
     assert "ts_456" in last_msg["content"]
     assert "Hey" in last_msg["content"]
-
-
-@pytest.mark.asyncio
-async def test_handle_heartbeat(orchestrator):
-    await orchestrator.handle_heartbeat()
-
-    call_kwargs = orchestrator.llm.chat.completions.create.call_args.kwargs
-    last_msg = call_kwargs["messages"][-1]
-    assert "HEARTBEAT" in last_msg["content"]
-
-    history = orchestrator.session.load("signal", "+11111111111")
-    assert len(history) == 2
 
 
 @pytest.mark.asyncio
@@ -185,9 +163,3 @@ def test_http_event_endpoint_returns_502_on_failure(orchestrator):
     assert resp.status_code == 502
 
 
-def test_http_heartbeat_endpoint(orchestrator):
-    app = create_app(orchestrator)
-    client = TestClient(app)
-
-    resp = client.post("/heartbeat")
-    assert resp.status_code == 200

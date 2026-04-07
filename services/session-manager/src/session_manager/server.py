@@ -156,11 +156,6 @@ class SessionOrchestrator:
 
         self.workspace_dir = Path(config.get("workspace", "./workspace"))
 
-        heartbeat_config = config.get("heartbeat", {})
-        self.heartbeat_prompt = heartbeat_config.get("prompt", "Check HEARTBEAT.md")
-        self.heartbeat_source = heartbeat_config.get("source", "signal")
-        self.heartbeat_session_id = heartbeat_config.get("session_id", "system")
-
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
@@ -333,16 +328,6 @@ class SessionOrchestrator:
             self.session.append(source, session_id, all_new_messages)
             return None
 
-    async def handle_heartbeat(self) -> str | None:
-        """Process a heartbeat routed to the primary contact's session."""
-        event = {
-            "source": self.heartbeat_source,
-            "session_id": self.heartbeat_session_id,
-            "text": f"[HEARTBEAT] {self.heartbeat_prompt}",
-            "metadata": {},
-        }
-        return await self.handle_event(event)
-
     async def close(self) -> None:
         for conn in self.mcp_connections.values():
             await conn.close()
@@ -361,16 +346,6 @@ def create_app(orchestrator: SessionOrchestrator) -> Starlette:
             )
         return JSONResponse({"status": "ok", "response": result})
 
-    async def heartbeat_endpoint(request: Request) -> JSONResponse:
-        result = await orchestrator.handle_heartbeat()
-        if result is None:
-            return JSONResponse(
-                {"status": "error", "response": None},
-                status_code=502,
-            )
-        return JSONResponse({"status": "ok", "response": result})
-
     return Starlette(routes=[
         Route("/event", event_endpoint, methods=["POST"]),
-        Route("/heartbeat", heartbeat_endpoint, methods=["POST"]),
     ])

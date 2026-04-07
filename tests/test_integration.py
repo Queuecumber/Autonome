@@ -40,7 +40,6 @@ async def test_full_event_flow(tmp_path, monkeypatch):
         "model": {"model": "claude-opus-4-6"},
         "workspace": str(workspace),
         "session": {"store": str(tmp_path / "sessions"), "max_history_tokens": 100000},
-        "heartbeat": {"prompt": "Check HEARTBEAT.md", "source": "signal", "session_id": "+11111111111"},
     }
 
     sessions_dir = tmp_path / "sessions"
