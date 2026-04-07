@@ -103,8 +103,8 @@ class MCPConnection:
         self.session = await self._exit_stack.enter_async_context(ClientSession(read, write))
         init_result = await self.session.initialize()
 
-        if hasattr(init_result, "instructions") and init_result.instructions:
-            self.instructions = init_result.instructions
+        if instructions := getattr(init_result, "instructions", None):
+            self.instructions = instructions
 
         result = await self.session.list_tools()
         self.tools = []
