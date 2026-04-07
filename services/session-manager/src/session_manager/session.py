@@ -62,5 +62,5 @@ class SessionManager:
 
     def _count_tokens(self, messages: list[dict]) -> int:
         """Estimate token count. Rough heuristic: ~4 chars per token."""
-        total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        total_chars = sum(len(json.dumps(m)) for m in messages)
         return total_chars // 4
