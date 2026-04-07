@@ -41,28 +41,45 @@ def _mcp_tool_to_openai(tool) -> dict:
     }
 
 
-def _strip_binary_content(tool_result: dict) -> dict:
-    """Strip base64 image data from a tool result before saving to history."""
-    content = tool_result.get("content")
-    if isinstance(content, list):
-        # Multimodal content — replace image blocks with references
-        stripped = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "image_url":
-                stripped.append({"type": "text", "text": "[image content stripped from history]"})
-            else:
-                stripped.append(block)
-        return {**tool_result, "content": stripped}
-    if isinstance(content, str) and len(content) > 10000:
-        # Large text content (likely base64) — check if it's a JSON blob with base64
-        try:
-            data = json.loads(content)
-            if isinstance(data, dict) and data.get("content_base64"):
-                data["content_base64"] = "[stripped from history]"
-                return {**tool_result, "content": json.dumps(data)}
-        except (json.JSONDecodeError, KeyError):
-            pass
-    return tool_result
+def _mcp_content_to_openai(content_blocks: list) -> list[dict]:
+    """Convert MCP content blocks to OpenAI message content parts.
+
+    TextContent → text part
+    ImageContent → image_url part (data URI)
+    AudioContent → text placeholder (no OpenAI audio in tool results yet)
+    """
+    parts = []
+    for block in content_blocks:
+        if block.type == "text":
+            parts.append({"type": "text", "text": block.text})
+        elif block.type == "image":
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{block.mimeType};base64,{block.data}"},
+            })
+        elif block.type == "audio":
+            parts.append({"type": "text", "text": f"[audio: {block.mimeType}]"})
+        else:
+            parts.append({"type": "text", "text": str(block)})
+    return parts
+
+
+def _content_for_history(content_blocks: list) -> str:
+    """Extract text-only summary from MCP content blocks for session history.
+
+    Binary content (images, audio) is replaced with a placeholder.
+    """
+    parts = []
+    for block in content_blocks:
+        if block.type == "text":
+            parts.append(block.text)
+        elif block.type == "image":
+            parts.append(f"[image: {block.mimeType}]")
+        elif block.type == "audio":
+            parts.append(f"[audio: {block.mimeType}]")
+        else:
+            parts.append(str(block))
+    return "\n".join(parts)
 
 
 class MCPConnection:
@@ -103,26 +120,15 @@ class MCPConnection:
         for t in self.tools:
             logger.info(f"  - {t['function']['name']}")
 
-    async def call_tool(self, prefixed_name: str, arguments: str) -> str:
-        """Execute a tool call and return the result as a string."""
+    async def call_tool(self, prefixed_name: str, arguments: str) -> list:
+        """Execute a tool call and return raw MCP content blocks."""
         if self.session is None:
-            return f"Error: MCP server {self.name} not connected"
+            raise RuntimeError(f"MCP server {self.name} not connected")
 
         original_name = self._original_names.get(prefixed_name, prefixed_name)
-
-        try:
-            args = json.loads(arguments) if isinstance(arguments, str) else arguments
-            result = await self.session.call_tool(original_name, args)
-            parts = []
-            for content in result.content:
-                if hasattr(content, "text"):
-                    parts.append(content.text)
-                else:
-                    parts.append(str(content))
-            return "\n".join(parts) if parts else ""
-        except Exception as e:
-            logger.error(f"MCP [{self.name}] tool {original_name} failed: {e}")
-            return f"Error: {e}"
+        args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        result = await self.session.call_tool(original_name, args)
+        return result.content
 
     async def close(self) -> None:
         if self.session:
@@ -206,40 +212,34 @@ class SessionOrchestrator:
 
         return "\n\n".join(parts)
 
-    async def _execute_tool_call(self, tool_call) -> dict:
-        """Execute a single tool call via the appropriate MCP server."""
+    async def _execute_tool_call(self, tool_call) -> tuple[dict, dict]:
+        """Execute a tool call. Returns (message_for_model, message_for_history)."""
         func = tool_call.function
         tool_name = func.name
         conn = self._tool_to_mcp.get(tool_name)
 
         if conn is None:
-            result_text = f"Error: unknown tool '{tool_name}'"
-        else:
-            result_text = await conn.call_tool(tool_name, func.arguments)
+            msg = {"role": "tool", "tool_call_id": tool_call.id, "content": f"Error: unknown tool '{tool_name}'"}
+            return msg, msg
 
-        # Check if tool result contains image data — pass as multimodal content
-        try:
-            result_data = json.loads(result_text)
-            if isinstance(result_data, dict) and result_data.get("content_type", "").startswith("image/"):
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": [
-                        {"type": "text", "text": f"Attachment {result_data.get('id', '')}"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{result_data['content_type']};base64,{result_data['content_base64']}"},
-                        },
-                    ],
-                }
-        except (json.JSONDecodeError, KeyError):
-            pass
+        content_blocks = await conn.call_tool(tool_name, func.arguments)
 
-        return {
+        # For the model: full content including images/audio as multimodal parts
+        openai_parts = _mcp_content_to_openai(content_blocks)
+        model_msg = {
             "role": "tool",
             "tool_call_id": tool_call.id,
-            "content": result_text,
+            "content": openai_parts if len(openai_parts) > 1 else openai_parts[0]["text"] if openai_parts and openai_parts[0]["type"] == "text" else openai_parts,
         }
+
+        # For history: text-only, no binary data
+        history_msg = {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": _content_for_history(content_blocks),
+        }
+
+        return model_msg, history_msg
 
     async def handle_event(self, event: dict[str, Any]) -> str | None:
         """Process an inbound event from any adapter."""
@@ -314,10 +314,10 @@ class SessionOrchestrator:
 
                     for tool_call in assistant_msg.tool_calls:
                         logger.info(f"  Tool call: {tool_call.function.name}({tool_call.function.arguments[:100]})")
-                        tool_result = await self._execute_tool_call(tool_call)
-                        logger.info(f"  Result: {str(tool_result['content'])[:200]}")
-                        messages.append(tool_result)
-                        all_new_messages.append(_strip_binary_content(tool_result))
+                        model_msg, history_msg = await self._execute_tool_call(tool_call)
+                        logger.info(f"  Result: {history_msg['content'][:200]}")
+                        messages.append(model_msg)
+                        all_new_messages.append(history_msg)
 
                     call_kwargs["messages"] = messages
                     continue
