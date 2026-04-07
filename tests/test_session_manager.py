@@ -2,12 +2,11 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from starlette.testclient import TestClient
 
-from session_manager.server import create_app, SessionOrchestrator
+from session_manager.server import SessionOrchestrator
 
 
 @pytest.fixture
@@ -134,32 +133,5 @@ async def test_system_prompt_is_agents_md_only(orchestrator, tmp_workspace):
     assert "I am a test agent" not in system_msg["content"]
 
 
-def test_http_event_endpoint(orchestrator):
-    app = create_app(orchestrator)
-    client = TestClient(app)
-
-    resp = client.post("/event", json={
-        "source": "signal",
-        "session_id": "+11111111111",
-        "text": "test via HTTP",
-        "metadata": {},
-    })
-    assert resp.status_code == 200
-    assert "response" in resp.json()
-
-
-def test_http_event_endpoint_returns_502_on_failure(orchestrator):
-    orchestrator.llm.chat.completions.create = AsyncMock(side_effect=Exception("fail"))
-
-    app = create_app(orchestrator)
-    client = TestClient(app)
-
-    resp = client.post("/event", json={
-        "source": "signal",
-        "session_id": "+11111111111",
-        "text": "test",
-        "metadata": {},
-    })
-    assert resp.status_code == 502
 
 

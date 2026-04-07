@@ -7,8 +7,12 @@ from pathlib import Path
 
 import uvicorn
 import yaml
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
-from session_manager.server import SessionOrchestrator, create_app
+from session_manager.server import SessionOrchestrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,10 +33,8 @@ async def startup():
         session_dir=session_dir,
     )
 
-    # MCP server URLs from config
-    mcp_urls = config.get("mcp_servers", {})
-
     # Connect to MCP servers (retry until available)
+    mcp_urls = config.get("mcp_servers", {})
     max_retries = 30
     for attempt in range(max_retries):
         try:
@@ -46,7 +48,15 @@ async def startup():
     if not orchestrator.openai_tools:
         logger.error("No MCP tools discovered after retries. Starting anyway.")
 
-    app = create_app(orchestrator)
+    # HTTP app — just one endpoint
+    async def event_endpoint(request: Request) -> JSONResponse:
+        body = await request.json()
+        result = await orchestrator.handle_event(body)
+        if result is None:
+            return JSONResponse({"status": "error", "response": None}, status_code=502)
+        return JSONResponse({"status": "ok", "response": result})
+
+    app = Starlette(routes=[Route("/event", event_endpoint, methods=["POST"])])
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info"))
     await server.serve()
 
