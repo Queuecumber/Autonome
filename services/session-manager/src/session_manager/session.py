@@ -31,9 +31,7 @@ class SessionManager:
             for msg in messages:
                 f.write(json.dumps(msg) + "\n")
 
-    def load_truncated(
-        self, channel: str, session_id: str, model: str = ""
-    ) -> list[dict[str, Any]]:
+    def load_truncated(self, channel: str, session_id: str) -> list[dict[str, Any]]:
         messages = self.load(channel, session_id)
         if not messages:
             return messages

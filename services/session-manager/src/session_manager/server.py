@@ -250,11 +250,7 @@ class SessionOrchestrator:
 
         async with self._get_lock(source, session_id):
             # Load session history, filter and sanitize
-            raw_history = self.session.load_truncated(
-                channel=source,
-                session_id=session_id,
-                model=self.model,
-            )
+            raw_history = self.session.load_truncated(source, session_id)
             history = []
             for msg in raw_history:
                 if msg.get("role") not in ("user", "assistant", "tool", "system"):
