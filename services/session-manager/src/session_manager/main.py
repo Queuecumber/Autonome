@@ -29,15 +29,8 @@ async def startup():
         session_dir=session_dir,
     )
 
-    # Build MCP server URLs
-    mcp_urls = {}
-    mcp_urls["workspace_fs"] = os.environ.get("WORKSPACE_FS_MCP_URL", "http://workspace-fs-mcp:8000/mcp")
-    mcp_urls["memory"] = os.environ.get("MEMORY_MCP_URL", "http://memory-mcp:8001/mcp")
-    mcp_urls["signal"] = os.environ.get("SIGNAL_MCP_URL", "http://signal-adapter:8100/mcp")
-
-    for name, server_config in config.get("mcp_servers", {}).items():
-        if "url" in server_config:
-            mcp_urls[name] = server_config["url"]
+    # MCP server URLs from config
+    mcp_urls = config.get("mcp_servers", {})
 
     # Connect to MCP servers (retry until available)
     max_retries = 30
