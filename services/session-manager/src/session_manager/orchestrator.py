@@ -35,8 +35,6 @@ class SessionOrchestrator:
         max_tokens = session_config.get("max_history_tokens", 100000)
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
-        self.workspace_dir = Path(config.get("workspace", "./workspace"))
-
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
@@ -67,13 +65,21 @@ class SessionOrchestrator:
             self._locks[key] = asyncio.Lock()
         return self._locks[key]
 
-    def _build_system_prompt(self) -> str:
-        """Build system prompt from AGENTS.md + MCP server instructions."""
-        parts = []
+    # Base system prompt — tells the agent how the platform works.
+    # TODO: make configurable, iterate on prompting
+    SYSTEM_PROMPT = """\
+You are running on the Agent Platform. You interact with the world through MCP tools — \
+there is no shell, no bash, no direct file access. Everything you do happens through tool calls.
 
-        agents_path = self.workspace_dir / "AGENTS.md"
-        if agents_path.exists():
-            parts.append(agents_path.read_text())
+Your text output is NOT delivered to anyone. To communicate, you MUST call the appropriate \
+send_message tool. If you do not call a send tool, the user will not see any response.
+
+Before responding, read your identity and context files using workspace tools. \
+Read recent memories for continuity. Use your tools — they are listed below."""
+
+    def _build_system_prompt(self) -> str:
+        """Build system prompt from base instructions + MCP server instructions."""
+        parts = [self.SYSTEM_PROMPT]
 
         server_docs = []
         for conn in self.mcp_connections.values():

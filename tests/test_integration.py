@@ -32,13 +32,8 @@ async def test_full_event_flow(tmp_path, monkeypatch):
     """End-to-end: config → orchestrator receives event → LLM called → session saved."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "AGENTS.md").write_text("# Agent\nUse tools to respond.\n")
-
     config_data = {
         "model": {"model": "claude-opus-4-6"},
-        "workspace": str(workspace),
         "session": {"store": str(tmp_path / "sessions"), "max_history_tokens": 100000},
     }
 
@@ -61,10 +56,10 @@ async def test_full_event_flow(tmp_path, monkeypatch):
     result = await orchestrator.handle_event(event)
     assert result == "I'm here to help!"
 
-    # Verify system prompt is AGENTS.md only
+    # Verify system prompt has base instructions
     call_kwargs = orchestrator.llm.chat.completions.create.call_args.kwargs
     system_msg = call_kwargs["messages"][0]
-    assert "Use tools to respond" in system_msg["content"]
+    assert "MCP tools" in system_msg["content"]
 
     # Verify session persistence
     session = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)

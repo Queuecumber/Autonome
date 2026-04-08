@@ -114,9 +114,7 @@ async def test_handle_event_returns_none_on_failure(orchestrator):
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_is_agents_md_only(orchestrator, tmp_workspace):
-    (tmp_workspace / "AGENTS.md").write_text("# You are an agent\nUse tools to respond.")
-
+async def test_system_prompt_includes_base_instructions(orchestrator):
     event = {
         "source": "signal",
         "session_id": "+11111111111",
@@ -129,8 +127,8 @@ async def test_system_prompt_is_agents_md_only(orchestrator, tmp_workspace):
     call_kwargs = orchestrator.llm.chat.completions.create.call_args.kwargs
     system_msg = call_kwargs["messages"][0]
     assert system_msg["role"] == "system"
-    assert "You are an agent" in system_msg["content"]
-    assert "I am a test agent" not in system_msg["content"]
+    assert "MCP tools" in system_msg["content"]
+    assert "send_message" in system_msg["content"]
 
 
 
