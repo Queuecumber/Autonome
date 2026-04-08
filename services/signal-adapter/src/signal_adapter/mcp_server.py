@@ -14,6 +14,7 @@ import os
 
 import httpx
 from fastmcp import FastMCP
+from mcp.types import ImageContent, TextContent
 
 from signal_adapter.model import SignalClient, Message, Reaction
 
@@ -78,14 +79,12 @@ async def typing_indicator(recipient: str, stop: bool = False) -> None:
 
 
 @mcp.tool
-async def get_attachment(attachment_id: str) -> dict:
-    """Fetch a Signal attachment by ID. Returns attachment with content_type and content_base64."""
+async def get_attachment(attachment_id: str) -> ImageContent | TextContent:
+    """Fetch a Signal attachment by ID. Images are returned as ImageContent, others as text."""
     att = await client.fetch_attachment(attachment_id)
-    return {
-        "id": att.id,
-        "content_type": att.content_type,
-        "content_base64": att.content_base64,
-    }
+    if att.content_type and att.content_type.startswith("image/"):
+        return ImageContent(type="image", data=att.content_base64, mimeType=att.content_type)
+    return TextContent(type="text", text=f"[attachment: {att.content_type}, id={att.id}]")
 
 
 @mcp.tool
