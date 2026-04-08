@@ -155,15 +155,12 @@ class SessionOrchestrator:
 
         content_blocks = await conn.call_tool(tool_name, func.arguments)
 
-        # For the model: full content including images/audio as multimodal parts
-        openai_parts = mcp_content_to_openai(content_blocks)
         model_msg = {
             "role": "tool",
             "tool_call_id": tool_call.id,
-            "content": openai_parts if len(openai_parts) > 1 else openai_parts[0]["text"] if openai_parts and openai_parts[0]["type"] == "text" else openai_parts,
+            "content": mcp_content_to_openai(content_blocks),
         }
 
-        # For history: text-only, no binary data
         history_msg = {
             "role": "tool",
             "tool_call_id": tool_call.id,
