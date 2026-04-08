@@ -78,18 +78,51 @@ what's worth keeping long-term.
 """
 
 
-def _strip_binary(msg: dict) -> dict:
-    """Strip binary content (images, audio) from a message for history storage."""
+def _prepare_for_history(msg: dict) -> dict:
+    """Prepare a message for session history — strip binary, ensure non-empty content."""
+    msg = dict(msg)  # shallow copy
+
+    if not msg.get("content"):
+        if msg.get("tool_calls"):
+            msg["content"] = "(calling tools)"
+        elif msg.get("role") == "assistant":
+            msg["content"] = "(no text response)"
+
+    # Replace binary content blocks with text placeholders
     content = msg.get("content")
-    if not isinstance(content, list):
-        return msg
-    stripped = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "image_url":
-            stripped.append({"type": "text", "text": "[image]"})
-        else:
-            stripped.append(block)
-    return {**msg, "content": stripped}
+    if isinstance(content, list):
+        msg["content"] = [
+            {"type": "text", "text": "[image]"} if (isinstance(b, dict) and b.get("type") == "image_url") else b
+            for b in content
+        ] or "(stripped)"
+
+    return msg
+
+
+def _prepare_for_model(msg: dict) -> dict | None:
+    """Prepare a history message for sending to the model. Returns None to skip."""
+    role = msg.get("role")
+    if role not in ("user", "assistant", "tool", "system"):
+        return None
+
+    msg = {k: v for k, v in msg.items()
+           if k not in ("reasoning_content", "thinking_blocks", "provider_specific_fields", "function_call")}
+
+    if not msg.get("content"):
+        if msg.get("tool_calls"):
+            msg["content"] = "(calling tools)"
+        elif role == "assistant":
+            msg["content"] = "(no text response)"
+
+    # Strip any leftover image blocks from history
+    content = msg.get("content")
+    if isinstance(content, list):
+        msg["content"] = [
+            b for b in content
+            if not (isinstance(b, dict) and b.get("type") == "image_url")
+        ] or "(image stripped)"
+
+    return msg
 
 
 class SessionOrchestrator:
@@ -181,27 +214,9 @@ class SessionOrchestrator:
         metadata = event.get("metadata", {})
 
         async with self._get_lock(source, session_id):
-            # Load session history, filter and sanitize
+            # Load session history, prepare for model
             raw_history = self.session.load_truncated(source, session_id)
-            history = []
-            for msg in raw_history:
-                if msg.get("role") not in ("user", "assistant", "tool", "system"):
-                    continue
-                if not msg.get("content"):
-                    if msg.get("tool_calls"):
-                        msg["content"] = "(calling tools)"
-                    elif msg.get("role") == "assistant":
-                        msg["content"] = "(no text response)"
-                for key in ("reasoning_content", "thinking_blocks", "provider_specific_fields", "function_call"):
-                    msg.pop(key, None)
-                # Strip broken image_url blocks from history
-                content = msg.get("content")
-                if isinstance(content, list):
-                    msg["content"] = [
-                        block for block in content
-                        if not (isinstance(block, dict) and block.get("type") == "image_url")
-                    ] or "(image stripped)"
-                history.append(msg)
+            history = [m for msg in raw_history if (m := _prepare_for_model(msg)) is not None]
 
             # Build user message with metadata context + current timestamp (local time with tz)
             now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -245,18 +260,17 @@ class SessionOrchestrator:
                 # If the model wants to call tools
                 if choice.finish_reason == "tool_calls" or (assistant_msg.tool_calls and len(assistant_msg.tool_calls) > 0):
                     assistant_dict = assistant_msg.model_dump()
-                    # Bedrock requires non-empty content even on tool_call messages
                     if not assistant_dict.get("content"):
                         assistant_dict["content"] = "(calling tools)"
                     messages.append(assistant_dict)
-                    all_new_messages.append(assistant_dict)
+                    all_new_messages.append(_prepare_for_history(assistant_dict))
 
                     for tool_call in assistant_msg.tool_calls:
                         logger.info(f"  Tool call: {tool_call.function.name}({tool_call.function.arguments[:100]})")
                         tool_result = await self._execute_tool_call(tool_call)
                         logger.info(f"  Result: {str(tool_result['content'])[:200]}")
                         messages.append(tool_result)
-                        all_new_messages.append(_strip_binary(tool_result))
+                        all_new_messages.append(_prepare_for_history(tool_result))
 
                     call_kwargs["messages"] = messages
                     continue

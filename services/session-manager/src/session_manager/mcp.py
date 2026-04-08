@@ -50,23 +50,6 @@ def mcp_content_to_openai(content_blocks: list) -> list[dict]:
     return parts
 
 
-def content_for_history(content_blocks: list) -> str:
-    """Extract text-only summary from MCP content blocks for session history.
-
-    Binary content (images, audio) is replaced with a placeholder.
-    """
-    parts = []
-    for block in content_blocks:
-        if block.type == "text":
-            parts.append(block.text)
-        elif block.type == "image":
-            parts.append(f"[image: {block.mimeType}]")
-        elif block.type == "audio":
-            parts.append(f"[audio: {block.mimeType}]")
-        else:
-            parts.append(str(block))
-    return "\n".join(parts)
-
 
 class MCPConnection:
     """Manages a persistent connection to an MCP server."""
