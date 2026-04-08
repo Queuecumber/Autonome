@@ -9,7 +9,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from session_manager.mcp import MCPConnection, mcp_content_to_openai, content_for_history
+from session_manager.mcp import MCPConnection, mcp_content_to_openai
 from session_manager.session import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,20 @@ what's worth keeping long-term.
 """
 
 
+def _strip_binary(msg: dict) -> dict:
+    """Strip binary content (images, audio) from a message for history storage."""
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return msg
+    stripped = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image_url":
+            stripped.append({"type": "text", "text": "[image]"})
+        else:
+            stripped.append(block)
+    return {**msg, "content": stripped}
+
+
 class SessionOrchestrator:
     """Receives events from adapters, maintains session history, drives LLM calls."""
 
@@ -143,31 +157,21 @@ class SessionOrchestrator:
 
         return "\n\n".join(parts)
 
-    async def _execute_tool_call(self, tool_call) -> tuple[dict, dict]:
-        """Execute a tool call. Returns (message_for_model, message_for_history)."""
+    async def _execute_tool_call(self, tool_call) -> dict:
+        """Execute a single tool call via the appropriate MCP server."""
         func = tool_call.function
         tool_name = func.name
         conn = self._tool_to_mcp.get(tool_name)
 
         if conn is None:
-            msg = {"role": "tool", "tool_call_id": tool_call.id, "content": f"Error: unknown tool '{tool_name}'"}
-            return msg, msg
+            return {"role": "tool", "tool_call_id": tool_call.id, "content": f"Error: unknown tool '{tool_name}'"}
 
         content_blocks = await conn.call_tool(tool_name, func.arguments)
-
-        model_msg = {
+        return {
             "role": "tool",
             "tool_call_id": tool_call.id,
             "content": mcp_content_to_openai(content_blocks),
         }
-
-        history_msg = {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": content_for_history(content_blocks),
-        }
-
-        return model_msg, history_msg
 
     async def handle_event(self, event: dict[str, Any]) -> str | None:
         """Process an inbound event from any adapter."""
@@ -249,10 +253,10 @@ class SessionOrchestrator:
 
                     for tool_call in assistant_msg.tool_calls:
                         logger.info(f"  Tool call: {tool_call.function.name}({tool_call.function.arguments[:100]})")
-                        model_msg, history_msg = await self._execute_tool_call(tool_call)
-                        logger.info(f"  Result: {history_msg['content'][:200]}")
-                        messages.append(model_msg)
-                        all_new_messages.append(history_msg)
+                        tool_result = await self._execute_tool_call(tool_call)
+                        logger.info(f"  Result: {str(tool_result['content'])[:200]}")
+                        messages.append(tool_result)
+                        all_new_messages.append(_strip_binary(tool_result))
 
                     call_kwargs["messages"] = messages
                     continue
