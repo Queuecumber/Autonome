@@ -220,10 +220,8 @@ class SessionOrchestrator:
 
             # Build user message with metadata context + current timestamp (local time with tz)
             now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-            context_prefix = f"[{source} | time={now}]"
-            if metadata:
-                context_prefix = f"[{source} | time={now} | {json.dumps(metadata)}]"
-            enriched_msg = {"role": "user", "content": f"{context_prefix} {text}"}
+            meta = f" | {json.dumps(metadata)}" if metadata else ""
+            enriched_msg = {"role": "user", "content": f"[{source} | time={now}{meta}] {text}"}
             stored_msg = {"role": "user", "content": text}
 
             # Build system prompt (AGENTS.md + MCP server instructions)
