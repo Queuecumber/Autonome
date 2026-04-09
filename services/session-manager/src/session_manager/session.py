@@ -29,7 +29,7 @@ class SessionManager:
         path = self._session_path(channel, session_id)
         with path.open("a") as f:
             for msg in messages:
-                f.write(json.dumps(msg) + "\n")
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
     def load_truncated(self, channel: str, session_id: str) -> list[dict[str, Any]]:
         messages = self.load(channel, session_id)
