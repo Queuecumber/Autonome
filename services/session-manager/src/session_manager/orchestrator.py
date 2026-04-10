@@ -223,7 +223,7 @@ class SessionOrchestrator:
             history = [m for msg in raw_history if (m := _prepare_for_model(msg)) is not None]
 
             # Build user message with metadata context + current timestamp (local time with tz)
-            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
             meta = f" | {json.dumps(metadata)}" if metadata else ""
             enriched_msg = {"role": "user", "content": f"[{source} | time={now}{meta}] {text}"}
             stored_msg = {"role": "user", "content": text}
