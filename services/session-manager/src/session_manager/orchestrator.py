@@ -237,6 +237,7 @@ class SessionOrchestrator:
             call_kwargs: dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
+                "max_completion_tokens": 16384,
             }
             if self.reasoning_effort:
                 call_kwargs["reasoning_effort"] = self.reasoning_effort
