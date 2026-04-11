@@ -1,6 +1,8 @@
 """Session manager: central orchestrator that receives events and drives LLM calls.
 
 Uses the OpenAI Responses API with streaming for model calls.
+Supports interruption: a new message cancels in-progress generation and
+provides the partial response as context for the next turn.
 """
 
 import asyncio
@@ -45,6 +47,13 @@ text output is for you and you alone.
 
 When you receive a message, it includes metadata with the sender, message ID, \
 and timestamp. Use the sender to reply and the message ID for reactions/receipts.
+
+## Interruptions
+
+If you see an [interrupted] marker on a previous turn, it means you were \
+generating a response when the user sent a new message. The marker shows what \
+you had composed so far (tool calls, partial text). Use this context to decide \
+whether your interrupted response is still relevant or should be abandoned.
 
 ## Every Session
 
@@ -97,6 +106,25 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
+def _describe_interrupted(completed_items: list) -> str:
+    """Build a human-readable summary of what the model had generated before interruption."""
+    parts = []
+    for item in completed_items:
+        item_type = getattr(item, "type", None)
+        if item_type == "function_call":
+            try:
+                args = json.loads(item.arguments)
+                args_str = json.dumps(args, ensure_ascii=False)
+            except (json.JSONDecodeError, AttributeError):
+                args_str = getattr(item, "arguments", "")
+            parts.append(f"tool call: {item.name}({args_str})")
+        elif item_type == "message":
+            for content in getattr(item, "content", []):
+                if hasattr(content, "text") and content.text:
+                    parts.append(f"text: {content.text}")
+    return "; ".join(parts) if parts else ""
+
+
 class SessionOrchestrator:
     """Receives events from adapters, maintains session history, drives LLM calls."""
 
@@ -117,6 +145,7 @@ class SessionOrchestrator:
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._cancel: dict[tuple[str, str], asyncio.Event] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
         self.openai_tools: list[dict] = []
@@ -184,119 +213,185 @@ class SessionOrchestrator:
 
         return {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
 
+    async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
+        """Stream an LLM response, collecting completed items.
+
+        Returns (response, completed_items):
+          - On normal completion: (Response, [all output items])
+          - On interruption: (None, [items completed before cancel])
+        """
+        completed_items = []
+        response = None
+
+        async for event in await self.llm.responses.create(**call_kwargs, stream=True):
+            if cancel.is_set():
+                logger.info("Stream interrupted by new message")
+                return None, completed_items
+
+            event_type = getattr(event, "type", None)
+            if event_type == "response.output_item.done":
+                completed_items.append(event.item)
+            elif event_type == "response.completed":
+                response = event.response
+
+        return response, completed_items
+
     async def handle_event(self, event: dict[str, Any]) -> str | None:
         """Process an inbound event from any adapter."""
         source = event["source"]
         session_id = event["session_id"]
         text = event.get("text", "")
         metadata = event.get("metadata", {})
+        key = (source, session_id)
+
+        # Signal any in-progress work for this session to cancel
+        if key in self._cancel:
+            logger.info(f"Interrupting in-progress response for {key}")
+            self._cancel[key].set()
 
         async with self._get_lock(source, session_id):
-            # Load session history
-            raw_history = self.session.load_truncated(source, session_id)
+            cancel = asyncio.Event()
+            self._cancel[key] = cancel
 
-            # Build user message with metadata context + current timestamp
-            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
-            meta = f" | {json.dumps(metadata)}" if metadata else ""
-            enriched_text = f"[{source} | time={now}{meta}] {text}"
+            try:
+                return await self._process_event(
+                    source, session_id, text, metadata, cancel,
+                )
+            finally:
+                if self._cancel.get(key) is cancel:
+                    del self._cancel[key]
 
-            # Build input: history + new message (filter out reasoning — output-only type)
-            history = [m for m in raw_history if m.get("type") != "reasoning"]
-            input_items = history + [{"role": "user", "content": enriched_text}]
+    async def _process_event(
+        self,
+        source: str,
+        session_id: str,
+        text: str,
+        metadata: dict,
+        cancel: asyncio.Event,
+    ) -> str | None:
+        """Inner event processing with cancellation support."""
+        # Load session history
+        raw_history = self.session.load_truncated(source, session_id)
 
-            # Build API call kwargs
-            call_kwargs: dict[str, Any] = {
-                "model": self.model,
-                "instructions": self._build_instructions(),
-                "input": input_items,
-                "max_output_tokens": 16384,
-            }
-            if self.reasoning_effort:
-                call_kwargs["reasoning"] = {"effort": self.reasoning_effort}
-            if self.openai_tools:
-                call_kwargs["tools"] = self.openai_tools
+        # Build user message with metadata context + current timestamp
+        now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
+        meta = f" | {json.dumps(metadata)}" if metadata else ""
+        enriched_text = f"[{source} | time={now}{meta}] {text}"
 
-            logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools")
+        # Build input: history + new message (filter reasoning — output-only type)
+        history = [m for m in raw_history if m.get("type") != "reasoning"]
+        input_items = history + [{"role": "user", "content": enriched_text}]
 
-            # Collect all new items to save to history
-            stored_msg = {"role": "user", "content": text}
-            all_new_messages = [stored_msg]
+        # Build API call kwargs
+        call_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "instructions": self._build_instructions(),
+            "input": input_items,
+            "max_output_tokens": 16384,
+        }
+        if self.reasoning_effort:
+            call_kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        if self.openai_tools:
+            call_kwargs["tools"] = self.openai_tools
 
-            for iteration in range(self.max_tool_iterations):
-                try:
-                    # Stream and collect — manual iteration bypasses SDK assertion
-                    # that chokes on 'reasoning' output items (openai 2.31.0)
-                    response = None
-                    async for event in await self.llm.responses.create(**call_kwargs, stream=True):
-                        if getattr(event, "type", None) == "response.completed":
-                            response = event.response
-                    if response is None:
-                        logger.error("Stream ended without response.completed event")
-                        return None
-                except Exception as e:
-                    logger.error(f"LLM call failed: {type(e).__name__}: {e!r}", exc_info=True)
-                    return None
+        logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools")
 
-                logger.info(f"LLM response (iter {iteration}): status={response.status}")
+        # Collect all new items to save to history
+        stored_msg = {"role": "user", "content": text}
+        all_new_messages = [stored_msg]
 
-                # Process output items
-                tool_calls = []
-                assistant_text = ""
-                reasoning_text = ""
+        for iteration in range(self.max_tool_iterations):
+            try:
+                response, completed_items = await self._stream_response(call_kwargs, cancel)
+            except Exception as e:
+                logger.error(f"LLM call failed: {type(e).__name__}: {e!r}", exc_info=True)
+                return None
 
-                for item in response.output:
-                    if item.type == "function_call":
-                        tool_calls.append(item)
-                    elif item.type == "reasoning":
-                        for content in item.content:
-                            if hasattr(content, "text"):
-                                reasoning_text += content.text
-                    elif item.type == "message":
-                        for content in item.content:
-                            if hasattr(content, "text"):
-                                assistant_text += content.text
-
-                if reasoning_text:
-                    all_new_messages.append({"type": "reasoning", "content": reasoning_text})
-
-                if tool_calls:
-                    # Save function calls to history
-                    for tc in tool_calls:
-                        # Re-encode arguments to get proper unicode instead of ascii escapes
-                        args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
-                        all_new_messages.append({
-                            "type": "function_call",
-                            "call_id": tc.call_id,
-                            "name": tc.name,
-                            "arguments": args_unicode,
-                        })
-
-                    # Execute tool calls and collect results
-                    tool_results = []
-                    for tc in tool_calls:
-                        logger.info(f"  Tool call: {tc.name}({tc.arguments[:100]})")
-                        result = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
-                        logger.info(f"  Result: {result['output'][:200]}")
-                        tool_results.append(result)
-                        all_new_messages.append(_prepare_for_history(result))
-
-                    # Feed results back — use previous response + results as new input
-                    call_kwargs["input"] = input_items + response.output + tool_results
-                    input_items = call_kwargs["input"]
-                    continue
-
-                # No tool calls — final response
-                if assistant_text:
-                    all_new_messages.append({"role": "assistant", "content": assistant_text})
-
+            # --- Interrupted during streaming ---
+            if response is None:
+                desc = _describe_interrupted(completed_items)
+                if desc:
+                    all_new_messages.append({"role": "assistant", "content": f"[interrupted] {desc}"})
+                    logger.info(f"Interrupted, partial: {desc[:200]}")
+                else:
+                    logger.info("Interrupted before any output completed")
                 self.session.append(source, session_id, all_new_messages)
+                return None
 
-                logger.info(f"Final response: {assistant_text[:200]}")
-                return assistant_text
+            logger.info(f"LLM response (iter {iteration}): status={response.status}")
 
-            logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
+            # Process output items
+            tool_calls = []
+            assistant_text = ""
+            reasoning_text = ""
+
+            for item in response.output:
+                if item.type == "function_call":
+                    tool_calls.append(item)
+                elif item.type == "reasoning":
+                    for content in item.content:
+                        if hasattr(content, "text"):
+                            reasoning_text += content.text
+                elif item.type == "message":
+                    for content in item.content:
+                        if hasattr(content, "text"):
+                            assistant_text += content.text
+
+            if reasoning_text:
+                all_new_messages.append({"type": "reasoning", "content": reasoning_text})
+
+            if tool_calls:
+                # Save function calls to history
+                for tc in tool_calls:
+                    # Re-encode arguments to get proper unicode instead of ascii escapes
+                    args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
+                    all_new_messages.append({
+                        "type": "function_call",
+                        "call_id": tc.call_id,
+                        "name": tc.name,
+                        "arguments": args_unicode,
+                    })
+
+                # Execute tool calls, checking for interruption between each
+                tool_results = []
+                for tc in tool_calls:
+                    if cancel.is_set():
+                        pending = tool_calls[tool_calls.index(tc):]
+                        pending_desc = "; ".join(
+                            f"tool call: {t.name}({json.dumps(json.loads(t.arguments), ensure_ascii=False)})"
+                            for t in pending
+                        )
+                        logger.info(f"Interrupted between tool calls, pending: {pending_desc[:200]}")
+                        all_new_messages.append({
+                            "role": "assistant",
+                            "content": f"[interrupted — not yet executed] {pending_desc}",
+                        })
+                        self.session.append(source, session_id, all_new_messages)
+                        return None
+
+                    logger.info(f"  Tool call: {tc.name}({tc.arguments[:100]})")
+                    result = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
+                    logger.info(f"  Result: {result['output'][:200]}")
+                    tool_results.append(result)
+                    all_new_messages.append(_prepare_for_history(result))
+
+                # Feed results back — use previous response + results as new input
+                call_kwargs["input"] = input_items + response.output + tool_results
+                input_items = call_kwargs["input"]
+                continue
+
+            # No tool calls — final response
+            if assistant_text:
+                all_new_messages.append({"role": "assistant", "content": assistant_text})
+
             self.session.append(source, session_id, all_new_messages)
-            return None
+
+            logger.info(f"Final response: {assistant_text[:200]}")
+            return assistant_text
+
+        logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
+        self.session.append(source, session_id, all_new_messages)
+        return None
 
     async def close(self) -> None:
         for conn in self.mcp_connections.values():

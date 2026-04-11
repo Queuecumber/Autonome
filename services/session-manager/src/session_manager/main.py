@@ -50,13 +50,14 @@ async def startup():
     if not orchestrator.openai_tools:
         logger.error("No MCP tools discovered after retries. Starting anyway.")
 
-    # HTTP app — just one endpoint
+    # HTTP app — accept event and process in background so the caller
+    # (adapter) can immediately go back to listening for new messages.
+    # This is what enables interruption: a second event can arrive and
+    # trigger cancellation while the first is still being processed.
     async def event_endpoint(request: Request) -> JSONResponse:
         body = await request.json()
-        result = await orchestrator.handle_event(body)
-        if result is None:
-            return JSONResponse({"status": "error", "response": None}, status_code=502)
-        return JSONResponse({"status": "ok", "response": result})
+        asyncio.create_task(orchestrator.handle_event(body))
+        return JSONResponse({"status": "accepted"}, status_code=202)
 
     app = Starlette(routes=[Route("/event", event_endpoint, methods=["POST"])])
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info"))
