@@ -41,7 +41,9 @@ async def startup():
             await orchestrator.connect_mcp_servers(mcp_urls)
             if orchestrator.openai_tools:
                 break
-        except Exception as e:
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
             logger.warning(f"MCP connection attempt {attempt + 1}/{max_retries} failed: {e}")
         await asyncio.sleep(2)
 

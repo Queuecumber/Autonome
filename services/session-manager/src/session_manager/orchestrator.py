@@ -1,4 +1,7 @@
-"""Session manager: central orchestrator that receives events and drives LLM calls."""
+"""Session manager: central orchestrator that receives events and drives LLM calls.
+
+Uses the OpenAI Responses API with streaming for model calls.
+"""
 
 import asyncio
 import json
@@ -31,7 +34,7 @@ by calling the appropriate send_message tool with the recipient and your \
 message text. If you do not call send_message, the user will not see any \
 response from you.
 
-You are free to use your text output as an internal molologue, to help you \
+You are free to use your text output as an internal monologue, to help you \
 reason or remember things in the direct conversation context. You can think of \
 this as your private thoughts on whats happening, use this capability however \
 you wish. Remember, your text output will not be delivered to the user, you \
@@ -82,51 +85,16 @@ what's worth keeping long-term.
 """
 
 
-def _prepare_for_history(msg: dict) -> dict:
-    """Prepare a message for session history — strip binary, ensure non-empty content."""
-    msg = dict(msg)  # shallow copy
-
-    if not msg.get("content"):
-        if msg.get("tool_calls"):
-            msg["content"] = "(calling tools)"
-        elif msg.get("role") == "assistant":
-            msg["content"] = "(no text response)"
-
-    # Replace binary content blocks with text placeholders
-    content = msg.get("content")
+def _prepare_for_history(item: dict) -> dict:
+    """Prepare an output item for session history — strip binary content."""
+    item = dict(item)
+    content = item.get("content")
     if isinstance(content, list):
-        msg["content"] = [
+        item["content"] = [
             {"type": "text", "text": "[image]"} if (isinstance(b, dict) and b.get("type") == "image_url") else b
             for b in content
         ] or "(stripped)"
-
-    return msg
-
-
-def _prepare_for_model(msg: dict) -> dict | None:
-    """Prepare a history message for sending to the model. Returns None to skip."""
-    role = msg.get("role")
-    if role not in ("user", "assistant", "tool", "system"):
-        return None
-
-    msg = {k: v for k, v in msg.items()
-           if k not in ("reasoning_content", "thinking_blocks", "provider_specific_fields", "function_call")}
-
-    if not msg.get("content"):
-        if msg.get("tool_calls"):
-            msg["content"] = "(calling tools)"
-        elif role == "assistant":
-            msg["content"] = "(no text response)"
-
-    # Strip any leftover image blocks from history
-    content = msg.get("content")
-    if isinstance(content, list):
-        msg["content"] = [
-            b for b in content
-            if not (isinstance(b, dict) and b.get("type") == "image_url")
-        ] or "(image stripped)"
-
-    return msg
+    return item
 
 
 class SessionOrchestrator:
@@ -139,7 +107,6 @@ class SessionOrchestrator:
         self.model = model_config.get("model", "")
         self.reasoning_effort = model_config.get("reasoning_effort")
 
-        # OpenAI SDK reads OPENAI_API_KEY and OPENAI_BASE_URL from env by default
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
             timeout=300,
@@ -165,10 +132,12 @@ class SessionOrchestrator:
                 await conn.connect()
                 self.mcp_connections[name] = conn
                 for tool in conn.tools:
-                    tool_name = tool["function"]["name"]
+                    tool_name = tool["name"]
                     self.openai_tools.append(tool)
                     self._tool_to_mcp[tool_name] = conn
-            except Exception as e:
+            except BaseException as e:
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise
                 logger.error(f"Failed to connect to MCP server {name} at {url}: {e}")
 
         logger.info(f"Connected to {len(self.mcp_connections)} MCP servers, {len(self.openai_tools)} tools total")
@@ -179,36 +148,41 @@ class SessionOrchestrator:
             self._locks[key] = asyncio.Lock()
         return self._locks[key]
 
-
-    def _build_system_prompt(self) -> str:
-        """Build system prompt from base instructions + MCP server instructions."""
+    def _build_instructions(self) -> str:
+        """Build instructions from base prompt + MCP server instructions."""
         parts = [SYSTEM_PROMPT]
 
         server_docs = []
         for conn in self.mcp_connections.values():
             if conn.instructions:
-                tool_names = ", ".join(t["function"]["name"] for t in conn.tools)
+                tool_names = ", ".join(t["name"] for t in conn.tools)
                 server_docs.append(f"### {conn.name}\n{conn.instructions}\nTools: {tool_names}")
         if server_docs:
             parts.append("## Available Tool Servers\n\n" + "\n\n".join(server_docs))
 
         return "\n\n".join(parts)
 
-    async def _execute_tool_call(self, tool_call) -> dict:
-        """Execute a single tool call via the appropriate MCP server."""
-        func = tool_call.function
-        tool_name = func.name
-        conn = self._tool_to_mcp.get(tool_name)
+    async def _execute_tool_call(self, call_id: str, name: str, arguments: str) -> dict:
+        """Execute a tool call. Returns a function_call_output input item."""
+        conn = self._tool_to_mcp.get(name)
 
         if conn is None:
-            return {"role": "tool", "tool_call_id": tool_call.id, "content": f"Error: unknown tool '{tool_name}'"}
+            return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}
 
-        content_blocks = await conn.call_tool(tool_name, func.arguments)
-        return {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": mcp_content_to_openai(content_blocks),
-        }
+        content_blocks = await conn.call_tool(name, arguments)
+        openai_parts = mcp_content_to_openai(content_blocks)
+
+        # For the responses API, output is a string. Multimodal needs special handling.
+        text_parts = []
+        for part in openai_parts:
+            if part.get("type") == "text":
+                text_parts.append(part["text"])
+            elif part.get("type") == "image_url":
+                text_parts.append("[image content — see tool result]")
+                # TODO: responses API doesn't support multimodal tool results yet
+                # When it does, pass the image_url directly
+
+        return {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
 
     async def handle_event(self, event: dict[str, Any]) -> str | None:
         """Process an inbound event from any adapter."""
@@ -218,68 +192,100 @@ class SessionOrchestrator:
         metadata = event.get("metadata", {})
 
         async with self._get_lock(source, session_id):
-            # Load session history, prepare for model
+            # Load session history
             raw_history = self.session.load_truncated(source, session_id)
-            history = [m for msg in raw_history if (m := _prepare_for_model(msg)) is not None]
 
-            # Build user message with metadata context + current timestamp (local time with tz)
+            # Build user message with metadata context + current timestamp
             now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
             meta = f" | {json.dumps(metadata)}" if metadata else ""
-            enriched_msg = {"role": "user", "content": f"[{source} | time={now}{meta}] {text}"}
-            stored_msg = {"role": "user", "content": text}
+            enriched_text = f"[{source} | time={now}{meta}] {text}"
 
-            # Build system prompt (AGENTS.md + MCP server instructions)
-            system_content = self._build_system_prompt()
-            system_msg = [{"role": "system", "content": system_content}] if system_content else []
-            messages = system_msg + history + [enriched_msg]
+            # Build input: history + new message (filter out reasoning — output-only type)
+            history = [m for m in raw_history if m.get("type") != "reasoning"]
+            input_items = history + [{"role": "user", "content": enriched_text}]
 
             # Build API call kwargs
             call_kwargs: dict[str, Any] = {
                 "model": self.model,
-                "messages": messages,
-                "max_completion_tokens": 16384,
+                "instructions": self._build_instructions(),
+                "input": input_items,
+                "max_output_tokens": 16384,
             }
             if self.reasoning_effort:
-                call_kwargs["reasoning_effort"] = self.reasoning_effort
+                call_kwargs["reasoning"] = {"effort": self.reasoning_effort}
             if self.openai_tools:
                 call_kwargs["tools"] = self.openai_tools
 
-            logger.info(f"Calling LLM: {len(messages)} messages, {len(self.openai_tools)} tools")
+            logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools")
 
-            # Tool execution loop
+            # Collect all new items to save to history
+            stored_msg = {"role": "user", "content": text}
             all_new_messages = [stored_msg]
+
             for iteration in range(self.max_tool_iterations):
                 try:
-                    response = await self.llm.chat.completions.create(**call_kwargs)
+                    # Stream and collect — manual iteration bypasses SDK assertion
+                    # that chokes on 'reasoning' output items (openai 2.31.0)
+                    response = None
+                    async for event in await self.llm.responses.create(**call_kwargs, stream=True):
+                        if getattr(event, "type", None) == "response.completed":
+                            response = event.response
+                    if response is None:
+                        logger.error("Stream ended without response.completed event")
+                        return None
                 except Exception as e:
-                    logger.error(f"LLM call failed: {e}")
+                    logger.error(f"LLM call failed: {type(e).__name__}: {e!r}", exc_info=True)
                     return None
 
-                choice = response.choices[0]
-                assistant_msg = choice.message
+                logger.info(f"LLM response (iter {iteration}): status={response.status}")
 
-                logger.info(f"LLM response (iter {iteration}): finish_reason={choice.finish_reason}")
+                # Process output items
+                tool_calls = []
+                assistant_text = ""
+                reasoning_text = ""
 
-                # If the model wants to call tools
-                if choice.finish_reason == "tool_calls" or (assistant_msg.tool_calls and len(assistant_msg.tool_calls) > 0):
-                    assistant_dict = assistant_msg.model_dump()
-                    if not assistant_dict.get("content"):
-                        assistant_dict["content"] = "(calling tools)"
-                    messages.append(assistant_dict)
-                    all_new_messages.append(_prepare_for_history(assistant_dict))
+                for item in response.output:
+                    if item.type == "function_call":
+                        tool_calls.append(item)
+                    elif item.type == "reasoning":
+                        for content in item.content:
+                            if hasattr(content, "text"):
+                                reasoning_text += content.text
+                    elif item.type == "message":
+                        for content in item.content:
+                            if hasattr(content, "text"):
+                                assistant_text += content.text
 
-                    for tool_call in assistant_msg.tool_calls:
-                        logger.info(f"  Tool call: {tool_call.function.name}({tool_call.function.arguments[:100]})")
-                        tool_result = await self._execute_tool_call(tool_call)
-                        logger.info(f"  Result: {str(tool_result['content'])[:200]}")
-                        messages.append(tool_result)
-                        all_new_messages.append(_prepare_for_history(tool_result))
+                if reasoning_text:
+                    all_new_messages.append({"type": "reasoning", "content": reasoning_text})
 
-                    call_kwargs["messages"] = messages
+                if tool_calls:
+                    # Save function calls to history
+                    for tc in tool_calls:
+                        # Re-encode arguments to get proper unicode instead of ascii escapes
+                        args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
+                        all_new_messages.append({
+                            "type": "function_call",
+                            "call_id": tc.call_id,
+                            "name": tc.name,
+                            "arguments": args_unicode,
+                        })
+
+                    # Execute tool calls and collect results
+                    tool_results = []
+                    for tc in tool_calls:
+                        logger.info(f"  Tool call: {tc.name}({tc.arguments[:100]})")
+                        result = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
+                        logger.info(f"  Result: {result['output'][:200]}")
+                        tool_results.append(result)
+                        all_new_messages.append(_prepare_for_history(result))
+
+                    # Feed results back — use previous response + results as new input
+                    call_kwargs["input"] = input_items + response.output + tool_results
+                    input_items = call_kwargs["input"]
                     continue
 
                 # No tool calls — final response
-                assistant_text = assistant_msg.content or ""
                 if assistant_text:
                     all_new_messages.append({"role": "assistant", "content": assistant_text})
 
