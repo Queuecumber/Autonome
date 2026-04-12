@@ -100,7 +100,7 @@ def _prepare_for_history(item: dict) -> dict:
     content = item.get("content")
     if isinstance(content, list):
         item["content"] = [
-            {"type": "text", "text": "[image]"} if (isinstance(b, dict) and b.get("type") == "image_url") else b
+            {"type": "text", "text": "[image]"} if (isinstance(b, dict) and b.get("type") in ("image_url", "input_image")) else b
             for b in content
         ] or "(stripped)"
     return item
@@ -191,27 +191,32 @@ class SessionOrchestrator:
 
         return "\n\n".join(parts)
 
-    async def _execute_tool_call(self, call_id: str, name: str, arguments: str) -> dict:
-        """Execute a tool call. Returns a function_call_output input item."""
+    async def _execute_tool_call(self, call_id: str, name: str, arguments: str) -> tuple[dict, list[dict]]:
+        """Execute a tool call.
+
+        Returns (function_call_output, image_items):
+          - function_call_output: the output item with text content
+          - image_items: user messages with image_url content for the model to see
+        """
         conn = self._tool_to_mcp.get(name)
 
         if conn is None:
-            return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}
+            return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}, []
 
         content_blocks = await conn.call_tool(name, arguments)
         openai_parts = mcp_content_to_openai(content_blocks)
 
-        # For the responses API, output is a string. Multimodal needs special handling.
         text_parts = []
+        image_items = []
         for part in openai_parts:
             if part.get("type") == "text":
                 text_parts.append(part["text"])
-            elif part.get("type") == "image_url":
-                text_parts.append("[image content — see tool result]")
-                # TODO: responses API doesn't support multimodal tool results yet
-                # When it does, pass the image_url directly
+            elif part.get("type") == "input_image":
+                text_parts.append("[image attached]")
+                image_items.append({"role": "user", "content": [part]})
 
-        return {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
+        output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
+        return output, image_items
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
         """Stream an LLM response, collecting completed items.
@@ -370,10 +375,13 @@ class SessionOrchestrator:
                         return None
 
                     logger.info(f"  Tool call: {tc.name}({tc.arguments[:100]})")
-                    result = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
+                    result, images = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
                     logger.info(f"  Result: {result['output'][:200]}")
                     tool_results.append(result)
                     all_new_messages.append(_prepare_for_history(result))
+                    for img in images:
+                        tool_results.append(img)
+                        all_new_messages.append(_prepare_for_history(img))
 
                 # Feed results back — use previous response + results as new input
                 call_kwargs["input"] = input_items + response.output + tool_results

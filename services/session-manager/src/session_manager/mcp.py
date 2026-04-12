@@ -26,10 +26,10 @@ def mcp_tool_to_openai(tool) -> dict:
 
 
 def mcp_content_to_openai(content_blocks: list) -> list[dict]:
-    """Convert MCP content blocks to OpenAI message content parts.
+    """Convert MCP content blocks to OpenAI Responses API message content parts.
 
     TextContent → text part
-    ImageContent → image_url part (data URI)
+    ImageContent → input_image part (data URI)
     AudioContent → text placeholder (no OpenAI audio in tool results yet)
     """
     parts = []
@@ -38,8 +38,8 @@ def mcp_content_to_openai(content_blocks: list) -> list[dict]:
             parts.append({"type": "text", "text": block.text})
         elif block.type == "image":
             parts.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{block.mimeType};base64,{block.data}"},
+                "type": "input_image",
+                "image_url": f"data:{block.mimeType};base64,{block.data}",
             })
         elif block.type == "audio":
             parts.append({"type": "text", "text": f"[audio: {block.mimeType}]"})
