@@ -12,16 +12,11 @@ logger = logging.getLogger(__name__)
 
 def mcp_tool_to_openai(tool) -> dict:
     """Convert an MCP tool to OpenAI Responses API function tool format."""
-    schema = dict(tool.inputSchema) if tool.inputSchema else {}
-    if "type" not in schema:
-        schema["type"] = "object"
-    if "properties" not in schema:
-        schema["properties"] = {}
     return {
         "type": "function",
         "name": tool.name,
         "description": tool.description or "",
-        "parameters": schema,
+        "parameters": tool.inputSchema or {},
     }
 
 
@@ -50,11 +45,7 @@ def mcp_content_to_openai(content_blocks: list) -> list[dict]:
 
 
 class MCPConnection:
-    """Manages a persistent connection to an MCP server.
-
-    Each connection runs in its own asyncio task to isolate anyio cancel scopes
-    from the streamable HTTP transport.
-    """
+    """Manages a persistent connection to an MCP server."""
 
     def __init__(self, name: str, url: str, prefix: str = "aptool"):
         self.name = name
@@ -123,5 +114,5 @@ class MCPConnection:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, BaseException):
+            except BaseException:
                 pass

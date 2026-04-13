@@ -1,9 +1,4 @@
-"""Session manager: central orchestrator that receives events and drives LLM calls.
-
-Uses the OpenAI Responses API with streaming for model calls.
-Supports interruption: a new message cancels in-progress generation and
-provides the partial response as context for the next turn.
-"""
+"""Session manager: central orchestrator that receives events and drives LLM calls."""
 
 import asyncio
 import json
@@ -98,11 +93,15 @@ def _prepare_for_history(item: dict) -> dict:
     """Prepare an output item for session history — strip binary content."""
     item = dict(item)
     content = item.get("content")
-    if isinstance(content, list):
-        item["content"] = [
-            {"type": "text", "text": "[image]"} if (isinstance(b, dict) and b.get("type") in ("image_url", "input_image")) else b
-            for b in content
-        ] or "(stripped)"
+    if not isinstance(content, list):
+        return item
+    stripped = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
+            stripped.append({"type": "text", "text": "[image]"})
+        else:
+            stripped.append(block)
+    item["content"] = stripped or "(stripped)"
     return item
 
 
@@ -112,17 +111,20 @@ def _describe_interrupted(completed_items: list) -> str:
     for item in completed_items:
         item_type = getattr(item, "type", None)
         if item_type == "function_call":
-            try:
-                args = json.loads(item.arguments)
-                args_str = json.dumps(args, ensure_ascii=False)
-            except (json.JSONDecodeError, AttributeError):
-                args_str = getattr(item, "arguments", "")
-            parts.append(f"tool call: {item.name}({args_str})")
+            parts.append(f"{item.name}({item.arguments})")
         elif item_type == "message":
             for content in getattr(item, "content", []):
                 if hasattr(content, "text") and content.text:
-                    parts.append(f"text: {content.text}")
+                    parts.append(content.text)
     return "; ".join(parts) if parts else ""
+
+
+class _SessionState:
+    """Per-session lock and cancellation event."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.cancel: asyncio.Event | None = None
 
 
 class SessionOrchestrator:
@@ -144,8 +146,7 @@ class SessionOrchestrator:
         max_tokens = session_config.get("max_history_tokens", 100000)
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
-        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._cancel: dict[tuple[str, str], asyncio.Event] = {}
+        self._sessions: dict[tuple[str, str], _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
         self.openai_tools: list[dict] = []
@@ -164,18 +165,18 @@ class SessionOrchestrator:
                     tool_name = tool["name"]
                     self.openai_tools.append(tool)
                     self._tool_to_mcp[tool_name] = conn
-            except BaseException as e:
-                if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                    raise
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:
                 logger.error(f"Failed to connect to MCP server {name} at {url}: {e}")
 
         logger.info(f"Connected to {len(self.mcp_connections)} MCP servers, {len(self.openai_tools)} tools total")
 
-    def _get_lock(self, channel: str, session_id: str) -> asyncio.Lock:
+    def _get_session(self, channel: str, session_id: str) -> _SessionState:
         key = (channel, session_id)
-        if key not in self._locks:
-            self._locks[key] = asyncio.Lock()
-        return self._locks[key]
+        if key not in self._sessions:
+            self._sessions[key] = _SessionState()
+        return self._sessions[key]
 
     def _build_instructions(self) -> str:
         """Build instructions from base prompt + MCP server instructions."""
@@ -247,24 +248,24 @@ class SessionOrchestrator:
         session_id = event["session_id"]
         text = event.get("text", "")
         metadata = event.get("metadata", {})
-        key = (source, session_id)
+        state = self._get_session(source, session_id)
 
         # Signal any in-progress work for this session to cancel
-        if key in self._cancel:
-            logger.info(f"Interrupting in-progress response for {key}")
-            self._cancel[key].set()
+        if state.cancel is not None:
+            logger.info(f"Interrupting in-progress response for ({source}, {session_id})")
+            state.cancel.set()
 
-        async with self._get_lock(source, session_id):
+        async with state.lock:
             cancel = asyncio.Event()
-            self._cancel[key] = cancel
+            state.cancel = cancel
 
             try:
                 return await self._process_event(
                     source, session_id, text, metadata, cancel,
                 )
             finally:
-                if self._cancel.get(key) is cancel:
-                    del self._cancel[key]
+                if state.cancel is cancel:
+                    state.cancel = None
 
     async def _process_event(
         self,
