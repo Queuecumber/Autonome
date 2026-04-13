@@ -31,7 +31,7 @@ by calling the appropriate send_message tool with the recipient and your \
 message text. If you do not call send_message, the user will not see any \
 response from you.
 
-You are free to use your text output as an internal molologue, to help you \
+You are free to use your text output as an internal monologue, to help you \
 reason or remember things in the direct conversation context. You can think of \
 this as your private thoughts on whats happening, use this capability however \
 you wish. Remember, your text output will not be delivered to the user, you \
@@ -42,6 +42,13 @@ text output is for you and you alone.
 
 When you receive a message, it includes metadata with the sender, message ID, \
 and timestamp. Use the sender to reply and the message ID for reactions/receipts.
+
+## Interruptions
+
+If you see an [interrupted] marker on a previous turn, it means you were \
+generating a response when the user sent a new message. The marker shows what \
+you had composed so far (tool calls, partial text). Use this context to decide \
+whether your interrupted response is still relevant or should be abandoned.
 
 ## Every Session
 
@@ -82,51 +89,42 @@ what's worth keeping long-term.
 """
 
 
-def _prepare_for_history(msg: dict) -> dict:
-    """Prepare a message for session history — strip binary, ensure non-empty content."""
-    msg = dict(msg)  # shallow copy
-
-    if not msg.get("content"):
-        if msg.get("tool_calls"):
-            msg["content"] = "(calling tools)"
-        elif msg.get("role") == "assistant":
-            msg["content"] = "(no text response)"
-
-    # Replace binary content blocks with text placeholders
-    content = msg.get("content")
-    if isinstance(content, list):
-        msg["content"] = [
-            {"type": "text", "text": "[image]"} if (isinstance(b, dict) and b.get("type") == "image_url") else b
-            for b in content
-        ] or "(stripped)"
-
-    return msg
+def _prepare_for_history(item: dict) -> dict:
+    """Prepare an output item for session history — strip binary content."""
+    item = dict(item)
+    content = item.get("content")
+    if not isinstance(content, list):
+        return item
+    stripped = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
+            stripped.append({"type": "text", "text": "[image]"})
+        else:
+            stripped.append(block)
+    item["content"] = stripped or "(stripped)"
+    return item
 
 
-def _prepare_for_model(msg: dict) -> dict | None:
-    """Prepare a history message for sending to the model. Returns None to skip."""
-    role = msg.get("role")
-    if role not in ("user", "assistant", "tool", "system"):
-        return None
+def _describe_interrupted(completed_items: list) -> str:
+    """Build a human-readable summary of what the model had generated before interruption."""
+    parts = []
+    for item in completed_items:
+        item_type = getattr(item, "type", None)
+        if item_type == "function_call":
+            parts.append(f"{item.name}({item.arguments})")
+        elif item_type == "message":
+            for content in getattr(item, "content", []):
+                if hasattr(content, "text") and content.text:
+                    parts.append(content.text)
+    return "; ".join(parts) if parts else ""
 
-    msg = {k: v for k, v in msg.items()
-           if k not in ("reasoning_content", "thinking_blocks", "provider_specific_fields", "function_call")}
 
-    if not msg.get("content"):
-        if msg.get("tool_calls"):
-            msg["content"] = "(calling tools)"
-        elif role == "assistant":
-            msg["content"] = "(no text response)"
+class _SessionState:
+    """Per-session lock and cancellation event."""
 
-    # Strip any leftover image blocks from history
-    content = msg.get("content")
-    if isinstance(content, list):
-        msg["content"] = [
-            b for b in content
-            if not (isinstance(b, dict) and b.get("type") == "image_url")
-        ] or "(image stripped)"
-
-    return msg
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.cancel: asyncio.Event | None = None
 
 
 class SessionOrchestrator:
@@ -139,7 +137,6 @@ class SessionOrchestrator:
         self.model = model_config.get("model", "")
         self.reasoning_effort = model_config.get("reasoning_effort")
 
-        # OpenAI SDK reads OPENAI_API_KEY and OPENAI_BASE_URL from env by default
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
             timeout=300,
@@ -149,7 +146,7 @@ class SessionOrchestrator:
         max_tokens = session_config.get("max_history_tokens", 100000)
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
-        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._sessions: dict[tuple[str, str], _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
         self.openai_tools: list[dict] = []
@@ -165,50 +162,85 @@ class SessionOrchestrator:
                 await conn.connect()
                 self.mcp_connections[name] = conn
                 for tool in conn.tools:
-                    tool_name = tool["function"]["name"]
+                    tool_name = tool["name"]
                     self.openai_tools.append(tool)
                     self._tool_to_mcp[tool_name] = conn
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except Exception as e:
                 logger.error(f"Failed to connect to MCP server {name} at {url}: {e}")
 
         logger.info(f"Connected to {len(self.mcp_connections)} MCP servers, {len(self.openai_tools)} tools total")
 
-    def _get_lock(self, channel: str, session_id: str) -> asyncio.Lock:
+    def _get_session(self, channel: str, session_id: str) -> _SessionState:
         key = (channel, session_id)
-        if key not in self._locks:
-            self._locks[key] = asyncio.Lock()
-        return self._locks[key]
+        if key not in self._sessions:
+            self._sessions[key] = _SessionState()
+        return self._sessions[key]
 
-
-    def _build_system_prompt(self) -> str:
-        """Build system prompt from base instructions + MCP server instructions."""
+    def _build_instructions(self) -> str:
+        """Build instructions from base prompt + MCP server instructions."""
         parts = [SYSTEM_PROMPT]
 
         server_docs = []
         for conn in self.mcp_connections.values():
             if conn.instructions:
-                tool_names = ", ".join(t["function"]["name"] for t in conn.tools)
+                tool_names = ", ".join(t["name"] for t in conn.tools)
                 server_docs.append(f"### {conn.name}\n{conn.instructions}\nTools: {tool_names}")
         if server_docs:
             parts.append("## Available Tool Servers\n\n" + "\n\n".join(server_docs))
 
         return "\n\n".join(parts)
 
-    async def _execute_tool_call(self, tool_call) -> dict:
-        """Execute a single tool call via the appropriate MCP server."""
-        func = tool_call.function
-        tool_name = func.name
-        conn = self._tool_to_mcp.get(tool_name)
+    async def _execute_tool_call(self, call_id: str, name: str, arguments: str) -> tuple[dict, list[dict]]:
+        """Execute a tool call.
+
+        Returns (function_call_output, image_items):
+          - function_call_output: the output item with text content
+          - image_items: user messages with image_url content for the model to see
+        """
+        conn = self._tool_to_mcp.get(name)
 
         if conn is None:
-            return {"role": "tool", "tool_call_id": tool_call.id, "content": f"Error: unknown tool '{tool_name}'"}
+            return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}, []
 
-        content_blocks = await conn.call_tool(tool_name, func.arguments)
-        return {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": mcp_content_to_openai(content_blocks),
-        }
+        content_blocks = await conn.call_tool(name, arguments)
+        openai_parts = mcp_content_to_openai(content_blocks)
+
+        text_parts = []
+        image_items = []
+        for part in openai_parts:
+            if part.get("type") == "text":
+                text_parts.append(part["text"])
+            elif part.get("type") == "input_image":
+                text_parts.append("[image attached]")
+                image_items.append({"role": "user", "content": [part]})
+
+        output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
+        return output, image_items
+
+    async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
+        """Stream an LLM response, collecting completed items.
+
+        Returns (response, completed_items):
+          - On normal completion: (Response, [all output items])
+          - On interruption: (None, [items completed before cancel])
+        """
+        completed_items = []
+        response = None
+
+        async for event in await self.llm.responses.create(**call_kwargs, stream=True):
+            if cancel.is_set():
+                logger.info("Stream interrupted by new message")
+                return None, completed_items
+
+            event_type = getattr(event, "type", None)
+            if event_type == "response.output_item.done":
+                completed_items.append(event.item)
+            elif event_type == "response.completed":
+                response = event.response
+
+        return response, completed_items
 
     async def handle_event(self, event: dict[str, Any]) -> str | None:
         """Process an inbound event from any adapter."""
@@ -216,81 +248,159 @@ class SessionOrchestrator:
         session_id = event["session_id"]
         text = event.get("text", "")
         metadata = event.get("metadata", {})
+        state = self._get_session(source, session_id)
 
-        async with self._get_lock(source, session_id):
-            # Load session history, prepare for model
-            raw_history = self.session.load_truncated(source, session_id)
-            history = [m for msg in raw_history if (m := _prepare_for_model(msg)) is not None]
+        # Signal any in-progress work for this session to cancel
+        if state.cancel is not None:
+            logger.info(f"Interrupting in-progress response for ({source}, {session_id})")
+            state.cancel.set()
 
-            # Build user message with metadata context + current timestamp (local time with tz)
-            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
-            meta = f" | {json.dumps(metadata)}" if metadata else ""
-            enriched_msg = {"role": "user", "content": f"[{source} | time={now}{meta}] {text}"}
-            stored_msg = {"role": "user", "content": text}
+        async with state.lock:
+            cancel = asyncio.Event()
+            state.cancel = cancel
 
-            # Build system prompt (AGENTS.md + MCP server instructions)
-            system_content = self._build_system_prompt()
-            system_msg = [{"role": "system", "content": system_content}] if system_content else []
-            messages = system_msg + history + [enriched_msg]
+            try:
+                return await self._process_event(
+                    source, session_id, text, metadata, cancel,
+                )
+            finally:
+                if state.cancel is cancel:
+                    state.cancel = None
 
-            # Build API call kwargs
-            call_kwargs: dict[str, Any] = {
-                "model": self.model,
-                "messages": messages,
-                "max_completion_tokens": 16384,
-            }
-            if self.reasoning_effort:
-                call_kwargs["reasoning_effort"] = self.reasoning_effort
-            if self.openai_tools:
-                call_kwargs["tools"] = self.openai_tools
+    async def _process_event(
+        self,
+        source: str,
+        session_id: str,
+        text: str,
+        metadata: dict,
+        cancel: asyncio.Event,
+    ) -> str | None:
+        """Inner event processing with cancellation support."""
+        # Load session history
+        raw_history = self.session.load_truncated(source, session_id)
 
-            logger.info(f"Calling LLM: {len(messages)} messages, {len(self.openai_tools)} tools")
+        # Build user message with metadata context + current timestamp
+        now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
+        meta = f" | {json.dumps(metadata)}" if metadata else ""
+        enriched_text = f"[{source} | time={now}{meta}] {text}"
 
-            # Tool execution loop
-            all_new_messages = [stored_msg]
-            for iteration in range(self.max_tool_iterations):
-                try:
-                    response = await self.llm.chat.completions.create(**call_kwargs)
-                except Exception as e:
-                    logger.error(f"LLM call failed: {e}")
-                    return None
+        # Build input: history + new message (filter reasoning — output-only type)
+        history = [m for m in raw_history if m.get("type") != "reasoning"]
+        input_items = history + [{"role": "user", "content": enriched_text}]
 
-                choice = response.choices[0]
-                assistant_msg = choice.message
+        # Build API call kwargs
+        call_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "instructions": self._build_instructions(),
+            "input": input_items,
+            "max_output_tokens": 16384,
+        }
+        if self.reasoning_effort:
+            call_kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        if self.openai_tools:
+            call_kwargs["tools"] = self.openai_tools
 
-                logger.info(f"LLM response (iter {iteration}): finish_reason={choice.finish_reason}")
+        logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools")
 
-                # If the model wants to call tools
-                if choice.finish_reason == "tool_calls" or (assistant_msg.tool_calls and len(assistant_msg.tool_calls) > 0):
-                    assistant_dict = assistant_msg.model_dump()
-                    if not assistant_dict.get("content"):
-                        assistant_dict["content"] = "(calling tools)"
-                    messages.append(assistant_dict)
-                    all_new_messages.append(_prepare_for_history(assistant_dict))
+        # Collect all new items to save to history
+        stored_msg = {"role": "user", "content": text}
+        all_new_messages = [stored_msg]
 
-                    for tool_call in assistant_msg.tool_calls:
-                        logger.info(f"  Tool call: {tool_call.function.name}({tool_call.function.arguments[:100]})")
-                        tool_result = await self._execute_tool_call(tool_call)
-                        logger.info(f"  Result: {str(tool_result['content'])[:200]}")
-                        messages.append(tool_result)
-                        all_new_messages.append(_prepare_for_history(tool_result))
+        for iteration in range(self.max_tool_iterations):
+            try:
+                response, completed_items = await self._stream_response(call_kwargs, cancel)
+            except Exception as e:
+                logger.error(f"LLM call failed: {type(e).__name__}: {e!r}", exc_info=True)
+                return None
 
-                    call_kwargs["messages"] = messages
-                    continue
-
-                # No tool calls — final response
-                assistant_text = assistant_msg.content or ""
-                if assistant_text:
-                    all_new_messages.append({"role": "assistant", "content": assistant_text})
-
+            # --- Interrupted during streaming ---
+            if response is None:
+                desc = _describe_interrupted(completed_items)
+                if desc:
+                    all_new_messages.append({"role": "assistant", "content": f"[interrupted] {desc}"})
+                    logger.info(f"Interrupted, partial: {desc[:200]}")
+                else:
+                    logger.info("Interrupted before any output completed")
                 self.session.append(source, session_id, all_new_messages)
+                return None
 
-                logger.info(f"Final response: {assistant_text[:200]}")
-                return assistant_text
+            logger.info(f"LLM response (iter {iteration}): status={response.status}")
 
-            logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
+            # Process output items
+            tool_calls = []
+            assistant_text = ""
+            reasoning_text = ""
+
+            for item in response.output:
+                if item.type == "function_call":
+                    tool_calls.append(item)
+                elif item.type == "reasoning":
+                    for content in item.content:
+                        if hasattr(content, "text"):
+                            reasoning_text += content.text
+                elif item.type == "message":
+                    for content in item.content:
+                        if hasattr(content, "text"):
+                            assistant_text += content.text
+
+            if reasoning_text:
+                all_new_messages.append({"type": "reasoning", "content": reasoning_text})
+
+            if tool_calls:
+                # Save function calls to history
+                for tc in tool_calls:
+                    # Re-encode arguments to get proper unicode instead of ascii escapes
+                    args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
+                    all_new_messages.append({
+                        "type": "function_call",
+                        "call_id": tc.call_id,
+                        "name": tc.name,
+                        "arguments": args_unicode,
+                    })
+
+                # Execute tool calls, checking for interruption between each
+                tool_results = []
+                for tc in tool_calls:
+                    if cancel.is_set():
+                        pending = tool_calls[tool_calls.index(tc):]
+                        pending_desc = "; ".join(
+                            f"tool call: {t.name}({json.dumps(json.loads(t.arguments), ensure_ascii=False)})"
+                            for t in pending
+                        )
+                        logger.info(f"Interrupted between tool calls, pending: {pending_desc[:200]}")
+                        all_new_messages.append({
+                            "role": "assistant",
+                            "content": f"[interrupted — not yet executed] {pending_desc}",
+                        })
+                        self.session.append(source, session_id, all_new_messages)
+                        return None
+
+                    logger.info(f"  Tool call: {tc.name}({tc.arguments[:100]})")
+                    result, images = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
+                    logger.info(f"  Result: {result['output'][:200]}")
+                    tool_results.append(result)
+                    all_new_messages.append(_prepare_for_history(result))
+                    for img in images:
+                        tool_results.append(img)
+                        all_new_messages.append(_prepare_for_history(img))
+
+                # Feed results back — use previous response + results as new input
+                call_kwargs["input"] = input_items + response.output + tool_results
+                input_items = call_kwargs["input"]
+                continue
+
+            # No tool calls — final response
+            if assistant_text:
+                all_new_messages.append({"role": "assistant", "content": assistant_text})
+
             self.session.append(source, session_id, all_new_messages)
-            return None
+
+            logger.info(f"Final response: {assistant_text[:200]}")
+            return assistant_text
+
+        logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
+        self.session.append(source, session_id, all_new_messages)
+        return None
 
     async def close(self) -> None:
         for conn in self.mcp_connections.values():

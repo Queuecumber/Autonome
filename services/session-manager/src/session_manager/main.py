@@ -41,6 +41,8 @@ async def startup():
             await orchestrator.connect_mcp_servers(mcp_urls)
             if orchestrator.openai_tools:
                 break
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
             logger.warning(f"MCP connection attempt {attempt + 1}/{max_retries} failed: {e}")
         await asyncio.sleep(2)
@@ -48,13 +50,10 @@ async def startup():
     if not orchestrator.openai_tools:
         logger.error("No MCP tools discovered after retries. Starting anyway.")
 
-    # HTTP app — just one endpoint
     async def event_endpoint(request: Request) -> JSONResponse:
         body = await request.json()
-        result = await orchestrator.handle_event(body)
-        if result is None:
-            return JSONResponse({"status": "error", "response": None}, status_code=502)
-        return JSONResponse({"status": "ok", "response": result})
+        asyncio.create_task(orchestrator.handle_event(body))
+        return JSONResponse(status_code=202)
 
     app = Starlette(routes=[Route("/event", event_endpoint, methods=["POST"])])
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info"))
