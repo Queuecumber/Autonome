@@ -95,13 +95,15 @@ def _prepare_for_history(item: dict) -> dict:
     content = item.get("content")
     if not isinstance(content, list):
         return item
-    stripped = []
+    texts = []
     for block in content:
         if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
-            stripped.append({"type": "text", "text": "[image]"})
+            texts.append("[image]")
+        elif isinstance(block, dict) and block.get("type") == "text":
+            texts.append(block["text"])
         else:
-            stripped.append(block)
-    item["content"] = stripped or "(stripped)"
+            texts.append(str(block))
+    item["content"] = "\n".join(texts) if texts else "(stripped)"
     return item
 
 
@@ -239,6 +241,13 @@ class SessionOrchestrator:
                 completed_items.append(event.item)
             elif event_type == "response.completed":
                 response = event.response
+            elif event_type == "response.failed":
+                resp = getattr(event, "response", None)
+                status = getattr(resp, "status", "unknown")
+                error = getattr(resp, "error", None)
+                model = getattr(resp, "model", "unknown")
+                logger.error(f"LLM stream failed: status={status} model={model} error={error}")
+                return None, completed_items
 
         return response, completed_items
 
