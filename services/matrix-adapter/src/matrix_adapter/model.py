@@ -1,0 +1,249 @@
+"""Matrix data model — all interaction with the homeserver lives here."""
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable
+
+from nio import (
+    AsyncClient,
+    LoginResponse,
+    MatrixRoom,
+    RoomMessageText,
+    RoomMessageImage,
+    RoomMessageFile,
+    ReactionEvent,
+    TypingNoticeEvent,
+    ReceiptEvent,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Attachment:
+    """An attachment on a Matrix message."""
+    url: str
+    content_type: str | None = None
+    filename: str | None = None
+    size: int | None = None
+    content_base64: str | None = None
+
+
+@dataclass
+class Message:
+    """An inbound Matrix message."""
+    sender: str
+    room_id: str
+    event_id: str
+    text: str | None = None
+    attachments: list[Attachment] = field(default_factory=list)
+
+    def to_event(self, source: str = "matrix") -> dict:
+        metadata: dict = {
+            "message_id": self.event_id,
+            "sender": self.sender,
+            "room_id": self.room_id,
+        }
+        if self.attachments:
+            metadata["attachments"] = [
+                {"url": att.url, "content_type": att.content_type, "filename": att.filename}
+                for att in self.attachments
+            ]
+        return {
+            "source": source,
+            "session_id": self.room_id,
+            "text": self.text or "",
+            "metadata": metadata,
+        }
+
+
+@dataclass
+class Reaction:
+    """A reaction to a Matrix message."""
+    sender: str
+    room_id: str
+    event_id: str
+    emoji: str
+    target_event_id: str
+
+    def to_event(self, source: str = "matrix") -> dict:
+        return {
+            "source": source,
+            "session_id": self.room_id,
+            "text": f"[reacted with {self.emoji} to {self.target_event_id}]",
+            "metadata": {
+                "type": "reaction",
+                "sender": self.sender,
+                "room_id": self.room_id,
+                "emoji": self.emoji,
+                "target_event_id": self.target_event_id,
+            },
+        }
+
+
+class MatrixClient:
+    """Unified client for Matrix — reading and writing."""
+
+    def __init__(
+        self,
+        homeserver: str,
+        user_id: str,
+        password: str | None = None,
+        access_token: str | None = None,
+        allowed_rooms: list[str] | None = None,
+    ):
+        self.homeserver = homeserver
+        self.user_id = user_id
+        self.password = password
+        self.access_token = access_token
+        self.allowed_rooms = allowed_rooms
+        self._client = AsyncClient(homeserver, user_id)
+        self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
+
+    async def login(self) -> None:
+        if self.access_token:
+            self._client.access_token = self.access_token
+            self._client.user_id = self.user_id
+            logger.info(f"Using existing access token for {self.user_id}")
+        else:
+            resp = await self._client.login(self.password)
+            if not isinstance(resp, LoginResponse):
+                raise RuntimeError(f"Matrix login failed: {resp}")
+            logger.info(f"Logged in as {self.user_id}")
+
+    async def listen(self, on_message: Callable[[Message | Reaction], Awaitable[None]]) -> None:
+        self._on_message = on_message
+
+        self._client.add_event_callback(self._handle_text, RoomMessageText)
+        self._client.add_event_callback(self._handle_image, RoomMessageImage)
+        self._client.add_event_callback(self._handle_file, RoomMessageFile)
+        self._client.add_event_callback(self._handle_reaction, ReactionEvent)
+
+        logger.info("Starting Matrix sync loop")
+        await self._client.sync_forever(timeout=30000, full_state=True)
+
+    def _should_process(self, room: MatrixRoom, sender: str) -> bool:
+        if sender == self.user_id:
+            return False
+        if self.allowed_rooms and room.room_id not in self.allowed_rooms:
+            return False
+        return True
+
+    async def _handle_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
+        if not self._should_process(room, event.sender):
+            return
+        msg = Message(
+            sender=event.sender,
+            room_id=room.room_id,
+            event_id=event.event_id,
+            text=event.body,
+        )
+        logger.info(f"Received: {msg}")
+        if self._on_message:
+            await self._on_message(msg)
+
+    async def _handle_image(self, room: MatrixRoom, event: RoomMessageImage) -> None:
+        if not self._should_process(room, event.sender):
+            return
+        att = Attachment(
+            url=event.url,
+            content_type=event.body if hasattr(event, "mimetype") else None,
+            filename=event.body,
+        )
+        if hasattr(event, "source") and event.source and "mimetype" in event.source.get("info", {}):
+            att.content_type = event.source["info"]["mimetype"]
+        msg = Message(
+            sender=event.sender,
+            room_id=room.room_id,
+            event_id=event.event_id,
+            attachments=[att],
+        )
+        logger.info(f"Received image: {msg}")
+        if self._on_message:
+            await self._on_message(msg)
+
+    async def _handle_file(self, room: MatrixRoom, event: RoomMessageFile) -> None:
+        if not self._should_process(room, event.sender):
+            return
+        att = Attachment(
+            url=event.url,
+            content_type=None,
+            filename=event.body,
+        )
+        msg = Message(
+            sender=event.sender,
+            room_id=room.room_id,
+            event_id=event.event_id,
+            attachments=[att],
+        )
+        logger.info(f"Received file: {msg}")
+        if self._on_message:
+            await self._on_message(msg)
+
+    async def _handle_reaction(self, room: MatrixRoom, event: ReactionEvent) -> None:
+        if not self._should_process(room, event.sender):
+            return
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        target_id = relates_to.get("event_id", "")
+        emoji = relates_to.get("key", "")
+        reaction = Reaction(
+            sender=event.sender,
+            room_id=room.room_id,
+            event_id=event.event_id,
+            emoji=emoji,
+            target_event_id=target_id,
+        )
+        logger.info(f"Received reaction: {reaction}")
+        if self._on_message:
+            await self._on_message(reaction)
+
+    # ── Writing ──────────────────────────────────────────────
+
+    async def send_message(self, room_id: str, text: str) -> str:
+        resp = await self._client.room_send(
+            room_id,
+            "m.room.message",
+            {"msgtype": "m.text", "body": text},
+        )
+        return resp.event_id
+
+    async def send_reaction(self, room_id: str, event_id: str, emoji: str) -> None:
+        await self._client.room_send(
+            room_id,
+            "m.reaction",
+            {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": event_id,
+                    "key": emoji,
+                },
+            },
+        )
+
+    async def send_typing(self, room_id: str, typing: bool = True, timeout: int = 10000) -> None:
+        await self._client.room_typing(room_id, typing, timeout=timeout)
+
+    async def send_read_receipt(self, room_id: str, event_id: str) -> None:
+        await self._client.room_read_markers(room_id, fully_read_event=event_id, read_event=event_id)
+
+    async def download_attachment(self, mxc_url: str) -> tuple[bytes, str | None]:
+        resp = await self._client.download(mxc_url)
+        content_type = getattr(resp, "content_type", None)
+        return resp.body, content_type
+
+    async def upload_and_send_image(self, room_id: str, data: bytes, content_type: str, filename: str) -> None:
+        resp, _ = await self._client.upload(data, content_type=content_type, filename=filename)
+        await self._client.room_send(
+            room_id,
+            "m.room.message",
+            {
+                "msgtype": "m.image",
+                "url": resp.content_uri,
+                "body": filename,
+                "info": {"mimetype": content_type, "size": len(data)},
+            },
+        )
+
+    async def close(self) -> None:
+        await self._client.close()
