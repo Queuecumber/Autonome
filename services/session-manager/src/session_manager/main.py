@@ -9,7 +9,7 @@ import uvicorn
 import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import Response
 from starlette.routing import Route
 
 from session_manager.orchestrator import SessionOrchestrator
@@ -50,10 +50,10 @@ async def startup():
     if not orchestrator.openai_tools:
         logger.error("No MCP tools discovered after retries. Starting anyway.")
 
-    async def event_endpoint(request: Request) -> JSONResponse:
+    async def event_endpoint(request: Request) -> Response:
         body = await request.json()
         asyncio.create_task(orchestrator.handle_event(body))
-        return JSONResponse(status_code=202)
+        return Response(status_code=202)
 
     app = Starlette(routes=[Route("/event", event_endpoint, methods=["POST"])])
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info"))
