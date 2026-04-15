@@ -12,6 +12,8 @@ from nio import (
     LoginResponse,
     MatrixRoom,
     MegolmEvent,
+    RoomEncryptedImage,
+    RoomEncryptedFile,
     RoomMessageText,
     RoomMessageImage,
     RoomMessageFile,
@@ -156,7 +158,9 @@ class MatrixClient:
         self._client.add_event_callback(self._handle_invite, InviteMemberEvent)
         self._client.add_event_callback(self._handle_text, RoomMessageText)
         self._client.add_event_callback(self._handle_image, RoomMessageImage)
+        self._client.add_event_callback(self._handle_image, RoomEncryptedImage)
         self._client.add_event_callback(self._handle_file, RoomMessageFile)
+        self._client.add_event_callback(self._handle_file, RoomEncryptedFile)
         self._client.add_event_callback(self._handle_reaction, ReactionEvent)
         self._client.add_event_callback(self._handle_megolm, MegolmEvent)
 
