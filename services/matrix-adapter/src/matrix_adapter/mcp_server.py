@@ -24,8 +24,8 @@ mcp = FastMCP("matrix", instructions=(
     "metadata identifies where to send your response. "
     "When you receive a message, send a read_receipt to acknowledge it, then "
     "start the typing_indicator before composing your response. "
-    "When a message has attachments, the metadata includes attachment URLs and content_type. "
-    "To view an attachment, call get_attachment with the mxc:// URL AND the content_type from metadata."
+    "When a message has attachments, the metadata includes attachment URLs. "
+    "To view an attachment, call get_attachment with the mxc:// URL."
 ))
 
 
