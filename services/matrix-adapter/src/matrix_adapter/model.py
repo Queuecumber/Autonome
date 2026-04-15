@@ -136,6 +136,7 @@ class MatrixClient:
         )
         self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
         self._encryption_info: dict[str, dict] = {}  # mxc_url -> {key, iv, hash}
+        self._synced_rooms: set[str] = set()
 
     async def login(self) -> None:
         # Reuse saved credentials if available (avoids creating new devices)
@@ -168,10 +169,6 @@ class MatrixClient:
                 }))
 
         await self._client.sync(timeout=10000)
-
-        # Populate room member profiles so display names are available immediately
-        for room_id in self._client.rooms:
-            await self._client.joined_members(room_id)
 
         # Accept any pending invites from before callbacks were registered
         for room_id in list(self._client.invited_rooms.keys()):
@@ -214,6 +211,11 @@ class MatrixClient:
 
     async def _handle_sync(self, response: SyncResponse) -> None:
         self._trust_all_devices()
+        # Populate member profiles for newly joined rooms
+        for room_id in self._client.rooms:
+            if room_id not in self._synced_rooms:
+                self._synced_rooms.add(room_id)
+                await self._client.joined_members(room_id)
 
     async def _handle_verification_start(self, event: KeyVerificationStart) -> None:
         logger.info(f"Verification request from {event.sender} (tx: {event.transaction_id})")
