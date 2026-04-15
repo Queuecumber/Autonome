@@ -95,6 +95,18 @@ async def send_attachment(room_id: str, data: str, filename: str, content_type: 
         )
 
 
+@mcp.tool
+async def update_profile(display_name: str) -> None:
+    """Update the Matrix display name."""
+    await client.set_display_name(display_name)
+
+
+@mcp.tool
+async def update_profile_avatar(mxc_url: str) -> None:
+    """Set the Matrix profile avatar from an mxc:// URL. Upload an image first or use an existing mxc:// URL from a message."""
+    await client.set_avatar(mxc_url)
+
+
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message | Reaction) -> None:

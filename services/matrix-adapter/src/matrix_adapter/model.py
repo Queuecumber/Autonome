@@ -354,5 +354,11 @@ class MatrixClient:
             },
         )
 
+    async def set_display_name(self, name: str) -> None:
+        await self._client.set_displayname(name)
+
+    async def set_avatar(self, mxc_url: str) -> None:
+        await self._client.set_avatar(mxc_url)
+
     async def close(self) -> None:
         await self._client.close()
