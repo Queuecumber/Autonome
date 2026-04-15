@@ -1,5 +1,5 @@
 [project]
-name = "agent-platform-workspace-fs-mcp"
+name = "autonome-workspace-fs-mcp"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [

@@ -1,5 +1,5 @@
 [project]
-name = "agent-platform"
+name = "autonome"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = []
@@ -15,20 +15,26 @@ members = [
     "services/signal-adapter",
     "services/workspace-fs-mcp",
     "services/memory-mcp",
+    "services/system-mcp",
+    "services/matrix-adapter",
 ]
 
 [tool.uv.sources]
-agent-platform-session-manager = { workspace = true }
-agent-platform-signal-adapter = { workspace = true }
-agent-platform-workspace-fs-mcp = { workspace = true }
-agent-platform-memory-mcp = { workspace = true }
+autonome-session-manager = { workspace = true }
+autonome-signal-adapter = { workspace = true }
+autonome-workspace-fs-mcp = { workspace = true }
+autonome-memory-mcp = { workspace = true }
+autonome-system-mcp = { workspace = true }
+autonome-matrix-adapter = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "agent-platform-session-manager",
-    "agent-platform-signal-adapter",
-    "agent-platform-workspace-fs-mcp",
-    "agent-platform-memory-mcp",
+    "autonome-session-manager",
+    "autonome-signal-adapter",
+    "autonome-workspace-fs-mcp",
+    "autonome-memory-mcp",
+    "autonome-system-mcp",
+    "autonome-matrix-adapter",
 ]
