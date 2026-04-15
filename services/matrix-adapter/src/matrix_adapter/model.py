@@ -36,8 +36,11 @@ class Attachment:
 class Message:
     """An inbound Matrix message."""
     sender: str
+    sender_name: str
     room_id: str
+    room_name: str
     event_id: str
+    encrypted: bool = False
     text: str | None = None
     attachments: list[Attachment] = field(default_factory=list)
 
@@ -45,7 +48,10 @@ class Message:
         metadata: dict = {
             "message_id": self.event_id,
             "sender": self.sender,
+            "sender_name": self.sender_name,
             "room_id": self.room_id,
+            "room_name": self.room_name,
+            "encrypted": self.encrypted,
         }
         if self.attachments:
             metadata["attachments"] = [
@@ -54,7 +60,7 @@ class Message:
             ]
         return {
             "source": source,
-            "session_id": "shared",
+            "session_id": self.room_id,
             "text": self.text or "",
             "metadata": metadata,
         }
@@ -64,6 +70,7 @@ class Message:
 class Reaction:
     """A reaction to a Matrix message."""
     sender: str
+    sender_name: str
     room_id: str
     event_id: str
     emoji: str
@@ -77,11 +84,20 @@ class Reaction:
             "metadata": {
                 "type": "reaction",
                 "sender": self.sender,
+                "sender_name": self.sender_name,
                 "room_id": self.room_id,
                 "emoji": self.emoji,
                 "target_event_id": self.target_event_id,
             },
         }
+
+
+def _room_name(room: MatrixRoom) -> str:
+    return room.display_name or room.canonical_alias or room.room_id
+
+
+def _sender_name(room: MatrixRoom, sender: str) -> str:
+    return room.user_name(sender) or sender
 
 
 class MatrixClient:
@@ -148,7 +164,6 @@ class MatrixClient:
         await self._client.sync_forever(timeout=30000, full_state=True)
 
     def _trust_all_devices(self) -> None:
-        """Trust all known devices for all users — bots don't need interactive verification."""
         for user_id in self._client.device_store.users:
             for device_id, olm_device in self._client.device_store[user_id].items():
                 if not olm_device.verified:
@@ -178,49 +193,63 @@ class MatrixClient:
             return
         msg = Message(
             sender=event.sender,
+            sender_name=_sender_name(room, event.sender),
             room_id=room.room_id,
+            room_name=_room_name(room),
             event_id=event.event_id,
+            encrypted=room.encrypted,
             text=event.body,
         )
-        logger.info(f"Received: {msg}")
+        logger.info(f"Received text in {_room_name(room)} from {_sender_name(room, event.sender)}")
         if self._on_message:
             await self._on_message(msg)
 
     async def _handle_image(self, room: MatrixRoom, event: RoomMessageImage) -> None:
         if not self._should_process(room, event.sender):
             return
+        # For encrypted images, url is in the source; for unencrypted, on the event
+        url = event.url or ""
+        info = getattr(event, "source", {}).get("content", {}).get("info", {})
         att = Attachment(
-            url=event.url,
-            content_type=event.body if hasattr(event, "mimetype") else None,
+            url=url,
+            content_type=info.get("mimetype"),
             filename=event.body,
+            size=info.get("size"),
         )
-        if hasattr(event, "source") and event.source and "mimetype" in event.source.get("info", {}):
-            att.content_type = event.source["info"]["mimetype"]
         msg = Message(
             sender=event.sender,
+            sender_name=_sender_name(room, event.sender),
             room_id=room.room_id,
+            room_name=_room_name(room),
             event_id=event.event_id,
+            encrypted=room.encrypted,
             attachments=[att],
         )
-        logger.info(f"Received image: {msg}")
+        logger.info(f"Received image in {_room_name(room)} from {_sender_name(room, event.sender)}")
         if self._on_message:
             await self._on_message(msg)
 
     async def _handle_file(self, room: MatrixRoom, event: RoomMessageFile) -> None:
         if not self._should_process(room, event.sender):
             return
+        url = event.url or ""
+        info = getattr(event, "source", {}).get("content", {}).get("info", {})
         att = Attachment(
-            url=event.url,
-            content_type=None,
+            url=url,
+            content_type=info.get("mimetype"),
             filename=event.body,
+            size=info.get("size"),
         )
         msg = Message(
             sender=event.sender,
+            sender_name=_sender_name(room, event.sender),
             room_id=room.room_id,
+            room_name=_room_name(room),
             event_id=event.event_id,
+            encrypted=room.encrypted,
             attachments=[att],
         )
-        logger.info(f"Received file: {msg}")
+        logger.info(f"Received file in {_room_name(room)} from {_sender_name(room, event.sender)}")
         if self._on_message:
             await self._on_message(msg)
 
@@ -232,12 +261,13 @@ class MatrixClient:
         emoji = relates_to.get("key", "")
         reaction = Reaction(
             sender=event.sender,
+            sender_name=_sender_name(room, event.sender),
             room_id=room.room_id,
             event_id=event.event_id,
             emoji=emoji,
             target_event_id=target_id,
         )
-        logger.info(f"Received reaction: {reaction}")
+        logger.info(f"Received reaction in {_room_name(room)} from {_sender_name(room, event.sender)}: {emoji}")
         if self._on_message:
             await self._on_message(reaction)
 
