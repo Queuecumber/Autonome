@@ -9,6 +9,7 @@ from nio import (
     AsyncClient,
     AsyncClientConfig,
     InviteMemberEvent,
+    LocalProtocolError,
     LoginResponse,
     MatrixRoom,
     MegolmEvent,
@@ -165,7 +166,12 @@ class MatrixClient:
         self._client.add_event_callback(self._handle_megolm, MegolmEvent)
 
         logger.info("Starting Matrix sync loop")
-        await self._client.sync_forever(timeout=30000, full_state=True)
+        while True:
+            try:
+                await self._client.sync_forever(timeout=30000, full_state=True)
+            except LocalProtocolError as e:
+                logger.warning(f"Sync protocol error (retrying): {e}")
+                continue
 
     def _trust_all_devices(self) -> None:
         for user_id in self._client.device_store.users:
