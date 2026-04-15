@@ -57,15 +57,26 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
     await client.send_typing(room_id, typing=not stop)
 
 
+def _detect_image_type(data: bytes) -> str | None:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return None
+
+
 @mcp.tool
-async def get_attachment(mxc_url: str, content_type: str | None = None) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent.
-    Pass content_type from the message metadata if available."""
-    data, resp_content_type = await client.download_attachment(mxc_url)
-    mime = content_type or resp_content_type or "application/octet-stream"
-    if mime.startswith("image/"):
+async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
+    """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent."""
+    data, _ = await client.download_attachment(mxc_url)
+    mime = _detect_image_type(data)
+    if mime:
         return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=mime)
-    return TextContent(type="text", text=f"[attachment: {mime}, {len(data)} bytes]")
+    return TextContent(type="text", text=f"[attachment: {len(data)} bytes]")
 
 
 @mcp.tool
