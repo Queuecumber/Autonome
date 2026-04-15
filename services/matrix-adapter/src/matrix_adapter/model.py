@@ -1,8 +1,10 @@
 """Matrix data model — all interaction with the homeserver lives here."""
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from nio import (
@@ -131,17 +133,34 @@ class MatrixClient:
         self._encryption_info: dict[str, dict] = {}  # mxc_url -> {key, iv, hash}
 
     async def login(self) -> None:
-        if self.access_token:
+        # Reuse saved credentials if available (avoids creating new devices)
+        creds_path = Path(self._client.store_path) / "credentials.json" if self._client.store_path else None
+        if creds_path and creds_path.exists():
+            creds = json.loads(creds_path.read_text())
+            self._client.access_token = creds["access_token"]
+            self._client.user_id = creds["user_id"]
+            self._client.device_id = creds["device_id"]
+            self._client.load_store()
+            logger.info(f"Restored session for {creds['user_id']} device {creds['device_id']}")
+        elif self.access_token:
             self._client.access_token = self.access_token
             self._client.user_id = self.user_id
             self._client.device_id = self.device_id
             self._client.load_store()
-            logger.info(f"Using existing access token for {self.user_id} device {self.device_id}")
+            logger.info(f"Using provided access token for {self.user_id} device {self.device_id}")
         else:
             resp = await self._client.login(self.password, device_name="Autonome")
             if not isinstance(resp, LoginResponse):
                 raise RuntimeError(f"Matrix login failed: {resp}")
             logger.info(f"Logged in as {self.user_id} device {resp.device_id}")
+            # Save credentials so restarts reuse the same device
+            if creds_path:
+                creds_path.parent.mkdir(parents=True, exist_ok=True)
+                creds_path.write_text(json.dumps({
+                    "user_id": resp.user_id,
+                    "device_id": resp.device_id,
+                    "access_token": resp.access_token,
+                }))
 
         await self._client.sync(timeout=10000)
 
