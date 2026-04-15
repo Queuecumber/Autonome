@@ -302,7 +302,7 @@ class SessionOrchestrator:
         # Build context + user message
         now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
         context_msg = _developer_event("message", source=source, time=now, **metadata)
-        user_msg = {"role": "user", "content": text}
+        user_msg = {"role": "user", "content": text or "(attachment)"}
 
         # Build input: history + context + new message (filter reasoning — output-only type)
         history = [m for m in raw_history if m.get("type") != "reasoning"]
