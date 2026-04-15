@@ -1,6 +1,5 @@
 """Matrix data model — all interaction with the homeserver lives here."""
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -33,35 +32,42 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class Sender:
+    id: str
+    name: str
+
+
+@dataclass
+class Room:
+    id: str
+    name: str
+    encrypted: bool = False
+
+
+@dataclass
 class Attachment:
-    """An attachment on a Matrix message."""
     url: str
     content_type: str | None = None
     filename: str | None = None
     size: int | None = None
-    content_base64: str | None = None
 
 
 @dataclass
 class Message:
-    """An inbound Matrix message."""
-    sender: str
-    sender_name: str
-    room_id: str
-    room_name: str
+    sender: Sender
+    room: Room
     event_id: str
-    encrypted: bool = False
     text: str | None = None
     attachments: list[Attachment] = field(default_factory=list)
 
     def to_event(self, source: str = "matrix") -> dict:
         metadata: dict = {
             "message_id": self.event_id,
-            "sender": self.sender,
-            "sender_name": self.sender_name,
-            "room_id": self.room_id,
-            "room_name": self.room_name,
-            "encrypted": self.encrypted,
+            "sender": self.sender.id,
+            "sender_name": self.sender.name,
+            "room_id": self.room.id,
+            "room_name": self.room.name,
+            "encrypted": self.room.encrypted,
         }
         if self.attachments:
             metadata["attachments"] = [
@@ -70,7 +76,7 @@ class Message:
             ]
         return {
             "source": source,
-            "session_id": self.room_id,
+            "session_id": self.room.id,
             "text": self.text or "",
             "metadata": metadata,
         }
@@ -78,10 +84,8 @@ class Message:
 
 @dataclass
 class Reaction:
-    """A reaction to a Matrix message."""
-    sender: str
-    sender_name: str
-    room_id: str
+    sender: Sender
+    room: Room
     event_id: str
     emoji: str
     target_event_id: str
@@ -89,25 +93,17 @@ class Reaction:
     def to_event(self, source: str = "matrix") -> dict:
         return {
             "source": source,
-            "session_id": self.room_id,
+            "session_id": self.room.id,
             "text": f"[reacted with {self.emoji} to {self.target_event_id}]",
             "metadata": {
                 "type": "reaction",
-                "sender": self.sender,
-                "sender_name": self.sender_name,
-                "room_id": self.room_id,
+                "sender": self.sender.id,
+                "sender_name": self.sender.name,
+                "room_id": self.room.id,
                 "emoji": self.emoji,
                 "target_event_id": self.target_event_id,
             },
         }
-
-
-def _room_name(room: MatrixRoom) -> str:
-    return room.display_name or room.canonical_alias or room.room_id
-
-
-def _sender_name(room: MatrixRoom, sender: str) -> str:
-    return room.user_name(sender) or sender
 
 
 class MatrixClient:
@@ -135,11 +131,12 @@ class MatrixClient:
             store_path=store_path, config=config,
         )
         self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
-        self._encryption_info: dict[str, dict] = {}  # mxc_url -> {key, iv, hash}
+        self._encryption_info: dict[str, dict] = {}
         self._synced_rooms: set[str] = set()
 
+    # ── Auth ─────────────────────────────────────────────────
+
     async def login(self) -> None:
-        # Reuse saved credentials if available (avoids creating new devices)
         creds_path = Path(self._client.store_path) / "credentials.json" if self._client.store_path else None
         if creds_path and creds_path.exists():
             creds = json.loads(creds_path.read_text())
@@ -159,7 +156,6 @@ class MatrixClient:
             if not isinstance(resp, LoginResponse):
                 raise RuntimeError(f"Matrix login failed: {resp}")
             logger.info(f"Logged in as {self.user_id} device {resp.device_id}")
-            # Save credentials so restarts reuse the same device
             if creds_path:
                 creds_path.parent.mkdir(parents=True, exist_ok=True)
                 creds_path.write_text(json.dumps({
@@ -170,7 +166,6 @@ class MatrixClient:
 
         await self._client.sync(timeout=10000)
 
-        # Accept any pending invites from before callbacks were registered
         for room_id in list(self._client.invited_rooms.keys()):
             logger.info(f"Accepting pending invite to {room_id}")
             await self._client.join(room_id)
@@ -178,16 +173,18 @@ class MatrixClient:
         self._trust_all_devices()
         logger.info(f"Ready: {len(self._client.rooms)} rooms")
 
+    # ── Listening ────────────────────────────────────────────
+
     async def listen(self, on_message: Callable[[Message | Reaction], Awaitable[None]]) -> None:
         self._on_message = on_message
 
         self._client.add_response_callback(self._handle_sync, SyncResponse)
         self._client.add_event_callback(self._handle_invite, InviteMemberEvent)
         self._client.add_event_callback(self._handle_text, RoomMessageText)
-        self._client.add_event_callback(self._handle_image, RoomMessageImage)
-        self._client.add_event_callback(self._handle_image, RoomEncryptedImage)
-        self._client.add_event_callback(self._handle_file, RoomMessageFile)
-        self._client.add_event_callback(self._handle_file, RoomEncryptedFile)
+        self._client.add_event_callback(self._handle_media, RoomMessageImage)
+        self._client.add_event_callback(self._handle_media, RoomEncryptedImage)
+        self._client.add_event_callback(self._handle_media, RoomMessageFile)
+        self._client.add_event_callback(self._handle_media, RoomEncryptedFile)
         self._client.add_event_callback(self._handle_reaction, ReactionEvent)
         self._client.add_event_callback(self._handle_megolm, MegolmEvent)
         self._client.add_to_device_callback(self._handle_verification_start, KeyVerificationStart)
@@ -203,15 +200,55 @@ class MatrixClient:
                 logger.warning(f"Sync protocol error (retrying): {e}")
                 continue
 
+    # ── Helpers ──────────────────────────────────────────────
+
     def _trust_all_devices(self) -> None:
         for user_id in self._client.device_store.users:
             for device_id, olm_device in self._client.device_store[user_id].items():
                 if not olm_device.verified:
                     self._client.verify_device(olm_device)
 
+    def _room(self, room: MatrixRoom) -> Room:
+        name = room.display_name or room.canonical_alias or room.room_id
+        return Room(id=room.room_id, name=name, encrypted=room.encrypted)
+
+    def _sender(self, room: MatrixRoom, sender: str) -> Sender:
+        name = room.user_name(sender) or sender
+        return Sender(id=sender, name=name)
+
+    def _should_process(self, room: MatrixRoom, sender: str) -> bool:
+        if sender == self.user_id:
+            return False
+        if self.allowed_rooms and room.room_id not in self.allowed_rooms:
+            return False
+        return True
+
+    def _extract_media(self, event) -> tuple[str, str | None, str | None, int | None]:
+        """Extract mxc URL, mimetype, caption, and size. Cache encryption info."""
+        content = getattr(event, "source", {}).get("content", {})
+        info = content.get("info", {})
+
+        file_info = content.get("file")
+        if file_info:
+            url = file_info.get("url", "")
+            key_info = file_info.get("key", {})
+            self._encryption_info[url] = {
+                "key": key_info.get("k", ""),
+                "iv": file_info.get("iv", ""),
+                "hash": file_info.get("hashes", {}).get("sha256", ""),
+            }
+        else:
+            url = event.url or ""
+
+        filename = content.get("filename") or info.get("filename")
+        caption = event.body if event.body != filename else None
+
+        return url, info.get("mimetype"), caption, info.get("size")
+
+    # ── Sync / verification callbacks ───────────────────────
+
     async def _handle_sync(self, response: SyncResponse) -> None:
         self._trust_all_devices()
-        # Populate member profiles for newly joined rooms
         for room_id in self._client.rooms:
             if room_id not in self._synced_rooms:
                 self._synced_rooms.add(room_id)
@@ -249,92 +286,34 @@ class MatrixClient:
         logger.info(f"Accepting invite to {room.room_id} from {event.sender}")
         await self._client.join(room.room_id)
 
-    def _should_process(self, room: MatrixRoom, sender: str) -> bool:
-        if sender == self.user_id:
-            return False
-        if self.allowed_rooms and room.room_id not in self.allowed_rooms:
-            return False
-        return True
+    # ── Message callbacks ───────────────────────────────────
 
     async def _handle_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
         if not self._should_process(room, event.sender):
             return
         msg = Message(
-            sender=event.sender,
-            sender_name=_sender_name(room, event.sender),
-            room_id=room.room_id,
-            room_name=_room_name(room),
+            sender=self._sender(room, event.sender),
+            room=self._room(room),
             event_id=event.event_id,
-            encrypted=room.encrypted,
             text=event.body,
         )
-        logger.info(f"Received text in {_room_name(room)} from {_sender_name(room, event.sender)}")
+        logger.info(f"Received text in {msg.room.name} from {msg.sender.name}")
         if self._on_message:
             await self._on_message(msg)
 
-    def _extract_media(self, event) -> tuple[str, str | None, int | None]:
-        """Extract mxc URL, mimetype, and size from a media event. Cache encryption info."""
-        content = getattr(event, "source", {}).get("content", {})
-        info = content.get("info", {})
-
-        # Encrypted media has content.file.url, unencrypted has content.url
-        file_info = content.get("file")
-        if file_info:
-            url = file_info.get("url", "")
-            key_info = file_info.get("key", {})
-            self._encryption_info[url] = {
-                "key": key_info.get("k", ""),
-                "iv": file_info.get("iv", ""),
-                "hash": file_info.get("hashes", {}).get("sha256", ""),
-            }
-        else:
-            url = event.url or ""
-
-        return url, info.get("mimetype"), info.get("size")
-
-    async def _handle_image(self, room: MatrixRoom, event: RoomMessageImage) -> None:
+    async def _handle_media(self, room: MatrixRoom, event) -> None:
         if not self._should_process(room, event.sender):
             return
-        url, mimetype, size = self._extract_media(event)
-        att = Attachment(
-            url=url,
-            content_type=mimetype,
-            filename=event.body,
-            size=size,
-        )
+        url, mimetype, caption, size = self._extract_media(event)
+        att = Attachment(url=url, content_type=mimetype, filename=event.body, size=size)
         msg = Message(
-            sender=event.sender,
-            sender_name=_sender_name(room, event.sender),
-            room_id=room.room_id,
-            room_name=_room_name(room),
+            sender=self._sender(room, event.sender),
+            room=self._room(room),
             event_id=event.event_id,
-            encrypted=room.encrypted,
+            text=caption,
             attachments=[att],
         )
-        logger.info(f"Received image in {_room_name(room)} from {_sender_name(room, event.sender)}")
-        if self._on_message:
-            await self._on_message(msg)
-
-    async def _handle_file(self, room: MatrixRoom, event: RoomMessageFile) -> None:
-        if not self._should_process(room, event.sender):
-            return
-        url, mimetype, size = self._extract_media(event)
-        att = Attachment(
-            url=url,
-            content_type=mimetype,
-            filename=event.body,
-            size=size,
-        )
-        msg = Message(
-            sender=event.sender,
-            sender_name=_sender_name(room, event.sender),
-            room_id=room.room_id,
-            room_name=_room_name(room),
-            event_id=event.event_id,
-            encrypted=room.encrypted,
-            attachments=[att],
-        )
-        logger.info(f"Received file in {_room_name(room)} from {_sender_name(room, event.sender)}")
+        logger.info(f"Received media in {msg.room.name} from {msg.sender.name}")
         if self._on_message:
             await self._on_message(msg)
 
@@ -342,17 +321,14 @@ class MatrixClient:
         if not self._should_process(room, event.sender):
             return
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        target_id = relates_to.get("event_id", "")
-        emoji = relates_to.get("key", "")
         reaction = Reaction(
-            sender=event.sender,
-            sender_name=_sender_name(room, event.sender),
-            room_id=room.room_id,
+            sender=self._sender(room, event.sender),
+            room=self._room(room),
             event_id=event.event_id,
-            emoji=emoji,
-            target_event_id=target_id,
+            emoji=relates_to.get("key", ""),
+            target_event_id=relates_to.get("event_id", ""),
         )
-        logger.info(f"Received reaction in {_room_name(room)} from {_sender_name(room, event.sender)}: {emoji}")
+        logger.info(f"Received reaction in {reaction.room.name} from {reaction.sender.name}: {reaction.emoji}")
         if self._on_message:
             await self._on_message(reaction)
 
@@ -360,23 +336,14 @@ class MatrixClient:
 
     async def send_message(self, room_id: str, text: str) -> str:
         resp = await self._client.room_send(
-            room_id,
-            "m.room.message",
-            {"msgtype": "m.text", "body": text},
+            room_id, "m.room.message", {"msgtype": "m.text", "body": text},
         )
         return resp.event_id
 
     async def send_reaction(self, room_id: str, event_id: str, emoji: str) -> None:
         await self._client.room_send(
-            room_id,
-            "m.reaction",
-            {
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": event_id,
-                    "key": emoji,
-                },
-            },
+            room_id, "m.reaction",
+            {"m.relates_to": {"rel_type": "m.annotation", "event_id": event_id, "key": emoji}},
         )
 
     async def send_typing(self, room_id: str, typing: bool = True, timeout: int = 10000) -> None:
@@ -389,26 +356,18 @@ class MatrixClient:
         resp = await self._client.download(mxc_url)
         data = resp.body
         content_type = getattr(resp, "content_type", None)
-
-        # Decrypt if we have cached encryption info for this URL
         enc = self._encryption_info.pop(mxc_url, None)
         if enc and enc["key"]:
             from nio.crypto.attachments import decrypt_attachment
             data = decrypt_attachment(data, enc["key"], enc["hash"], enc["iv"])
-
         return data, content_type
 
     async def upload_and_send_image(self, room_id: str, data: bytes, content_type: str, filename: str) -> None:
         resp, _ = await self._client.upload(data, content_type=content_type, filename=filename)
         await self._client.room_send(
-            room_id,
-            "m.room.message",
-            {
-                "msgtype": "m.image",
-                "url": resp.content_uri,
-                "body": filename,
-                "info": {"mimetype": content_type, "size": len(data)},
-            },
+            room_id, "m.room.message",
+            {"msgtype": "m.image", "url": resp.content_uri, "body": filename,
+             "info": {"mimetype": content_type, "size": len(data)}},
         )
 
     async def set_display_name(self, name: str) -> None:

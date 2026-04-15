@@ -5,6 +5,7 @@ import base64
 import logging
 import os
 
+import filetype
 import httpx
 from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
@@ -57,26 +58,14 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
     await client.send_typing(room_id, typing=not stop)
 
 
-def _detect_image_type(data: bytes) -> str | None:
-    if data[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    return None
-
-
 @mcp.tool
 async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
     """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent."""
     data, _ = await client.download_attachment(mxc_url)
-    mime = _detect_image_type(data)
-    if mime:
-        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=mime)
-    return TextContent(type="text", text=f"[attachment: {len(data)} bytes]")
+    kind = filetype.guess(data)
+    if kind and kind.mime.startswith("image/"):
+        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=kind.mime)
+    return TextContent(type="text", text=f"[attachment: {kind.mime if kind else 'unknown'}, {len(data)} bytes]")
 
 
 @mcp.tool
@@ -86,25 +75,20 @@ async def send_attachment(room_id: str, data: str, filename: str, content_type: 
     if content_type.startswith("image/"):
         await client.upload_and_send_image(room_id, raw, content_type, filename)
     else:
-        # For non-images, upload and send as file
         resp, _ = await client._client.upload(raw, content_type=content_type, filename=filename)
         await client._client.room_send(
-            room_id,
-            "m.room.message",
+            room_id, "m.room.message",
             {"msgtype": "m.file", "url": resp.content_uri, "body": filename},
         )
 
 
 @mcp.tool
-async def update_profile(display_name: str) -> None:
-    """Update the Matrix display name."""
-    await client.set_display_name(display_name)
-
-
-@mcp.tool
-async def update_profile_avatar(mxc_url: str) -> None:
-    """Set the Matrix profile avatar from an mxc:// URL. Upload an image first or use an existing mxc:// URL from a message."""
-    await client.set_avatar(mxc_url)
+async def update_profile(display_name: str | None = None, avatar_mxc_url: str | None = None) -> None:
+    """Update the Matrix profile. Set display_name and/or avatar_mxc_url (mxc:// URL)."""
+    if display_name is not None:
+        await client.set_display_name(display_name)
+    if avatar_mxc_url is not None:
+        await client.set_avatar(avatar_mxc_url)
 
 
 # ── Inbound event forwarding ─────────────────────────────
