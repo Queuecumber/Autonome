@@ -164,6 +164,10 @@ class MatrixClient:
 
         await self._client.sync(timeout=10000)
 
+        # Populate room member profiles so display names are available immediately
+        for room_id in self._client.rooms:
+            await self._client.joined_members(room_id)
+
         # Accept any pending invites from before callbacks were registered
         for room_id in list(self._client.invited_rooms.keys()):
             logger.info(f"Accepting pending invite to {room_id}")
