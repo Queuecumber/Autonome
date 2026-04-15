@@ -379,6 +379,7 @@ class SessionOrchestrator:
 
                 # Execute tool calls, checking for interruption between each
                 tool_results = []
+                image_items = []
                 for tc in tool_calls:
                     if cancel.is_set():
                         pending = []
@@ -399,11 +400,12 @@ class SessionOrchestrator:
                     tool_results.append(result)
                     all_new_messages.append(_prepare_for_history(result))
                     for img in images:
-                        tool_results.append(img)
+                        image_items.append(img)
                         all_new_messages.append(_prepare_for_history(img))
 
-                # Feed results back — use previous response + results as new input
-                call_kwargs["input"] = input_items + response.output + tool_results
+                # Feed results back — images go after all tool results to avoid
+                # breaking Bedrock's tool_use/tool_result adjacency requirement
+                call_kwargs["input"] = input_items + response.output + tool_results + image_items
                 input_items = call_kwargs["input"]
                 continue
 
