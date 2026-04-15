@@ -302,7 +302,7 @@ class SessionOrchestrator:
         # Build context + user message
         now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
         context_msg = _developer_event("message", source=source, time=now, **metadata)
-        user_msg = {"role": "user", "content": text}
+        user_msg = {"role": "user", "content": text or "(attachment)"}
 
         # Build input: history + context + new message (filter reasoning — output-only type)
         history = [m for m in raw_history if m.get("type") != "reasoning"]
@@ -379,6 +379,7 @@ class SessionOrchestrator:
 
                 # Execute tool calls, checking for interruption between each
                 tool_results = []
+                image_items = []
                 for tc in tool_calls:
                     if cancel.is_set():
                         pending = []
@@ -399,11 +400,13 @@ class SessionOrchestrator:
                     tool_results.append(result)
                     all_new_messages.append(_prepare_for_history(result))
                     for img in images:
-                        tool_results.append(img)
-                        all_new_messages.append(_prepare_for_history(img))
+                        image_items.append(img)
 
-                # Feed results back — use previous response + results as new input
-                call_kwargs["input"] = input_items + response.output + tool_results
+                # Images go after all tool results — both in the live input and
+                # in saved history — to avoid breaking Bedrock's adjacency requirement
+                for img in image_items:
+                    all_new_messages.append(_prepare_for_history(img))
+                call_kwargs["input"] = input_items + response.output + tool_results + image_items
                 input_items = call_kwargs["input"]
                 continue
 
