@@ -30,16 +30,16 @@ def mcp_content_to_openai(content_blocks: list) -> list[dict]:
     parts = []
     for block in content_blocks:
         if block.type == "text":
-            parts.append({"type": "text", "text": block.text})
+            parts.append({"type": "input_text", "text": block.text})
         elif block.type == "image":
             parts.append({
                 "type": "input_image",
                 "image_url": f"data:{block.mimeType};base64,{block.data}",
             })
         elif block.type == "audio":
-            parts.append({"type": "text", "text": f"[audio: {block.mimeType}]"})
+            parts.append({"type": "input_text", "text": f"[audio: {block.mimeType}]"})
         else:
-            parts.append({"type": "text", "text": str(block)})
+            parts.append({"type": "input_text", "text": str(block)})
     return parts
 
 
