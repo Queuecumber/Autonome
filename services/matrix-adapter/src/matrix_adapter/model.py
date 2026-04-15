@@ -128,6 +128,7 @@ class MatrixClient:
             store_path=store_path, config=config,
         )
         self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
+        self._encryption_info: dict[str, dict] = {}  # mxc_url -> {key, iv, hash}
 
     async def login(self) -> None:
         if self.access_token:
@@ -214,17 +215,35 @@ class MatrixClient:
         if self._on_message:
             await self._on_message(msg)
 
+    def _extract_media(self, event) -> tuple[str, str | None, int | None]:
+        """Extract mxc URL, mimetype, and size from a media event. Cache encryption info."""
+        content = getattr(event, "source", {}).get("content", {})
+        info = content.get("info", {})
+
+        # Encrypted media has content.file.url, unencrypted has content.url
+        file_info = content.get("file")
+        if file_info:
+            url = file_info.get("url", "")
+            key_info = file_info.get("key", {})
+            self._encryption_info[url] = {
+                "key": key_info.get("k", ""),
+                "iv": file_info.get("iv", ""),
+                "hash": file_info.get("hashes", {}).get("sha256", ""),
+            }
+        else:
+            url = event.url or ""
+
+        return url, info.get("mimetype"), info.get("size")
+
     async def _handle_image(self, room: MatrixRoom, event: RoomMessageImage) -> None:
         if not self._should_process(room, event.sender):
             return
-        # For encrypted images, url is in the source; for unencrypted, on the event
-        url = event.url or ""
-        info = getattr(event, "source", {}).get("content", {}).get("info", {})
+        url, mimetype, size = self._extract_media(event)
         att = Attachment(
             url=url,
-            content_type=info.get("mimetype"),
+            content_type=mimetype,
             filename=event.body,
-            size=info.get("size"),
+            size=size,
         )
         msg = Message(
             sender=event.sender,
@@ -242,13 +261,12 @@ class MatrixClient:
     async def _handle_file(self, room: MatrixRoom, event: RoomMessageFile) -> None:
         if not self._should_process(room, event.sender):
             return
-        url = event.url or ""
-        info = getattr(event, "source", {}).get("content", {}).get("info", {})
+        url, mimetype, size = self._extract_media(event)
         att = Attachment(
             url=url,
-            content_type=info.get("mimetype"),
+            content_type=mimetype,
             filename=event.body,
-            size=info.get("size"),
+            size=size,
         )
         msg = Message(
             sender=event.sender,
@@ -312,8 +330,16 @@ class MatrixClient:
 
     async def download_attachment(self, mxc_url: str) -> tuple[bytes, str | None]:
         resp = await self._client.download(mxc_url)
+        data = resp.body
         content_type = getattr(resp, "content_type", None)
-        return resp.body, content_type
+
+        # Decrypt if we have cached encryption info for this URL
+        enc = self._encryption_info.pop(mxc_url, None)
+        if enc and enc["key"]:
+            from nio.crypto.attachments import decrypt_attachment
+            data = decrypt_attachment(data, enc["key"], enc["hash"], enc["iv"])
+
+        return data, content_type
 
     async def upload_and_send_image(self, room_id: str, data: bytes, content_type: str, filename: str) -> None:
         resp, _ = await self._client.upload(data, content_type=content_type, filename=filename)
