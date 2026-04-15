@@ -40,15 +40,16 @@ text output is for you and you alone.
 
 ## Message Context
 
-When you receive a message, it includes metadata with the sender, message ID, \
-and timestamp. Use the sender to reply and the message ID for reactions/receipts.
+Each user message is preceded by a developer message with structured JSON \
+context: source platform, timestamp, sender, room info, and any attachments. \
+Use the sender/room_id to reply and the message_id for reactions/receipts.
 
 ## Interruptions
 
-If you see an [interrupted] marker on a previous turn, it means you were \
-generating a response when the user sent a new message. The marker shows what \
-you had composed so far (tool calls, partial text). Use this context to decide \
-whether your interrupted response is still relevant or should be abandoned.
+If you see a developer message with {"event": "interrupted", ...} it means \
+you were generating a response when the user sent a new message. The "partial" \
+or "pending" field shows what you had composed. Use this to decide whether \
+your interrupted response is still relevant or should be abandoned.
 
 ## Every Session
 
@@ -107,18 +108,28 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
-def _describe_interrupted(completed_items: list) -> str:
-    """Build a human-readable summary of what the model had generated before interruption."""
+def _describe_interrupted(completed_items: list) -> list[dict]:
+    """Build structured descriptions of what the model had generated before interruption."""
     parts = []
     for item in completed_items:
         item_type = getattr(item, "type", None)
         if item_type == "function_call":
-            parts.append(f"{item.name}({item.arguments})")
+            try:
+                args = json.loads(item.arguments)
+            except (json.JSONDecodeError, AttributeError):
+                args = item.arguments
+            parts.append({"tool": item.name, "arguments": args})
         elif item_type == "message":
             for content in getattr(item, "content", []):
                 if hasattr(content, "text") and content.text:
-                    parts.append(content.text)
-    return "; ".join(parts) if parts else ""
+                    parts.append({"text": content.text})
+    return parts
+
+
+def _developer_event(event_type: str, **fields) -> dict:
+    """Build a developer message with structured event context."""
+    payload = {"event": event_type, **fields}
+    return {"role": "developer", "content": json.dumps(payload, ensure_ascii=False)}
 
 
 class _SessionState:
@@ -288,14 +299,14 @@ class SessionOrchestrator:
         # Load session history
         raw_history = self.session.load_truncated(source, session_id)
 
-        # Build user message with metadata context + current timestamp
+        # Build context + user message
         now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
-        meta = f" | {json.dumps(metadata)}" if metadata else ""
-        enriched_text = f"[{source} | time={now}{meta}] {text}"
+        context_msg = _developer_event("message", source=source, time=now, **metadata)
+        user_msg = {"role": "user", "content": text}
 
-        # Build input: history + new message (filter reasoning — output-only type)
+        # Build input: history + context + new message (filter reasoning — output-only type)
         history = [m for m in raw_history if m.get("type") != "reasoning"]
-        input_items = history + [{"role": "user", "content": enriched_text}]
+        input_items = history + [context_msg, user_msg]
 
         # Build API call kwargs
         call_kwargs: dict[str, Any] = {
@@ -312,8 +323,7 @@ class SessionOrchestrator:
         logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools")
 
         # Collect all new items to save to history
-        stored_msg = {"role": "user", "content": text}
-        all_new_messages = [stored_msg]
+        all_new_messages = [context_msg, user_msg]
 
         for iteration in range(self.max_tool_iterations):
             try:
@@ -324,10 +334,10 @@ class SessionOrchestrator:
 
             # --- Interrupted during streaming ---
             if response is None:
-                desc = _describe_interrupted(completed_items)
-                if desc:
-                    all_new_messages.append({"role": "assistant", "content": f"[interrupted] {desc}"})
-                    logger.info(f"Interrupted, partial: {desc[:200]}")
+                partial = _describe_interrupted(completed_items)
+                if partial:
+                    all_new_messages.append(_developer_event("interrupted", partial=partial))
+                    logger.info(f"Interrupted, partial: {partial}")
                 else:
                     logger.info("Interrupted before any output completed")
                 self.session.append(source, session_id, all_new_messages)
@@ -371,16 +381,15 @@ class SessionOrchestrator:
                 tool_results = []
                 for tc in tool_calls:
                     if cancel.is_set():
-                        pending = tool_calls[tool_calls.index(tc):]
-                        pending_desc = "; ".join(
-                            f"tool call: {t.name}({json.dumps(json.loads(t.arguments), ensure_ascii=False)})"
-                            for t in pending
-                        )
-                        logger.info(f"Interrupted between tool calls, pending: {pending_desc[:200]}")
-                        all_new_messages.append({
-                            "role": "assistant",
-                            "content": f"[interrupted — not yet executed] {pending_desc}",
-                        })
+                        pending = []
+                        for t in tool_calls[tool_calls.index(tc):]:
+                            try:
+                                args = json.loads(t.arguments)
+                            except (json.JSONDecodeError, AttributeError):
+                                args = t.arguments
+                            pending.append({"tool": t.name, "arguments": args})
+                        logger.info(f"Interrupted between tool calls, pending: {pending}")
+                        all_new_messages.append(_developer_event("interrupted", pending=pending))
                         self.session.append(source, session_id, all_new_messages)
                         return None
 
