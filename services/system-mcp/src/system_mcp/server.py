@@ -15,7 +15,7 @@ mcp = FastMCP("system", instructions=(
     "and web_fetch to retrieve the full content of a specific URL."
 ))
 
-_http = httpx.AsyncClient(timeout=30, headers={"User-Agent": "AgentPlatform/1.0"})
+_http = httpx.AsyncClient(timeout=30, headers={"User-Agent": "Autonome/1.0"})
 
 _h2t = html2text.HTML2Text()
 _h2t.ignore_links = False
