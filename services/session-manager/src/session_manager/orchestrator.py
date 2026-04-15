@@ -401,10 +401,11 @@ class SessionOrchestrator:
                     all_new_messages.append(_prepare_for_history(result))
                     for img in images:
                         image_items.append(img)
-                        all_new_messages.append(_prepare_for_history(img))
 
-                # Feed results back — images go after all tool results to avoid
-                # breaking Bedrock's tool_use/tool_result adjacency requirement
+                # Images go after all tool results — both in the live input and
+                # in saved history — to avoid breaking Bedrock's adjacency requirement
+                for img in image_items:
+                    all_new_messages.append(_prepare_for_history(img))
                 call_kwargs["input"] = input_items + response.output + tool_results + image_items
                 input_items = call_kwargs["input"]
                 continue
