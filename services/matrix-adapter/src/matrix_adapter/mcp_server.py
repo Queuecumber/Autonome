@@ -104,6 +104,7 @@ async def main():
 
     homeserver = os.environ.get("MATRIX_HOMESERVER", "http://localhost:8008")
     user_id = os.environ.get("MATRIX_USER_ID", "")
+    device_id = os.environ.get("MATRIX_DEVICE_ID", "AUTONOME")
     password = os.environ.get("MATRIX_PASSWORD", "")
     access_token = os.environ.get("MATRIX_ACCESS_TOKEN", "")
     allowed_rooms = os.environ.get("MATRIX_ALLOWED_ROOMS", "").split(",") if os.environ.get("MATRIX_ALLOWED_ROOMS") else []
@@ -113,6 +114,7 @@ async def main():
     client = MatrixClient(
         homeserver=homeserver,
         user_id=user_id,
+        device_id=device_id,
         password=password if password else None,
         access_token=access_token if access_token else None,
         allowed_rooms=allowed_rooms if allowed_rooms else None,

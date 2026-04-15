@@ -91,6 +91,7 @@ class MatrixClient:
         self,
         homeserver: str,
         user_id: str,
+        device_id: str = "AUTONOME",
         password: str | None = None,
         access_token: str | None = None,
         allowed_rooms: list[str] | None = None,
@@ -98,27 +99,39 @@ class MatrixClient:
     ):
         self.homeserver = homeserver
         self.user_id = user_id
+        self.device_id = device_id
         self.password = password
         self.access_token = access_token
         self.allowed_rooms = allowed_rooms
         config = AsyncClientConfig(store_sync_tokens=True, encryption_enabled=True)
-        self._client = AsyncClient(homeserver, user_id, store_path=store_path, config=config)
+        self._client = AsyncClient(
+            homeserver, user_id, device_id=device_id,
+            store_path=store_path, config=config,
+        )
         self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
 
     async def login(self) -> None:
         if self.access_token:
             self._client.access_token = self.access_token
             self._client.user_id = self.user_id
+            self._client.device_id = self.device_id
             self._client.load_store()
-            logger.info(f"Using existing access token for {self.user_id}")
+            logger.info(f"Using existing access token for {self.user_id} device {self.device_id}")
         else:
-            resp = await self._client.login(self.password)
+            resp = await self._client.login(self.password, device_name="Autonome")
             if not isinstance(resp, LoginResponse):
                 raise RuntimeError(f"Matrix login failed: {resp}")
-            logger.info(f"Logged in as {self.user_id}")
+            logger.info(f"Logged in as {self.user_id} device {resp.device_id}")
 
-        # Do an initial sync so the device store is populated
         await self._client.sync(timeout=10000)
+
+        # Accept any pending invites from before callbacks were registered
+        for room_id in list(self._client.invited_rooms.keys()):
+            logger.info(f"Accepting pending invite to {room_id}")
+            await self._client.join(room_id)
+
+        self._trust_all_devices()
+        logger.info(f"Ready: {len(self._client.rooms)} rooms")
 
     async def listen(self, on_message: Callable[[Message | Reaction], Awaitable[None]]) -> None:
         self._on_message = on_message
@@ -139,15 +152,13 @@ class MatrixClient:
         for user_id in self._client.device_store.users:
             for device_id, olm_device in self._client.device_store[user_id].items():
                 if not olm_device.verified:
-                    logger.info(f"Trusting device {device_id} for {user_id}")
                     self._client.verify_device(olm_device)
 
     async def _handle_sync(self, response: SyncResponse) -> None:
         self._trust_all_devices()
 
     async def _handle_megolm(self, room: MatrixRoom, event: MegolmEvent) -> None:
-        """Handle encrypted messages we couldn't decrypt."""
-        logger.warning(f"Unable to decrypt message in {room.room_id} from {event.sender}: {event.session_id}")
+        logger.warning(f"Undecryptable message in {room.room_id} from {event.sender}")
 
     async def _handle_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:
         if event.state_key != self.user_id:
