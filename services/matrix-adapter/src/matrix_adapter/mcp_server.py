@@ -58,12 +58,14 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
 
 
 @mcp.tool
-async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent."""
-    data, content_type = await client.download_attachment(mxc_url)
-    if content_type and content_type.startswith("image/"):
-        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=content_type)
-    return TextContent(type="text", text=f"[attachment: {content_type}, {len(data)} bytes]")
+async def get_attachment(mxc_url: str, content_type: str | None = None) -> ImageContent | TextContent:
+    """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent.
+    Pass content_type from the message metadata if available."""
+    data, resp_content_type = await client.download_attachment(mxc_url)
+    mime = content_type or resp_content_type or "application/octet-stream"
+    if mime.startswith("image/"):
+        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=mime)
+    return TextContent(type="text", text=f"[attachment: {mime}, {len(data)} bytes]")
 
 
 @mcp.tool
