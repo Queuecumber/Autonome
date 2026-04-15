@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Sender:
     id: str
-    name: str
+    name: str | None = None
 
-    @classmethod
-    def from_room(cls, room: MatrixRoom, user_id: str) -> "Sender":
-        return cls(id=user_id, name=room.user_name(user_id) or user_id)
+    def __post_init__(self):
+        if not self.name:
+            self.name = self.id
 
 
 @dataclass
@@ -248,7 +248,7 @@ class MatrixClient:
 
     async def _on_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
         msg = Message(
-            sender=Sender.from_room(room, event.sender),
+            sender=Sender(id=event.sender, name=room.user_name(event.sender)),
             room=Room.from_nio(room),
             event_id=event.event_id,
             text=event.body,
@@ -260,7 +260,7 @@ class MatrixClient:
     async def _on_media(self, room: MatrixRoom, event) -> None:
         url, mimetype, caption, size = self._extract_media(event)
         msg = Message(
-            sender=Sender.from_room(room, event.sender),
+            sender=Sender(id=event.sender, name=room.user_name(event.sender)),
             room=Room.from_nio(room),
             event_id=event.event_id,
             text=caption,
@@ -273,7 +273,7 @@ class MatrixClient:
     async def _on_reaction(self, room: MatrixRoom, event: ReactionEvent) -> None:
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         reaction = Reaction(
-            sender=Sender.from_room(room, event.sender),
+            sender=Sender(id=event.sender, name=room.user_name(event.sender)),
             room=Room.from_nio(room),
             event_id=event.event_id,
             emoji=relates_to.get("key", ""),
