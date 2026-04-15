@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """\
 # Your Environment
 
-You are running on the Agent Platform. You interact with the world through \
+You are running on Autonome. You interact with the world through \
 MCP tools — there is no shell, no bash, no direct file access. Everything \
 you do happens through tool calls.
 
