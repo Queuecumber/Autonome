@@ -11,6 +11,10 @@ from nio import (
     AsyncClient,
     AsyncClientConfig,
     InviteMemberEvent,
+    KeyVerificationCancel,
+    KeyVerificationKey,
+    KeyVerificationMac,
+    KeyVerificationStart,
     LocalProtocolError,
     LoginResponse,
     MatrixRoom,
@@ -22,6 +26,7 @@ from nio import (
     RoomMessageFile,
     ReactionEvent,
     SyncResponse,
+    ToDeviceError,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,6 +193,10 @@ class MatrixClient:
         self._client.add_event_callback(self._handle_file, RoomEncryptedFile)
         self._client.add_event_callback(self._handle_reaction, ReactionEvent)
         self._client.add_event_callback(self._handle_megolm, MegolmEvent)
+        self._client.add_to_device_callback(self._handle_verification_start, KeyVerificationStart)
+        self._client.add_to_device_callback(self._handle_verification_key, KeyVerificationKey)
+        self._client.add_to_device_callback(self._handle_verification_mac, KeyVerificationMac)
+        self._client.add_to_device_callback(self._handle_verification_cancel, KeyVerificationCancel)
 
         logger.info("Starting Matrix sync loop")
         while True:
@@ -205,6 +214,29 @@ class MatrixClient:
 
     async def _handle_sync(self, response: SyncResponse) -> None:
         self._trust_all_devices()
+
+    async def _handle_verification_start(self, event: KeyVerificationStart) -> None:
+        logger.info(f"Verification request from {event.sender} (tx: {event.transaction_id})")
+        resp = await self._client.accept_key_verification(event.transaction_id)
+        if isinstance(resp, ToDeviceError):
+            logger.error(f"Failed to accept verification: {resp}")
+
+    async def _handle_verification_key(self, event: KeyVerificationKey) -> None:
+        sas = self._client.key_verifications.get(event.transaction_id)
+        if sas:
+            emojis = sas.get_emoji()
+            emoji_str = " ".join(f"{e[0]} ({e[1]})" for e in emojis)
+            logger.info(f"🔐 VERIFY EMOJIS: {emoji_str}")
+            logger.info("Confirm these match in Element, then the bot will auto-confirm.")
+            resp = await self._client.confirm_key_verification(event.transaction_id)
+            if isinstance(resp, ToDeviceError):
+                logger.error(f"Failed to confirm verification: {resp}")
+
+    async def _handle_verification_mac(self, event: KeyVerificationMac) -> None:
+        logger.info(f"Verification complete (tx: {event.transaction_id})")
+
+    async def _handle_verification_cancel(self, event: KeyVerificationCancel) -> None:
+        logger.info(f"Verification cancelled (tx: {event.transaction_id}): {event.reason}")
 
     async def _handle_megolm(self, room: MatrixRoom, event: MegolmEvent) -> None:
         logger.warning(f"Undecryptable message in {room.room_id} from {event.sender}")
