@@ -7,14 +7,16 @@ from typing import Awaitable, Callable
 
 from nio import (
     AsyncClient,
+    AsyncClientConfig,
+    InviteMemberEvent,
     LoginResponse,
     MatrixRoom,
+    MegolmEvent,
     RoomMessageText,
     RoomMessageImage,
     RoomMessageFile,
     ReactionEvent,
-    TypingNoticeEvent,
-    ReceiptEvent,
+    SyncResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,7 @@ class Message:
             ]
         return {
             "source": source,
-            "session_id": self.room_id,
+            "session_id": "shared",
             "text": self.text or "",
             "metadata": metadata,
         }
@@ -92,19 +94,22 @@ class MatrixClient:
         password: str | None = None,
         access_token: str | None = None,
         allowed_rooms: list[str] | None = None,
+        store_path: str = "/data/crypto",
     ):
         self.homeserver = homeserver
         self.user_id = user_id
         self.password = password
         self.access_token = access_token
         self.allowed_rooms = allowed_rooms
-        self._client = AsyncClient(homeserver, user_id)
+        config = AsyncClientConfig(store_sync_tokens=True, encryption_enabled=True)
+        self._client = AsyncClient(homeserver, user_id, store_path=store_path, config=config)
         self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
 
     async def login(self) -> None:
         if self.access_token:
             self._client.access_token = self.access_token
             self._client.user_id = self.user_id
+            self._client.load_store()
             logger.info(f"Using existing access token for {self.user_id}")
         else:
             resp = await self._client.login(self.password)
@@ -112,16 +117,43 @@ class MatrixClient:
                 raise RuntimeError(f"Matrix login failed: {resp}")
             logger.info(f"Logged in as {self.user_id}")
 
+        # Do an initial sync so the device store is populated
+        await self._client.sync(timeout=10000)
+
     async def listen(self, on_message: Callable[[Message | Reaction], Awaitable[None]]) -> None:
         self._on_message = on_message
 
+        self._client.add_response_callback(self._handle_sync, SyncResponse)
+        self._client.add_event_callback(self._handle_invite, InviteMemberEvent)
         self._client.add_event_callback(self._handle_text, RoomMessageText)
         self._client.add_event_callback(self._handle_image, RoomMessageImage)
         self._client.add_event_callback(self._handle_file, RoomMessageFile)
         self._client.add_event_callback(self._handle_reaction, ReactionEvent)
+        self._client.add_event_callback(self._handle_megolm, MegolmEvent)
 
         logger.info("Starting Matrix sync loop")
         await self._client.sync_forever(timeout=30000, full_state=True)
+
+    def _trust_all_devices(self) -> None:
+        """Trust all known devices for all users — bots don't need interactive verification."""
+        for user_id in self._client.device_store.users:
+            for device_id, olm_device in self._client.device_store[user_id].items():
+                if not olm_device.verified:
+                    logger.info(f"Trusting device {device_id} for {user_id}")
+                    self._client.verify_device(olm_device)
+
+    async def _handle_sync(self, response: SyncResponse) -> None:
+        self._trust_all_devices()
+
+    async def _handle_megolm(self, room: MatrixRoom, event: MegolmEvent) -> None:
+        """Handle encrypted messages we couldn't decrypt."""
+        logger.warning(f"Unable to decrypt message in {room.room_id} from {event.sender}: {event.session_id}")
+
+    async def _handle_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:
+        if event.state_key != self.user_id:
+            return
+        logger.info(f"Accepting invite to {room.room_id} from {event.sender}")
+        await self._client.join(room.room_id)
 
     def _should_process(self, room: MatrixRoom, sender: str) -> bool:
         if sender == self.user_id:
