@@ -41,6 +41,7 @@ class Schedule:
     cron: str
     message: str
     session_id: str
+    source: str = "time"
     label: str | None = None
     energy: str = "passive"
     next_fire: float = 0.0
@@ -48,8 +49,8 @@ class Schedule:
     def to_dict(self) -> dict:
         return {
             "id": self.id, "cron": self.cron, "message": self.message,
-            "session_id": self.session_id, "label": self.label,
-            "energy": self.energy,
+            "session_id": self.session_id, "source": self.source,
+            "label": self.label, "energy": self.energy,
         }
 
     def compute_next(self, base: datetime | None = None) -> None:
@@ -166,7 +167,7 @@ async def _scheduler() -> None:
 async def _fire(sched: Schedule) -> None:
     """POST a scheduled event to the session manager."""
     event = {
-        "source": "time",
+        "source": sched.source,
         "session_id": sched.session_id,
         "text": sched.message,
         "energy": sched.energy,
@@ -174,9 +175,10 @@ async def _fire(sched: Schedule) -> None:
             "schedule_id": sched.id,
             "label": sched.label,
             "cron": sched.cron,
+            "trigger": "time",
         },
     }
-    logger.info(f"Firing schedule {sched.id} ({sched.label or ''}, {sched.energy}) → {sched.session_id}")
+    logger.info(f"Firing schedule {sched.id} ({sched.label or ''}, {sched.energy}) → {sched.source}:{sched.session_id}")
     try:
         await _http.post(f"{session_manager_url}/event", json=event)
     except Exception as e:
@@ -200,6 +202,7 @@ async def main():
     continuity_cron = os.environ.get("CONTINUITY_CRON", "*/20 * * * *")
     continuity_message = os.environ.get("CONTINUITY_MESSAGE", "continuity check")
     continuity_session = os.environ.get("CONTINUITY_SESSION", "")
+    continuity_source = os.environ.get("CONTINUITY_SOURCE", "time")
 
     _http = httpx.AsyncClient(timeout=600)
 
@@ -211,11 +214,12 @@ async def main():
             cron=continuity_cron,
             message=continuity_message,
             session_id=continuity_session,
+            source=continuity_source,
             label="continuity",
         )
         cont.compute_next()
         _schedules["continuity"] = cont
-        logger.info(f"Continuity schedule registered: {continuity_cron} → {continuity_session}")
+        logger.info(f"Continuity schedule registered: {continuity_cron} → {continuity_source}:{continuity_session}")
     else:
         logger.warning("CONTINUITY_SESSION not set — skipping continuity schedule")
 
