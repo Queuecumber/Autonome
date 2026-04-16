@@ -1,10 +1,4 @@
-"""Session manager: JSONL history per session_id with token-based truncation.
-
-Session files are named `<session_id>.jsonl`. The session_id is the routing
-key — it's up to event senders (adapters) to choose session_ids that don't
-collide. Namespaced IDs like `matrix:!roomid` or `signal:+1234` are
-conventional but not required.
-"""
+"""Session manager: JSONL history per session_id with token-based truncation."""
 
 import json
 from pathlib import Path
