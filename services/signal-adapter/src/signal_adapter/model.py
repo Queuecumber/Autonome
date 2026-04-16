@@ -67,17 +67,16 @@ class Reaction:
 
     def to_event(self, source: str = "signal") -> dict:
         """Serialize as a session manager event."""
+        content = {"type": "reaction", "emoji": self.emoji, "target": str(self.target_timestamp)}
+        if self.is_remove:
+            content["remove"] = True
         return {
             "source": source,
             "session_id": self.sender,
-            "text": f"[reacted with {self.emoji} to message at {self.target_timestamp}]",
+            "text": json.dumps(content),
             "metadata": {
-                "type": "reaction",
                 "sender": self.sender,
-                "emoji": self.emoji,
-                "target_timestamp": str(self.target_timestamp),
                 "target_author": self.target_author,
-                "is_remove": self.is_remove,
             },
         }
 

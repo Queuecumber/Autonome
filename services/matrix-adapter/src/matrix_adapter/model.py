@@ -112,14 +112,14 @@ class Reaction:
         return {
             "source": source,
             "session_id": self.room.id,
-            "text": f"[reacted with {self.emoji} to {self.target_event_id}]",
+            "text": json.dumps({"type": "reaction", "emoji": self.emoji, "target": self.target_event_id}),
             "metadata": {
-                "type": "reaction",
+                "message_id": self.event_id,
                 "sender": self.sender.id,
                 "sender_name": self.sender.name,
                 "room_id": self.room.id,
-                "emoji": self.emoji,
-                "target_event_id": self.target_event_id,
+                "room_name": self.room.name,
+                "encrypted": self.room.encrypted,
             },
         }
 
