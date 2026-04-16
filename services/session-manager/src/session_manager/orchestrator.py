@@ -163,7 +163,7 @@ class SessionOrchestrator:
         max_tokens = session_config.get("max_history_tokens", 100000)
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
-        self._sessions: dict[tuple[str, str], _SessionState] = {}
+        self._sessions: dict[str, _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
         self.openai_tools: list[dict] = []
@@ -189,11 +189,10 @@ class SessionOrchestrator:
 
         logger.info(f"Connected to {len(self.mcp_connections)} MCP servers, {len(self.openai_tools)} tools total")
 
-    def _get_session(self, channel: str, session_id: str) -> _SessionState:
-        key = (channel, session_id)
-        if key not in self._sessions:
-            self._sessions[key] = _SessionState()
-        return self._sessions[key]
+    def _get_session(self, session_id: str) -> _SessionState:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = _SessionState()
+        return self._sessions[session_id]
 
     def _build_instructions(self) -> str:
         """Build instructions from base prompt + MCP server instructions."""
@@ -273,25 +272,24 @@ class SessionOrchestrator:
           - "active" (default): cancel in-progress generation, process immediately
           - "passive": if busy, queue for later; if idle, process normally
         """
-        source = event["source"]
         session_id = event["session_id"]
         energy = event.get("energy", "active")
-        state = self._get_session(source, session_id)
+        state = self._get_session(session_id)
 
         if energy == "passive" and state.lock.locked():
-            logger.info(f"Queuing passive event for ({source}, {session_id}): {event.get('text', '')[:60]}")
+            logger.info(f"Queuing passive event for {session_id}: {event.get('text', '')[:60]}")
             state.passive_queue.append(event)
             return None
 
         if energy == "active" and state.cancel is not None:
-            logger.info(f"Interrupting in-progress response for ({source}, {session_id})")
+            logger.info(f"Interrupting in-progress response for {session_id}")
             state.cancel.set()
 
         async with state.lock:
             cancel = asyncio.Event()
             state.cancel = cancel
             try:
-                result = await self._process_events(source, session_id, [event], cancel)
+                result = await self._process_events(session_id, [event], cancel)
             finally:
                 if state.cancel is cancel:
                     state.cancel = None
@@ -300,12 +298,12 @@ class SessionOrchestrator:
         if state.passive_queue:
             batch = state.passive_queue
             state.passive_queue = []
-            logger.info(f"Draining {len(batch)} passive events for ({source}, {session_id})")
+            logger.info(f"Draining {len(batch)} passive events for {session_id}")
             async with state.lock:
                 cancel = asyncio.Event()
                 state.cancel = cancel
                 try:
-                    await self._process_events(source, session_id, batch, cancel)
+                    await self._process_events(session_id, batch, cancel)
                 finally:
                     if state.cancel is cancel:
                         state.cancel = None
@@ -314,14 +312,13 @@ class SessionOrchestrator:
 
     async def _process_events(
         self,
-        source: str,
         session_id: str,
         events: list[dict[str, Any]],
         cancel: asyncio.Event,
     ) -> str | None:
         """Process one or more events as a single turn with cancellation support."""
         # Load session history
-        raw_history = self.session.load_truncated(source, session_id)
+        raw_history = self.session.load_truncated(session_id)
 
         # Build a developer+user pair for each event
         now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
@@ -331,7 +328,7 @@ class SessionOrchestrator:
             text = event.get("text", "") or "(attachment)"
             context_msg = _developer_event(
                 "message",
-                source=event.get("source", source),
+                source=event.get("source", "unknown"),
                 time=now,
                 energy=event.get("energy", "active"),
                 **metadata,
@@ -376,7 +373,7 @@ class SessionOrchestrator:
                     logger.info(f"Interrupted, partial: {partial}")
                 else:
                     logger.info("Interrupted before any output completed")
-                self.session.append(source, session_id, all_new_messages)
+                self.session.append(session_id, all_new_messages)
                 return None
 
             logger.info(f"LLM response (iter {iteration}): status={response.status}")
@@ -427,7 +424,7 @@ class SessionOrchestrator:
                             pending.append({"tool": t.name, "arguments": args})
                         logger.info(f"Interrupted between tool calls, pending: {pending}")
                         all_new_messages.append(_developer_event("interrupted", pending=pending))
-                        self.session.append(source, session_id, all_new_messages)
+                        self.session.append(session_id, all_new_messages)
                         return None
 
                     logger.info(f"  Tool call: {tc.name}({tc.arguments[:100]})")
@@ -450,13 +447,13 @@ class SessionOrchestrator:
             if assistant_text:
                 all_new_messages.append({"role": "assistant", "content": assistant_text})
 
-            self.session.append(source, session_id, all_new_messages)
+            self.session.append(session_id, all_new_messages)
 
             logger.info(f"Final response: {assistant_text[:200]}")
             return assistant_text
 
         logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
-        self.session.append(source, session_id, all_new_messages)
+        self.session.append(session_id, all_new_messages)
         return None
 
     async def close(self) -> None:
