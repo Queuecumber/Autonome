@@ -325,8 +325,9 @@ class SessionOrchestrator:
         for event in events:
             text = event.text or "(attachment)"
             context_msg = _developer_event(
-                "message",
+                event.event_type,
                 source=event.source,
+                session_id=event.session_id,
                 time=now,
                 energy=event.energy,
                 **event.metadata,

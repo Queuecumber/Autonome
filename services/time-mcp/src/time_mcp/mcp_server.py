@@ -9,8 +9,7 @@ import asyncio
 import json
 import logging
 import os
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -41,15 +40,13 @@ class Schedule:
     cron: str
     message: str
     session_id: str
-    label: str | None = None
     energy: str = "passive"
     next_fire: float = 0.0
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "cron": self.cron, "message": self.message,
-            "session_id": self.session_id,
-            "label": self.label, "energy": self.energy,
+            "session_id": self.session_id, "energy": self.energy,
         }
 
     def compute_next(self, base: datetime | None = None) -> None:
@@ -83,12 +80,15 @@ def get_current_time() -> str:
 
 @mcp.tool
 def schedule_cron(
-    cron: str, message: str, session_id: str,
-    label: str | None = None, energy: str = "passive",
+    schedule_id: str, cron: str, message: str, session_id: str,
+    energy: str = "passive",
 ) -> str:
     """Schedule a recurring wakeup. cron is a standard cron expression
     (e.g. '*/20 * * * *' for every 20 minutes). The message is delivered
     to the given session_id when the schedule fires.
+
+    schedule_id is a short, memorable name you choose (e.g. 'morning-checkin').
+    Use it later to cancel. Rejected if already in use.
 
     energy is "active" (interrupts current generation) or "passive" (queues
     if busy). Most scheduled events should be passive — use active only when
@@ -99,10 +99,12 @@ def schedule_cron(
         raise ValueError(f"Invalid cron expression: {cron}")
     if energy not in ("active", "passive"):
         raise ValueError(f"energy must be 'active' or 'passive', got {energy!r}")
+    if schedule_id in _schedules:
+        raise ValueError(f"Schedule id {schedule_id!r} already exists — cancel it first or pick a different name")
     sched = Schedule(
-        id=str(uuid.uuid4())[:8],
+        id=schedule_id,
         cron=cron, message=message, session_id=session_id,
-        label=label, energy=energy,
+        energy=energy,
     )
     sched.compute_next()
     _schedules[sched.id] = sched
@@ -168,15 +170,15 @@ async def _fire(sched: Schedule) -> None:
     event = {
         "source": "time",
         "session_id": sched.session_id,
+        "event_type": "continuity" if sched.id == "continuity" else "cron",
         "text": sched.message,
         "energy": sched.energy,
         "metadata": {
             "schedule_id": sched.id,
-            "label": sched.label,
             "cron": sched.cron,
         },
     }
-    logger.info(f"Firing schedule {sched.id} ({sched.label or ''}, {sched.energy}) → {sched.session_id}")
+    logger.info(f"Firing schedule {sched.id} ({sched.energy}) → {sched.session_id}")
     try:
         await _http.post(f"{session_manager_url}/event", json=event)
     except Exception as e:
@@ -211,7 +213,6 @@ async def main():
             cron=continuity_cron,
             message=continuity_message,
             session_id=continuity_session,
-            label="continuity",
         )
         cont.compute_next()
         _schedules["continuity"] = cont
