@@ -9,9 +9,10 @@ import uvicorn
 import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from session_manager.event import Event
 from session_manager.orchestrator import SessionOrchestrator
 
 logging.basicConfig(
@@ -52,7 +53,11 @@ async def startup():
 
     async def event_endpoint(request: Request) -> Response:
         body = await request.json()
-        asyncio.create_task(orchestrator.handle_event(body))
+        try:
+            event = Event.from_dict(body)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        asyncio.create_task(orchestrator.handle_event(event))
         return Response(status_code=202)
 
     app = Starlette(routes=[Route("/event", event_endpoint, methods=["POST"])])

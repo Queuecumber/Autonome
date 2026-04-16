@@ -9,6 +9,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from session_manager.event import Event
 from session_manager.mcp import MCPConnection, mcp_content_to_openai
 from session_manager.session import SessionManager
 
@@ -141,7 +142,7 @@ class _SessionState:
     def __init__(self):
         self.lock = asyncio.Lock()
         self.cancel: asyncio.Event | None = None
-        self.passive_queue: list[dict[str, Any]] = []
+        self.passive_queue: list[Event] = []
 
 
 class SessionOrchestrator:
@@ -265,31 +266,29 @@ class SessionOrchestrator:
 
         return response, completed_items
 
-    async def handle_event(self, event: dict[str, Any]) -> str | None:
+    async def handle_event(self, event: Event) -> str | None:
         """Process an inbound event from any adapter.
 
         Event energy determines behavior:
           - "active" (default): cancel in-progress generation, process immediately
           - "passive": if busy, queue for later; if idle, process normally
         """
-        session_id = event["session_id"]
-        energy = event.get("energy", "active")
-        state = self._get_session(session_id)
+        state = self._get_session(event.session_id)
 
-        if energy == "passive" and state.lock.locked():
-            logger.info(f"Queuing passive event for {session_id}: {event.get('text', '')[:60]}")
+        if event.energy == "passive" and state.lock.locked():
+            logger.info(f"Queuing passive event for {event.session_id}: {event.text[:60]}")
             state.passive_queue.append(event)
             return None
 
-        if energy == "active" and state.cancel is not None:
-            logger.info(f"Interrupting in-progress response for {session_id}")
+        if event.energy == "active" and state.cancel is not None:
+            logger.info(f"Interrupting in-progress response for {event.session_id}")
             state.cancel.set()
 
         async with state.lock:
             cancel = asyncio.Event()
             state.cancel = cancel
             try:
-                result = await self._process_events(session_id, [event], cancel)
+                result = await self._process_events(event.session_id, [event], cancel)
             finally:
                 if state.cancel is cancel:
                     state.cancel = None
@@ -298,12 +297,12 @@ class SessionOrchestrator:
         if state.passive_queue:
             batch = state.passive_queue
             state.passive_queue = []
-            logger.info(f"Draining {len(batch)} passive events for {session_id}")
+            logger.info(f"Draining {len(batch)} passive events for {event.session_id}")
             async with state.lock:
                 cancel = asyncio.Event()
                 state.cancel = cancel
                 try:
-                    await self._process_events(session_id, batch, cancel)
+                    await self._process_events(event.session_id, batch, cancel)
                 finally:
                     if state.cancel is cancel:
                         state.cancel = None
@@ -313,7 +312,7 @@ class SessionOrchestrator:
     async def _process_events(
         self,
         session_id: str,
-        events: list[dict[str, Any]],
+        events: list[Event],
         cancel: asyncio.Event,
     ) -> str | None:
         """Process one or more events as a single turn with cancellation support."""
@@ -324,14 +323,13 @@ class SessionOrchestrator:
         now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
         new_items: list[dict[str, Any]] = []
         for event in events:
-            metadata = event.get("metadata", {})
-            text = event.get("text", "") or "(attachment)"
+            text = event.text or "(attachment)"
             context_msg = _developer_event(
                 "message",
-                source=event.get("source", "unknown"),
+                source=event.source,
                 time=now,
-                energy=event.get("energy", "active"),
-                **metadata,
+                energy=event.energy,
+                **event.metadata,
             )
             user_msg = {"role": "user", "content": text}
             new_items.append(context_msg)
