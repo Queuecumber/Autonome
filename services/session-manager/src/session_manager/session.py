@@ -1,4 +1,4 @@
-"""Session manager: JSONL history per (channel, session_id) with token-based truncation."""
+"""Session manager: JSONL history per session_id with token-based truncation."""
 
 import json
 from pathlib import Path
@@ -11,12 +11,12 @@ class SessionManager:
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self.max_history_tokens = max_history_tokens
 
-    def _session_path(self, channel: str, session_id: str) -> Path:
+    def _session_path(self, session_id: str) -> Path:
         safe_id = session_id.replace("/", "_").replace("\\", "_")
-        return self.store_dir / f"{channel}_{safe_id}.jsonl"
+        return self.store_dir / f"{safe_id}.jsonl"
 
-    def load(self, channel: str, session_id: str) -> list[dict[str, Any]]:
-        path = self._session_path(channel, session_id)
+    def load(self, session_id: str) -> list[dict[str, Any]]:
+        path = self._session_path(session_id)
         if not path.exists():
             return []
         messages = []
@@ -25,14 +25,14 @@ class SessionManager:
                 messages.append(json.loads(line))
         return messages
 
-    def append(self, channel: str, session_id: str, messages: list[dict[str, Any]]) -> None:
-        path = self._session_path(channel, session_id)
+    def append(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+        path = self._session_path(session_id)
         with path.open("a") as f:
             for msg in messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
-    def load_truncated(self, channel: str, session_id: str) -> list[dict[str, Any]]:
-        messages = self.load(channel, session_id)
+    def load_truncated(self, session_id: str) -> list[dict[str, Any]]:
+        messages = self.load(session_id)
         if not messages:
             return messages
 

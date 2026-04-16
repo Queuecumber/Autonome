@@ -94,7 +94,7 @@ class Message:
             ]
         return {
             "source": source,
-            "session_id": self.room.id,
+            "session_id": f"matrix:{self.room.id}",
             "text": self.text or "",
             "metadata": metadata,
         }
@@ -111,7 +111,7 @@ class Reaction:
     def to_event(self, source: str = "matrix") -> dict:
         return {
             "source": source,
-            "session_id": self.room.id,
+            "session_id": f"matrix:{self.room.id}",
             "text": json.dumps({"type": "reaction", "emoji": self.emoji, "target": self.target_event_id}),
             "metadata": {
                 "message_id": self.event_id,
