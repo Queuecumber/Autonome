@@ -41,8 +41,11 @@ text output is for you and you alone.
 ## Message Context
 
 Each user message is preceded by a developer message with structured JSON \
-context: source platform, timestamp, sender, room info, and any attachments. \
-Use the sender/room_id to reply and the message_id for reactions/receipts.
+context: source platform, timestamp, sender, room info, attachments, and \
+an "energy" field. "active" events are direct user interactions that expect \
+a response. "passive" events (scheduled check-ins, receipts) are low-priority \
+— respond only if there's something worth saying. Multiple events in a single \
+turn mean several things arrived while you were busy; catch up as needed.
 
 ## Interruptions
 
@@ -133,11 +136,12 @@ def _developer_event(event_type: str, **fields) -> dict:
 
 
 class _SessionState:
-    """Per-session lock and cancellation event."""
+    """Per-session lock, cancellation event, and passive event queue."""
 
     def __init__(self):
         self.lock = asyncio.Lock()
         self.cancel: asyncio.Event | None = None
+        self.passive_queue: list[dict[str, Any]] = []
 
 
 class SessionOrchestrator:
@@ -263,50 +267,82 @@ class SessionOrchestrator:
         return response, completed_items
 
     async def handle_event(self, event: dict[str, Any]) -> str | None:
-        """Process an inbound event from any adapter."""
+        """Process an inbound event from any adapter.
+
+        Event energy determines behavior:
+          - "active" (default): cancel in-progress generation, process immediately
+          - "passive": if busy, queue for later; if idle, process normally
+        """
         source = event["source"]
         session_id = event["session_id"]
-        text = event.get("text", "")
-        metadata = event.get("metadata", {})
+        energy = event.get("energy", "active")
         state = self._get_session(source, session_id)
 
-        # Signal any in-progress work for this session to cancel
-        if state.cancel is not None:
+        if energy == "passive" and state.lock.locked():
+            logger.info(f"Queuing passive event for ({source}, {session_id}): {event.get('text', '')[:60]}")
+            state.passive_queue.append(event)
+            return None
+
+        if energy == "active" and state.cancel is not None:
             logger.info(f"Interrupting in-progress response for ({source}, {session_id})")
             state.cancel.set()
 
         async with state.lock:
             cancel = asyncio.Event()
             state.cancel = cancel
-
             try:
-                return await self._process_event(
-                    source, session_id, text, metadata, cancel,
-                )
+                result = await self._process_events(source, session_id, [event], cancel)
             finally:
                 if state.cancel is cancel:
                     state.cancel = None
 
-    async def _process_event(
+        # Drain queued passive events as a single batched turn
+        if state.passive_queue:
+            batch = state.passive_queue
+            state.passive_queue = []
+            logger.info(f"Draining {len(batch)} passive events for ({source}, {session_id})")
+            async with state.lock:
+                cancel = asyncio.Event()
+                state.cancel = cancel
+                try:
+                    await self._process_events(source, session_id, batch, cancel)
+                finally:
+                    if state.cancel is cancel:
+                        state.cancel = None
+
+        return result
+
+    async def _process_events(
         self,
         source: str,
         session_id: str,
-        text: str,
-        metadata: dict,
+        events: list[dict[str, Any]],
         cancel: asyncio.Event,
     ) -> str | None:
-        """Inner event processing with cancellation support."""
+        """Process one or more events as a single turn with cancellation support."""
         # Load session history
         raw_history = self.session.load_truncated(source, session_id)
 
-        # Build context + user message
+        # Build a developer+user pair for each event
         now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
-        context_msg = _developer_event("message", source=source, time=now, **metadata)
-        user_msg = {"role": "user", "content": text or "(attachment)"}
+        new_items: list[dict[str, Any]] = []
+        for event in events:
+            metadata = event.get("metadata", {})
+            text = event.get("text", "") or "(attachment)"
+            context_msg = _developer_event(
+                "message",
+                source=event.get("source", source),
+                time=now,
+                energy=event.get("energy", "active"),
+                **metadata,
+            )
+            user_msg = {"role": "user", "content": text}
+            new_items.append(context_msg)
+            new_items.append(user_msg)
 
-        # Build input: history + context + new message (filter reasoning — output-only type)
+        # Build input: history + new events (filter reasoning — output-only type)
         history = [m for m in raw_history if m.get("type") != "reasoning"]
-        input_items = history + [context_msg, user_msg]
+        input_items = history + new_items
 
         # Build API call kwargs
         call_kwargs: dict[str, Any] = {
@@ -320,10 +356,10 @@ class SessionOrchestrator:
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
-        logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools")
+        logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools, {len(events)} event(s)")
 
         # Collect all new items to save to history
-        all_new_messages = [context_msg, user_msg]
+        all_new_messages = list(new_items)
 
         for iteration in range(self.max_tool_iterations):
             try:
