@@ -1,5 +1,6 @@
 """Matrix data model — all interaction with the homeserver lives here."""
 
+import io
 import json
 import logging
 from dataclasses import dataclass, field
@@ -385,7 +386,7 @@ class MatrixClient:
         return data, content_type
 
     async def upload_and_send_image(self, room_id: str, data: bytes, content_type: str, filename: str) -> None:
-        resp, _ = await self._client.upload(data, content_type=content_type, filename=filename)
+        resp, _ = await self._client.upload(io.BytesIO(data), content_type=content_type, filename=filename)
         await self._client.room_send(
             room_id, "m.room.message",
             {"msgtype": "m.image", "url": resp.content_uri, "body": filename,

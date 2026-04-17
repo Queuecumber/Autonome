@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import io
 import logging
 import os
 
@@ -74,7 +75,7 @@ async def send_attachment(room_id: str, data: bytes, filename: str, content_type
     if content_type.startswith("image/"):
         await client.upload_and_send_image(room_id, data, content_type, filename)
     else:
-        resp, _ = await client._client.upload(data, content_type=content_type, filename=filename)
+        resp, _ = await client._client.upload(io.BytesIO(data), content_type=content_type, filename=filename)
         await client._client.room_send(
             room_id, "m.room.message",
             {"msgtype": "m.file", "url": resp.content_uri, "body": filename},
@@ -89,7 +90,7 @@ async def update_profile(display_name: str | None = None, avatar: bytes | None =
     if avatar is not None:
         kind = filetype.guess(avatar)
         content_type = kind.mime if kind else "image/png"
-        resp, _ = await client._client.upload(avatar, content_type=content_type, filename="avatar")
+        resp, _ = await client._client.upload(io.BytesIO(avatar), content_type=content_type, filename="avatar")
         await client.set_avatar(resp.content_uri)
 
 
