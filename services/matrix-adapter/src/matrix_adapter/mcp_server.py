@@ -82,12 +82,15 @@ async def send_attachment(room_id: str, data: bytes, filename: str, content_type
 
 
 @mcp.tool
-async def update_profile(display_name: str | None = None, avatar_mxc_url: str | None = None) -> None:
-    """Update the Matrix profile. Set display_name and/or avatar_mxc_url (mxc:// URL)."""
+async def update_profile(display_name: str | None = None, avatar: bytes | None = None) -> None:
+    """Update the Matrix profile. Set display_name and/or avatar (image bytes)."""
     if display_name is not None:
         await client.set_display_name(display_name)
-    if avatar_mxc_url is not None:
-        await client.set_avatar(avatar_mxc_url)
+    if avatar is not None:
+        kind = filetype.guess(avatar)
+        content_type = kind.mime if kind else "image/png"
+        resp, _ = await client._client.upload(avatar, content_type=content_type, filename="avatar")
+        await client.set_avatar(resp.content_uri)
 
 
 # ── Inbound event forwarding ─────────────────────────────

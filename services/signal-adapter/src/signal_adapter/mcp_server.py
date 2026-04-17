@@ -96,12 +96,8 @@ async def update_profile(
 
 
 @mcp.tool
-async def update_profile_avatar(attachment_id: str) -> None:
-    """Set the Signal profile avatar from a Signal attachment ID. Send yourself the image first, then use its attachment ID."""
-    att = await client.fetch_attachment(attachment_id)
-    avatar = base64.b64decode(att.content_base64) if att.content_base64 else None
-    if not avatar:
-        raise ValueError("Attachment has no content")
+async def update_profile_avatar(avatar: bytes) -> None:
+    """Set the Signal profile avatar to the given image bytes."""
     await client.update_profile(avatar=avatar)
 
 
