@@ -81,13 +81,26 @@ def resolve_pointer_args(args: dict, paths: list[tuple[str, ...]], store: Binary
     return args
 
 
+def _save_and_describe(store: BinaryStore, data_b64: str, mime_type: str) -> dict | None:
+    """Persist base64 content and return the pointer metadata, or None on failure."""
+    try:
+        raw = base64.b64decode(data_b64)
+        pointer_id = store.save(raw, mime_type)
+        return {"id": pointer_id, "content_type": mime_type, "size": len(raw)}
+    except Exception as e:
+        logger.warning(f"Failed to persist binary ({mime_type}) to BinaryStore: {e}")
+        return None
+
+
 def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
     """Convert MCP content blocks to OpenAI Responses API message content parts.
 
-    TextContent → text part
-    ImageContent → input_image part (data URI) with a `_pointer` sidecar
-                   if a BinaryStore is provided (the bytes are also persisted).
-    AudioContent → text placeholder (no OpenAI audio in tool results yet)
+    TextContent  → input_text
+    ImageContent → input_image with a `_pointer` sidecar (model-consumable)
+    AudioContent → input_text carrying the pointer JSON (not model-consumable today)
+    Other        → input_text with a string fallback
+
+    Non-text content is persisted to the BinaryStore when one is provided.
     """
     parts = []
     for block in content_blocks:
@@ -99,19 +112,16 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                 "image_url": f"data:{block.mimeType};base64,{block.data}",
             }
             if store is not None:
-                try:
-                    raw = base64.b64decode(block.data)
-                    pointer = store.save(raw, block.mimeType)
-                    part["_pointer"] = {
-                        "id": pointer,
-                        "content_type": block.mimeType,
-                        "size": len(raw),
-                    }
-                except Exception as e:
-                    logger.warning(f"Failed to persist image to BinaryStore: {e}")
+                pointer = _save_and_describe(store, block.data, block.mimeType)
+                if pointer:
+                    part["_pointer"] = pointer
             parts.append(part)
         elif block.type == "audio":
-            parts.append({"type": "input_text", "text": f"[audio: {block.mimeType}]"})
+            pointer = _save_and_describe(store, block.data, block.mimeType) if store else None
+            if pointer:
+                parts.append({"type": "input_text", "text": json.dumps({"pointer": pointer}, ensure_ascii=False)})
+            else:
+                parts.append({"type": "input_text", "text": f"[audio: {block.mimeType}]"})
         else:
             parts.append({"type": "input_text", "text": str(block)})
     return parts
