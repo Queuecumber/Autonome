@@ -27,13 +27,21 @@ class BinaryStore:
         self.store_dir = Path(store_dir)
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self.retention_days = retention_days
-        self._counter = self._scan_max_counter() + 1
+        self._counter_path = self.store_dir / ".counter"
+        self._counter = max(self._read_counter(), self._scan_max_counter()) + 1
+
+    def _read_counter(self) -> int:
+        """Load the persisted counter, or 0 if absent/invalid."""
+        try:
+            return int(self._counter_path.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            return 0
 
     def _scan_max_counter(self) -> int:
         """Find the highest counter prefix in existing files."""
         highest = 0
         for path in self.store_dir.iterdir():
-            if not path.is_file():
+            if not path.is_file() or path.name.startswith("."):
                 continue
             prefix = path.name.split("-", 1)[0].split(".", 1)[0]
             if prefix.isdigit():
@@ -44,6 +52,7 @@ class BinaryStore:
         """Write bytes to disk and return the pointer (the filename)."""
         counter = self._counter
         self._counter += 1
+        self._counter_path.write_text(str(counter))
 
         if filename:
             pointer = f"{counter}-{_sanitize(filename)}"
@@ -64,11 +73,12 @@ class BinaryStore:
         return path.read_bytes(), mime_type or "application/octet-stream"
 
     def gc(self) -> int:
-        """Delete files older than retention_days. Returns number removed."""
+        """Delete files older than retention_days. Returns number removed.
+        Skips hidden files (.counter etc.)."""
         cutoff = time.time() - (self.retention_days * 86400)
         removed = 0
         for path in self.store_dir.iterdir():
-            if not path.is_file():
+            if not path.is_file() or path.name.startswith("."):
                 continue
             if path.stat().st_mtime < cutoff:
                 path.unlink()
