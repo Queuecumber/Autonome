@@ -26,14 +26,17 @@ def mcp_tool_to_openai(tool) -> dict:
 
 def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
     """In-place rewrite of `{type: string, format: byte|binary}` fields to
-    pointer-typed strings. Returns the dotted paths of rewritten fields so
-    the orchestrator can resolve them before dispatch.
+    pointer-typed strings. Returns the paths of rewritten fields so the
+    orchestrator can resolve them before dispatch.
+
+    Handles nested anyOf/oneOf/allOf (e.g. Optional[bytes] → {anyOf:[
+    {type:string, format:binary}, {type:null}]}). Each matching variant
+    gets rewritten in place and the outer path is recorded once.
     """
     paths: list[tuple[str, ...]] = []
 
-    def walk(node: dict, path: tuple[str, ...]) -> None:
-        if not isinstance(node, dict):
-            return
+    def rewrite_node(node: dict) -> bool:
+        """Rewrite a binary-string node in place. Returns True if matched."""
         if node.get("type") == "string" and node.get("format") in ("byte", "binary"):
             node.pop("format", None)
             existing = node.get("description", "")
@@ -42,6 +45,23 @@ def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
                 + "Pointer (filename) to a stored binary from a prior tool result. "
                   "Do not pass raw bytes or base64."
             ).strip()
+            return True
+        return False
+
+    def walk(node: dict, path: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        if rewrite_node(node):
+            paths.append(path)
+            return
+        matched_here = False
+        for combinator in ("anyOf", "oneOf", "allOf"):
+            variants = node.get(combinator)
+            if isinstance(variants, list):
+                for variant in variants:
+                    if isinstance(variant, dict) and rewrite_node(variant):
+                        matched_here = True
+        if matched_here:
             paths.append(path)
             return
         for key, child in (node.get("properties") or {}).items():
