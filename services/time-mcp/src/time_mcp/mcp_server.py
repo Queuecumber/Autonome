@@ -78,14 +78,9 @@ def _add_job(sched: Schedule) -> None:
 # ── Tools ────────────────────────────────────────────────
 
 @mcp.tool
-def get_current_time(format: str | None = None) -> str:
-    """Return the current wall-clock time.
-
-    format is an optional strftime format string. Defaults to
-    '%Y-%m-%d %H:%M:%S %Z (%A)'.
-    """
-    fmt = format or "%Y-%m-%d %H:%M:%S %Z (%A)"
-    return datetime.now().astimezone().strftime(fmt)
+def get_current_time(format: str = "%Y-%m-%d %H:%M:%S %Z (%A)") -> str:
+    """Return the current wall-clock time. format is a strftime format string."""
+    return datetime.now().astimezone().strftime(format)
 
 
 @mcp.tool
