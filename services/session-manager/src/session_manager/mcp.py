@@ -115,10 +115,12 @@ def _save_and_describe(store: BinaryStore, data_b64: str, mime_type: str) -> dic
 def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
     """Convert MCP content blocks to OpenAI Responses API message content parts.
 
-    TextContent  → input_text
-    ImageContent → input_image with a `_pointer` sidecar (model-consumable)
-    AudioContent → input_text carrying the pointer JSON (not model-consumable today)
-    Other        → input_text with a string fallback
+    TextContent                → input_text
+    ImageContent               → input_image with a `_pointer` sidecar (model-consumable)
+    AudioContent               → input_text carrying the pointer JSON
+    EmbeddedResource (Blob)    → input_text carrying the pointer JSON
+    EmbeddedResource (Text)    → input_text with the resource's text content
+    Other                      → input_text with a string fallback
 
     Non-text content is persisted to the BinaryStore when one is provided.
     """
@@ -142,6 +144,21 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                 parts.append({"type": "input_text", "text": json.dumps({"pointer": pointer}, ensure_ascii=False)})
             else:
                 parts.append({"type": "input_text", "text": f"[audio: {block.mimeType}]"})
+        elif block.type == "resource":
+            resource = getattr(block, "resource", None)
+            blob = getattr(resource, "blob", None)
+            text = getattr(resource, "text", None)
+            mime = getattr(resource, "mimeType", None) or "application/octet-stream"
+            if blob is not None:
+                pointer = _save_and_describe(store, blob, mime) if store else None
+                if pointer:
+                    parts.append({"type": "input_text", "text": json.dumps({"pointer": pointer}, ensure_ascii=False)})
+                else:
+                    parts.append({"type": "input_text", "text": f"[resource: {mime}]"})
+            elif text is not None:
+                parts.append({"type": "input_text", "text": text})
+            else:
+                parts.append({"type": "input_text", "text": str(block)})
         else:
             parts.append({"type": "input_text", "text": str(block)})
     return parts

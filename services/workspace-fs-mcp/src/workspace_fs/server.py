@@ -12,7 +12,7 @@ from pathlib import Path
 
 import filetype
 from fastmcp import FastMCP
-from mcp.types import AudioContent, ImageContent, TextContent
+from mcp.types import AudioContent, BlobResourceContents, EmbeddedResource, ImageContent, TextContent
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
@@ -48,13 +48,16 @@ def _is_text_type(content_type: str) -> bool:
 
 
 @mcp.tool
-def read_file(path: str) -> ImageContent | AudioContent | TextContent:
+def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | TextContent:
     """Read a file from the workspace.
 
     Images and audio are returned as their MCP content blocks so the session
-    manager can persist them as binary pointers. Text files come back as
-    TextContent with the file content. Unsupported binaries come back as a
-    TextContent placeholder describing the content type and size.
+    manager can persist them as binary pointers and surface the bytes to the
+    model. Text files come back as TextContent with the file content. Other
+    binaries (PDFs, zips, etc.) come back as an EmbeddedResource with
+    base64 blob — the session manager persists them as pointers the agent
+    can forward through tools, even though there's no model modality for
+    viewing them directly.
     """
     target = _safe_resolve(path)
     if not target.exists():
@@ -78,7 +81,14 @@ def read_file(path: str) -> ImageContent | AudioContent | TextContent:
         except (UnicodeDecodeError, ValueError):
             pass
 
-    return TextContent(type="text", text=f"[binary: content_type={content_type}, size={len(raw)} bytes, path={path}]")
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri=f"file:///{path}",
+            mimeType=content_type,
+            blob=base64.b64encode(raw).decode(),
+        ),
+    )
 
 
 @mcp.tool

@@ -273,7 +273,7 @@ class SessionOrchestrator:
             return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}, []
 
         content_blocks = await conn.call_tool(name, arguments, store=self.binaries)
-        logger.info(f"  {name} returned {len(content_blocks)} block(s): {[getattr(b, 'type', type(b).__name__) for b in content_blocks]}")
+        logger.debug(f"  {name} returned {len(content_blocks)} block(s): {[getattr(b, 'type', type(b).__name__) for b in content_blocks]}")
         openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
 
         text_parts = []
