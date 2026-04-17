@@ -1,11 +1,15 @@
 """MCP connection management — tool discovery, execution, and content conversion."""
 
 import asyncio
+import base64
+import copy
 import json
 import logging
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
+from session_manager.binaries import BinaryStore
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +24,69 @@ def mcp_tool_to_openai(tool) -> dict:
     }
 
 
-def mcp_content_to_openai(content_blocks: list) -> list[dict]:
+def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
+    """In-place rewrite of `{type: string, format: byte|binary}` fields to
+    pointer-typed strings. Returns the dotted paths of rewritten fields so
+    the orchestrator can resolve them before dispatch.
+    """
+    paths: list[tuple[str, ...]] = []
+
+    def walk(node: dict, path: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "string" and node.get("format") in ("byte", "binary"):
+            node.pop("format", None)
+            existing = node.get("description", "")
+            node["description"] = (
+                (existing + " " if existing else "")
+                + "Pointer (filename) to a stored binary from a prior tool result. "
+                  "Do not pass raw bytes or base64."
+            ).strip()
+            paths.append(path)
+            return
+        for key, child in (node.get("properties") or {}).items():
+            walk(child, path + (key,))
+        items = node.get("items")
+        if isinstance(items, dict):
+            walk(items, path + ("[]",))
+
+    walk(schema, ())
+    return paths
+
+
+def resolve_pointer_args(args: dict, paths: list[tuple[str, ...]], store: BinaryStore) -> dict:
+    """Walk args and replace pointers at the given paths with base64-encoded bytes."""
+    if not paths:
+        return args
+    args = copy.deepcopy(args)
+
+    def sub(node, path: tuple[str, ...]):
+        if not path:
+            if isinstance(node, str):
+                try:
+                    content, _ = store.load(node)
+                except FileNotFoundError:
+                    return node
+                return base64.b64encode(content).decode()
+            return node
+        head, *rest = path
+        if head == "[]" and isinstance(node, list):
+            return [sub(item, tuple(rest)) for item in node]
+        if isinstance(node, dict) and head in node:
+            node[head] = sub(node[head], tuple(rest))
+        return node
+
+    for path in paths:
+        sub(args, path)
+    return args
+
+
+def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
     """Convert MCP content blocks to OpenAI Responses API message content parts.
 
     TextContent → text part
-    ImageContent → input_image part (data URI)
+    ImageContent → input_image part (data URI) with a `_pointer` sidecar
+                   if a BinaryStore is provided (the bytes are also persisted).
     AudioContent → text placeholder (no OpenAI audio in tool results yet)
     """
     parts = []
@@ -32,10 +94,19 @@ def mcp_content_to_openai(content_blocks: list) -> list[dict]:
         if block.type == "text":
             parts.append({"type": "input_text", "text": block.text})
         elif block.type == "image":
-            parts.append({
+            part: dict = {
                 "type": "input_image",
                 "image_url": f"data:{block.mimeType};base64,{block.data}",
-            })
+            }
+            if store is not None:
+                try:
+                    raw = base64.b64decode(block.data)
+                    pointer = store.save(raw, block.mimeType)
+                    part["_pointer"] = pointer
+                    part["_mime_type"] = block.mimeType
+                except Exception as e:
+                    logger.warning(f"Failed to persist image to BinaryStore: {e}")
+            parts.append(part)
         elif block.type == "audio":
             parts.append({"type": "input_text", "text": f"[audio: {block.mimeType}]"})
         else:
@@ -53,6 +124,7 @@ class MCPConnection:
         self.prefix = prefix
         self.session: ClientSession | None = None
         self.tools: list[dict] = []
+        self.binary_param_paths: dict[str, list[tuple[str, ...]]] = {}
         self.instructions: str = ""
         self._original_names: dict[str, str] = {}
         self._ready = asyncio.Event()
@@ -80,12 +152,17 @@ class MCPConnection:
 
                     result = await session.list_tools()
                     self.tools = []
+                    self.binary_param_paths: dict[str, list[tuple[str, ...]]] = {}
                     for t in result.tools:
                         openai_tool = mcp_tool_to_openai(t)
                         original_name = openai_tool["name"]
                         prefixed_name = f"{self.prefix}-{self.name}-{original_name}"
                         self._original_names[prefixed_name] = original_name
                         openai_tool["name"] = prefixed_name
+                        paths = rewrite_binary_params(openai_tool.get("parameters") or {})
+                        if paths:
+                            self.binary_param_paths[prefixed_name] = paths
+                            logger.info(f"  {prefixed_name}: {len(paths)} binary param(s) → pointer")
                         self.tools.append(openai_tool)
 
                     logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools, instructions={'yes' if self.instructions else 'no'}")
@@ -98,13 +175,22 @@ class MCPConnection:
             self._error = e
             self._ready.set()
 
-    async def call_tool(self, prefixed_name: str, arguments: str) -> list:
-        """Execute a tool call and return raw MCP content blocks."""
+    async def call_tool(
+        self, prefixed_name: str, arguments: str, store: BinaryStore | None = None
+    ) -> list:
+        """Execute a tool call and return raw MCP content blocks.
+
+        If a BinaryStore is provided and this tool has binary params, any
+        pointer strings in arguments are resolved to base64 bytes first.
+        """
         if self.session is None:
             raise RuntimeError(f"MCP server {self.name} not connected")
 
         original_name = self._original_names.get(prefixed_name, prefixed_name)
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        paths = self.binary_param_paths.get(prefixed_name, [])
+        if paths and store is not None:
+            args = resolve_pointer_args(args, paths, store)
         result = await self.session.call_tool(original_name, args)
         return result.content
 

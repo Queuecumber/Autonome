@@ -9,9 +9,28 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from session_manager.binaries import BinaryStore
 from session_manager.event import Event
 from session_manager.mcp import MCPConnection, mcp_content_to_openai
 from session_manager.session import SessionManager
+
+VIEW_BINARY_TOOL_NAME = "aptool-session-view_binary"
+VIEW_BINARY_TOOL = {
+    "type": "function",
+    "name": VIEW_BINARY_TOOL_NAME,
+    "description": (
+        "Load a previously stored binary (by pointer) into your current input. "
+        "For images this re-surfaces the image so you can look at it again. "
+        "Pointers look like '42-photo.jpg' and appear in tool result metadata."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "pointer": {"type": "string", "description": "The binary pointer."},
+        },
+        "required": ["pointer"],
+    },
+}
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +114,13 @@ what's worth keeping long-term.
 
 
 def _prepare_for_history(item: dict) -> dict:
-    """Prepare an output item for session history — strip binary content."""
+    """Prepare an output item for session history — strip binary content.
+
+    input_image blocks are replaced with a text reference. If the block has
+    a `_pointer` field (set by mcp_content_to_openai when a BinaryStore is
+    configured), the reference includes the pointer so the agent can call
+    view_binary(pointer) later to re-surface it.
+    """
     item = dict(item)
     content = item.get("content")
     if not isinstance(content, list):
@@ -103,13 +128,32 @@ def _prepare_for_history(item: dict) -> dict:
     texts = []
     for block in content:
         if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
-            texts.append("[image]")
+            pointer = block.get("_pointer")
+            mime = block.get("_mime_type")
+            if pointer:
+                texts.append(f"[binary pointer={pointer} mime={mime or 'unknown'}]")
+            else:
+                texts.append("[image]")
         elif isinstance(block, dict) and block.get("type") == "text":
             texts.append(block["text"])
         else:
             texts.append(str(block))
     item["content"] = "\n".join(texts) if texts else "(stripped)"
     return item
+
+
+def _strip_pointer_sidecars(item: dict) -> dict:
+    """Drop `_pointer` / `_mime_type` keys before sending to the LLM (OpenAI
+    rejects unknown fields). Does not mutate the input."""
+    content = item.get("content")
+    if not isinstance(content, list):
+        return item
+    cleaned = []
+    for block in content:
+        if isinstance(block, dict) and ("_pointer" in block or "_mime_type" in block):
+            block = {k: v for k, v in block.items() if k not in ("_pointer", "_mime_type")}
+        cleaned.append(block)
+    return {**item, "content": cleaned}
 
 
 def _describe_interrupted(completed_items: list) -> list[dict]:
@@ -164,10 +208,15 @@ class SessionOrchestrator:
         max_tokens = session_config.get("max_history_tokens", 100000)
         self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
 
+        binaries_config = config.get("binaries", {})
+        binary_dir = Path(binaries_config.get("store", "/data/binaries"))
+        retention = int(binaries_config.get("retention_days", 30))
+        self.binaries = BinaryStore(store_dir=binary_dir, retention_days=retention)
+
         self._sessions: dict[str, _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
-        self.openai_tools: list[dict] = []
+        self.openai_tools: list[dict] = [VIEW_BINARY_TOOL]
         self._tool_to_mcp: dict[str, MCPConnection] = {}
 
         self.max_tool_iterations = 20
@@ -216,13 +265,16 @@ class SessionOrchestrator:
           - function_call_output: the output item with text content
           - image_items: user messages with image_url content for the model to see
         """
+        if name == VIEW_BINARY_TOOL_NAME:
+            return self._view_binary(call_id, arguments)
+
         conn = self._tool_to_mcp.get(name)
 
         if conn is None:
             return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}, []
 
-        content_blocks = await conn.call_tool(name, arguments)
-        openai_parts = mcp_content_to_openai(content_blocks)
+        content_blocks = await conn.call_tool(name, arguments, store=self.binaries)
+        openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
 
         text_parts = []
         image_items = []
@@ -230,11 +282,50 @@ class SessionOrchestrator:
             if part.get("type") == "input_text":
                 text_parts.append(part["text"])
             elif part.get("type") == "input_image":
-                text_parts.append("[image attached]")
+                pointer = part.get("_pointer")
+                text_parts.append(
+                    f"[image attached, pointer={pointer}]" if pointer else "[image attached]"
+                )
                 image_items.append({"role": "user", "content": [part]})
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
         return output, image_items
+
+    def _view_binary(self, call_id: str, arguments: str) -> tuple[dict, list[dict]]:
+        """Built-in: resolve a pointer into the current turn's input."""
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+            pointer = args.get("pointer", "")
+            if not pointer:
+                raise ValueError("pointer is required")
+            content, mime = self.binaries.load(pointer)
+        except Exception as e:
+            return (
+                {"type": "function_call_output", "call_id": call_id, "output": f"Error: {e}"},
+                [],
+            )
+
+        if mime.startswith("image/"):
+            import base64 as _b64
+            part = {
+                "type": "input_image",
+                "image_url": f"data:{mime};base64,{_b64.b64encode(content).decode()}",
+                "_pointer": pointer,
+                "_mime_type": mime,
+            }
+            output = {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": f"[loaded image, pointer={pointer}]",
+            }
+            return output, [{"role": "user", "content": [part]}]
+
+        output = {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": f"[binary {pointer} ({mime}, {len(content)} bytes) — non-visual, not loaded]",
+        }
+        return output, []
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
         """Stream an LLM response, collecting completed items.
@@ -438,7 +529,8 @@ class SessionOrchestrator:
                 # in saved history — to avoid breaking Bedrock's adjacency requirement
                 for img in image_items:
                     all_new_messages.append(_prepare_for_history(img))
-                call_kwargs["input"] = input_items + response.output + tool_results + image_items
+                sanitized_images = [_strip_pointer_sidecars(img) for img in image_items]
+                call_kwargs["input"] = input_items + response.output + tool_results + sanitized_images
                 input_items = call_kwargs["input"]
                 continue
 
@@ -458,3 +550,12 @@ class SessionOrchestrator:
     async def close(self) -> None:
         for conn in self.mcp_connections.values():
             await conn.close()
+
+    async def run_binary_gc(self, interval_seconds: int = 3600) -> None:
+        """Periodically prune expired binaries. Runs for the process lifetime."""
+        while True:
+            try:
+                self.binaries.gc()
+            except Exception as e:
+                logger.error(f"Binary GC error: {e}")
+            await asyncio.sleep(interval_seconds)

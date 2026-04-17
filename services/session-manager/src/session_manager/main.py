@@ -62,6 +62,9 @@ async def startup():
 
     app = Starlette(routes=[Route("/event", event_endpoint, methods=["POST"])])
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info"))
+
+    asyncio.create_task(orchestrator.run_binary_gc())
+
     await server.serve()
 
 
