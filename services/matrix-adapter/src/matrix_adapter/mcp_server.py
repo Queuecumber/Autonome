@@ -90,8 +90,15 @@ async def update_profile(display_name: str | None = None, avatar: bytes | None =
     if avatar is not None:
         kind = filetype.guess(avatar)
         content_type = kind.mime if kind else "image/png"
-        resp, _ = await client._client.upload(io.BytesIO(avatar), content_type=content_type, filename="avatar")
-        await client.set_avatar(resp.content_uri)
+        ext = kind.extension if kind else "png"
+        filename = f"avatar.{ext}"
+        logger.info(f"Uploading avatar: {len(avatar)} bytes, content_type={content_type}, filename={filename}")
+        resp, _ = await client._client.upload(io.BytesIO(avatar), content_type=content_type, filename=filename)
+        content_uri = getattr(resp, "content_uri", None)
+        logger.info(f"Upload response type={type(resp).__name__}, content_uri={content_uri!r}")
+        if not content_uri:
+            raise RuntimeError(f"Avatar upload returned no content_uri: {resp}")
+        await client.set_avatar(content_uri)
 
 
 # ── Inbound event forwarding ─────────────────────────────
