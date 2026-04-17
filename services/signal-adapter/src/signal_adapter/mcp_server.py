@@ -15,6 +15,7 @@ import os
 import httpx
 from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
+from pydantic import Base64Bytes
 
 from signal_adapter.model import SignalClient, Message, Reaction
 
@@ -52,7 +53,7 @@ async def send_message(recipient: str, text: str) -> None:
 
 @mcp.tool
 async def send_attachment(
-    recipient: str, data: bytes, caption: str | None = None
+    recipient: str, data: Base64Bytes, caption: str | None = None
 ) -> None:
     """Send a file attachment to a recipient on Signal."""
     await client.send_attachment(recipient, data, caption)
@@ -96,7 +97,7 @@ async def update_profile(
 
 
 @mcp.tool
-async def update_profile_avatar(avatar: bytes) -> None:
+async def update_profile_avatar(avatar: Base64Bytes) -> None:
     """Set the Signal profile avatar to the given image bytes."""
     await client.update_profile(avatar=avatar)
 

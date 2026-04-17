@@ -37,7 +37,7 @@ def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
 
     def rewrite_node(node: dict) -> bool:
         """Rewrite a binary-string node in place. Returns True if matched."""
-        if node.get("type") == "string" and node.get("format") in ("byte", "binary"):
+        if node.get("type") == "string" and node.get("format") in ("byte", "binary", "base64"):
             node.pop("format", None)
             existing = node.get("description", "")
             node["description"] = (

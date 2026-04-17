@@ -10,6 +10,7 @@ import filetype
 import httpx
 from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
+from pydantic import Base64Bytes
 
 from matrix_adapter.model import MatrixClient, Message, Reaction
 
@@ -70,7 +71,7 @@ async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
 
 
 @mcp.tool
-async def send_attachment(room_id: str, data: bytes, filename: str, content_type: str = "application/octet-stream") -> None:
+async def send_attachment(room_id: str, data: Base64Bytes, filename: str, content_type: str = "application/octet-stream") -> None:
     """Send a file attachment to a Matrix room."""
     if content_type.startswith("image/"):
         await client.upload_and_send_image(room_id, data, content_type, filename)
@@ -83,7 +84,7 @@ async def send_attachment(room_id: str, data: bytes, filename: str, content_type
 
 
 @mcp.tool
-async def update_profile(display_name: str | None = None, avatar: bytes | None = None) -> None:
+async def update_profile(display_name: str | None = None, avatar: Base64Bytes | None = None) -> None:
     """Update the Matrix profile. Set display_name and/or avatar (image bytes)."""
     if display_name is not None:
         await client.set_display_name(display_name)
