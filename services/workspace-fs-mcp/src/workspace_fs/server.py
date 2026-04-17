@@ -10,7 +10,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import filetype
 from fastmcp import FastMCP
+from mcp.types import AudioContent, ImageContent
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
@@ -46,23 +48,36 @@ def _is_text_type(content_type: str) -> bool:
 
 
 @mcp.tool
-def read_file(path: str) -> File:
-    """Read a file from the workspace. Returns content_type and data (text or base64 for binary)."""
+def read_file(path: str) -> ImageContent | AudioContent | File:
+    """Read a file from the workspace.
+
+    Images and audio are returned as their MCP content blocks so the session
+    manager can store them as pointers. Text and other files come back as a
+    File dataclass with content_type and data.
+    """
     target = _safe_resolve(path)
     if not target.exists():
         raise FileNotFoundError(f"{path} not found")
     if not target.is_file():
         raise IsADirectoryError(f"{path} is not a file")
 
-    content_type = mimetypes.guess_type(str(target))[0] or "text/plain"
+    raw = target.read_bytes()
+    kind = filetype.guess(raw)
+
+    if kind and kind.mime.startswith("image/"):
+        return ImageContent(type="image", data=base64.b64encode(raw).decode(), mimeType=kind.mime)
+    if kind and kind.mime.startswith("audio/"):
+        return AudioContent(type="audio", data=base64.b64encode(raw).decode(), mimeType=kind.mime)
+
+    content_type = (kind.mime if kind else None) or mimetypes.guess_type(str(target))[0] or "text/plain"
 
     if _is_text_type(content_type):
         try:
-            return File(content_type=content_type, data=target.read_text(), path=path)
+            return File(content_type=content_type, data=raw.decode("utf-8"), path=path)
         except (UnicodeDecodeError, ValueError):
             content_type = "application/octet-stream"
 
-    return File(content_type=content_type, data=base64.b64encode(target.read_bytes()).decode(), path=path)
+    return File(content_type=content_type, data=base64.b64encode(raw).decode(), path=path)
 
 
 @mcp.tool
