@@ -102,8 +102,11 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                 try:
                     raw = base64.b64decode(block.data)
                     pointer = store.save(raw, block.mimeType)
-                    part["_pointer"] = pointer
-                    part["_mime_type"] = block.mimeType
+                    part["_pointer"] = {
+                        "id": pointer,
+                        "content_type": block.mimeType,
+                        "size": len(raw),
+                    }
                 except Exception as e:
                     logger.warning(f"Failed to persist image to BinaryStore: {e}")
             parts.append(part)

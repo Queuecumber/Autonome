@@ -116,10 +116,10 @@ what's worth keeping long-term.
 def _prepare_for_history(item: dict) -> dict:
     """Prepare an output item for session history — strip binary content.
 
-    input_image blocks are replaced with a text reference. If the block has
-    a `_pointer` field (set by mcp_content_to_openai when a BinaryStore is
-    configured), the reference includes the pointer so the agent can call
-    view_binary(pointer) later to re-surface it.
+    input_image blocks are replaced with a JSON pointer reference. If the
+    block has a `_pointer` field (set by mcp_content_to_openai when a
+    BinaryStore is configured), the reference carries the pointer metadata
+    (id, content_type, size) so the agent can view_binary() later.
     """
     item = dict(item)
     content = item.get("content")
@@ -129,9 +129,8 @@ def _prepare_for_history(item: dict) -> dict:
     for block in content:
         if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
             pointer = block.get("_pointer")
-            mime = block.get("_mime_type")
             if pointer:
-                texts.append(f"[binary pointer={pointer} mime={mime or 'unknown'}]")
+                texts.append(json.dumps({"pointer": pointer}, ensure_ascii=False))
             else:
                 texts.append("[image]")
         elif isinstance(block, dict) and block.get("type") == "text":
@@ -143,15 +142,15 @@ def _prepare_for_history(item: dict) -> dict:
 
 
 def _strip_pointer_sidecars(item: dict) -> dict:
-    """Drop `_pointer` / `_mime_type` keys before sending to the LLM (OpenAI
-    rejects unknown fields). Does not mutate the input."""
+    """Drop `_pointer` keys before sending to the LLM (OpenAI rejects
+    unknown fields). Does not mutate the input."""
     content = item.get("content")
     if not isinstance(content, list):
         return item
     cleaned = []
     for block in content:
-        if isinstance(block, dict) and ("_pointer" in block or "_mime_type" in block):
-            block = {k: v for k, v in block.items() if k not in ("_pointer", "_mime_type")}
+        if isinstance(block, dict) and "_pointer" in block:
+            block = {k: v for k, v in block.items() if k != "_pointer"}
         cleaned.append(block)
     return {**item, "content": cleaned}
 
@@ -283,9 +282,10 @@ class SessionOrchestrator:
                 text_parts.append(part["text"])
             elif part.get("type") == "input_image":
                 pointer = part.get("_pointer")
-                text_parts.append(
-                    f"[image attached, pointer={pointer}]" if pointer else "[image attached]"
-                )
+                if pointer:
+                    text_parts.append(json.dumps({"pointer": pointer}, ensure_ascii=False))
+                else:
+                    text_parts.append("[image attached]")
                 image_items.append({"role": "user", "content": [part]})
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
@@ -525,10 +525,11 @@ class SessionOrchestrator:
                     for img in images:
                         image_items.append(img)
 
-                # Images go after all tool results — both in the live input and
-                # in saved history — to avoid breaking Bedrock's adjacency requirement
-                for img in image_items:
-                    all_new_messages.append(_prepare_for_history(img))
+                # Images go after all tool results in the live input to satisfy
+                # Bedrock's adjacency requirement. They are NOT persisted to
+                # history — the pointer is already in the function_call_output
+                # text and the wrapping user-role message is an API-format
+                # artifact (images can't ride inside function_call_output).
                 sanitized_images = [_strip_pointer_sidecars(img) for img in image_items]
                 call_kwargs["input"] = input_items + response.output + tool_results + sanitized_images
                 input_items = call_kwargs["input"]

@@ -69,14 +69,12 @@ async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
 
 
 @mcp.tool
-async def send_attachment(room_id: str, data: str, filename: str, content_type: str = "application/octet-stream") -> None:
-    """Send a file attachment to a Matrix room. Data is base64-encoded."""
-    # TODO: replace base64 data param with binary reference when pointer-based handling lands
-    raw = base64.b64decode(data)
+async def send_attachment(room_id: str, data: bytes, filename: str, content_type: str = "application/octet-stream") -> None:
+    """Send a file attachment to a Matrix room."""
     if content_type.startswith("image/"):
-        await client.upload_and_send_image(room_id, raw, content_type, filename)
+        await client.upload_and_send_image(room_id, data, content_type, filename)
     else:
-        resp, _ = await client._client.upload(raw, content_type=content_type, filename=filename)
+        resp, _ = await client._client.upload(data, content_type=content_type, filename=filename)
         await client._client.room_send(
             room_id, "m.room.message",
             {"msgtype": "m.file", "url": resp.content_uri, "body": filename},
