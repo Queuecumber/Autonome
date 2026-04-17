@@ -27,10 +27,9 @@ class BinaryStore:
         self.store_dir = Path(store_dir)
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self.retention_days = retention_days
-        self._counter = self._scan_max_counter() + 1
 
-    def _scan_max_counter(self) -> int:
-        """Find the highest counter prefix in existing files."""
+    def _next_counter(self) -> int:
+        """Scan the store dir and return max(existing counter prefix) + 1."""
         highest = 0
         for path in self.store_dir.iterdir():
             if not path.is_file():
@@ -38,12 +37,11 @@ class BinaryStore:
             prefix = path.name.split("-", 1)[0].split(".", 1)[0]
             if prefix.isdigit():
                 highest = max(highest, int(prefix))
-        return highest
+        return highest + 1
 
     def save(self, content: bytes, mime_type: str, filename: str | None = None) -> str:
         """Write bytes to disk and return the pointer (the filename)."""
-        counter = self._counter
-        self._counter += 1
+        counter = self._next_counter()
 
         if filename:
             pointer = f"{counter}-{_sanitize(filename)}"
