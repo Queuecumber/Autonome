@@ -22,6 +22,9 @@ class Event:
             "signal:+1234") to avoid collisions.
         source: Where the event came from ("matrix", "signal", "time", etc.).
             Metadata only, not used for routing.
+        event_type: What kind of event this is ("message", "cron", "continuity",
+            etc.). Surfaced to the agent as the "event" field in the developer
+            context message.
         text: The event content. May be plain text or JSON-encoded structured
             content (e.g. reactions).
         energy: "active" cancels in-progress generation and processes immediately.
@@ -31,6 +34,7 @@ class Event:
     """
     session_id: str
     source: str = "unknown"
+    event_type: str = "message"
     text: str = ""
     energy: Energy = "active"
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -46,6 +50,7 @@ class Event:
         return cls(
             session_id=data["session_id"],
             source=data.get("source", "unknown"),
+            event_type=data.get("event_type", "message"),
             text=data.get("text", ""),
             energy=energy,
             metadata=data.get("metadata") or {},

@@ -227,7 +227,7 @@ class SessionOrchestrator:
         text_parts = []
         image_items = []
         for part in openai_parts:
-            if part.get("type") == "text":
+            if part.get("type") == "input_text":
                 text_parts.append(part["text"])
             elif part.get("type") == "input_image":
                 text_parts.append("[image attached]")
@@ -325,8 +325,9 @@ class SessionOrchestrator:
         for event in events:
             text = event.text or "(attachment)"
             context_msg = _developer_event(
-                "message",
+                event.event_type,
                 source=event.source,
+                session_id=event.session_id,
                 time=now,
                 energy=event.energy,
                 **event.metadata,
