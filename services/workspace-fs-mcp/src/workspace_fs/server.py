@@ -12,7 +12,7 @@ from pathlib import Path
 
 import filetype
 from fastmcp import FastMCP
-from mcp.types import AudioContent, ImageContent
+from mcp.types import AudioContent, ImageContent, TextContent
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
@@ -48,12 +48,13 @@ def _is_text_type(content_type: str) -> bool:
 
 
 @mcp.tool
-def read_file(path: str) -> ImageContent | AudioContent | File:
+def read_file(path: str) -> ImageContent | AudioContent | TextContent:
     """Read a file from the workspace.
 
     Images and audio are returned as their MCP content blocks so the session
-    manager can store them as pointers. Text and other files come back as a
-    File dataclass with content_type and data.
+    manager can persist them as binary pointers. Text files come back as
+    TextContent with the file content. Unsupported binaries come back as a
+    TextContent placeholder describing the content type and size.
     """
     target = _safe_resolve(path)
     if not target.exists():
@@ -73,11 +74,11 @@ def read_file(path: str) -> ImageContent | AudioContent | File:
 
     if _is_text_type(content_type):
         try:
-            return File(content_type=content_type, data=raw.decode("utf-8"), path=path)
+            return TextContent(type="text", text=raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            content_type = "application/octet-stream"
+            pass
 
-    return File(content_type=content_type, data=base64.b64encode(raw).decode(), path=path)
+    return TextContent(type="text", text=f"[binary: content_type={content_type}, size={len(raw)} bytes, path={path}]")
 
 
 @mcp.tool
