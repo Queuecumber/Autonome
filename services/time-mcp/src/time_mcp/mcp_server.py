@@ -51,7 +51,8 @@ class Schedule(BaseModel):
 
 def _save() -> None:
     _store_path.parent.mkdir(parents=True, exist_ok=True)
-    data = [s.model_dump(exclude={"next_fire"}) for s in _schedules.values() if s.id != "continuity"]
+    fields = set(Schedule.model_fields)
+    data = [s.model_dump(include=fields) for s in _schedules.values() if s.id != "continuity"]
     _store_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
