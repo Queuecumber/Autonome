@@ -52,7 +52,7 @@ class Schedule(BaseModel):
 def _save() -> None:
     _store_path.parent.mkdir(parents=True, exist_ok=True)
     fields = set(Schedule.model_fields)
-    data = [s.model_dump(include=fields) for s in _schedules.values() if s.id != "continuity"]
+    data = [s.model_dump(include=fields) for s in _schedules.values()]
     _store_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
@@ -70,7 +70,7 @@ def _add_job(sched: Schedule) -> None:
     _scheduler.add_job(
         _fire,
         CronTrigger.from_crontab(sched.cron),
-        args=[sched.id],
+        args=[sched],
         id=sched.id,
         replace_existing=True,
     )
@@ -102,6 +102,8 @@ def schedule_cron(
     """
     if energy not in ("active", "passive"):
         raise ValueError(f"energy must be 'active' or 'passive', got {energy!r}")
+    if schedule_id == "continuity":
+        raise ValueError("'continuity' is a reserved schedule id")
     if schedule_id in _schedules:
         raise ValueError(f"Schedule id {schedule_id!r} already exists — cancel it first or pick a different name")
     try:
@@ -126,9 +128,7 @@ def list_schedules() -> list[Schedule]:
 
 @mcp.tool
 def cancel_schedule(schedule_id: str) -> None:
-    """Cancel a schedule by id. The continuity schedule cannot be cancelled."""
-    if schedule_id == "continuity":
-        raise ValueError("Continuity schedule cannot be cancelled")
+    """Cancel a schedule by id."""
     if schedule_id not in _schedules:
         raise ValueError(f"No schedule with id {schedule_id}")
     _scheduler.remove_job(schedule_id)
@@ -138,12 +138,8 @@ def cancel_schedule(schedule_id: str) -> None:
 
 # ── Firing ───────────────────────────────────────────────
 
-async def _fire(schedule_id: str) -> None:
+async def _fire(sched: Schedule) -> None:
     """POST a scheduled event to the session manager."""
-    sched = _schedules.get(schedule_id)
-    if sched is None:
-        logger.warning(f"Schedule {schedule_id} fired but is no longer registered")
-        return
     event = {
         "source": "time",
         "session_id": sched.session_id,
@@ -187,14 +183,12 @@ async def main():
     _load()
 
     if continuity_session:
-        cont = Schedule(
+        _add_job(Schedule(
             id="continuity",
             cron=continuity_cron,
             message=continuity_message,
             session_id=continuity_session,
-        )
-        _schedules["continuity"] = cont
-        _add_job(cont)
+        ))
         logger.info(f"Continuity schedule registered: {continuity_cron} → {continuity_session}")
     else:
         logger.warning("CONTINUITY_SESSION not set — skipping continuity schedule")
