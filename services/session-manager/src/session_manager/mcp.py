@@ -35,9 +35,9 @@ def _rewrite_to_pointer(node: dict) -> None:
     node.pop("format", None)
     existing = node.get("description", "")
     node["description"] = (
-        (existing + " " if existing else "")
-        + f"Pointer to a stored binary (e.g. '{POINTER_PREFIX}5-photo.jpg'). "
-          "Do not pass raw bytes or base64."
+        f"{existing} Pointer to a stored binary "
+        f"(e.g. '{POINTER_PREFIX}5-photo.jpg'). "
+        f"Do not pass raw bytes or base64."
     ).strip()
 
 
@@ -153,12 +153,21 @@ def _pointer_text(pointer: dict) -> dict:
     return {"type": "input_text", "text": json.dumps({"pointer": pointer}, ensure_ascii=False)}
 
 
+def _describe_binary(data_b64: str, mime_type: str, store: BinaryStore | None) -> dict:
+    """Persist bytes and return an input_text pointer part, or a textual
+    placeholder if no store is available."""
+    pointer = _save_and_describe(store, data_b64, mime_type) if store else None
+    if pointer:
+        return _pointer_text(pointer)
+    return {"type": "input_text", "text": f"[binary: {mime_type}]"}
+
+
 def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
     """Convert MCP content blocks to OpenAI Responses API message content parts.
 
-    Every binary gets persisted to the BinaryStore and produces a pointer-JSON
-    input_text part. Images additionally produce an input_image part so the
-    model can see the bytes.
+    Every binary gets persisted to the BinaryStore and produces an input_text
+    part carrying the pointer JSON. Images additionally produce an input_image
+    part so the model can see the bytes.
     """
     parts = []
     for block in content_blocks:
@@ -166,20 +175,14 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             parts.append({"type": "input_text", "text": block.text})
 
         elif block.type == "image":
-            pointer = _save_and_describe(store, block.data, block.mimeType) if store else None
-            if pointer:
-                parts.append(_pointer_text(pointer))
+            parts.append(_describe_binary(block.data, block.mimeType, store))
             parts.append({
                 "type": "input_image",
                 "image_url": f"data:{block.mimeType};base64,{block.data}",
             })
 
         elif block.type == "audio":
-            pointer = _save_and_describe(store, block.data, block.mimeType) if store else None
-            if pointer:
-                parts.append(_pointer_text(pointer))
-            else:
-                parts.append({"type": "input_text", "text": f"[audio: {block.mimeType}]"})
+            parts.append(_describe_binary(block.data, block.mimeType, store))
 
         elif block.type == "resource":
             resource = getattr(block, "resource", None)
@@ -187,11 +190,7 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
             if blob is not None:
-                pointer = _save_and_describe(store, blob, mime) if store else None
-                if pointer:
-                    parts.append(_pointer_text(pointer))
-                else:
-                    parts.append({"type": "input_text", "text": f"[resource: {mime}]"})
+                parts.append(_describe_binary(blob, mime, store))
             elif text is not None:
                 parts.append({"type": "input_text", "text": text})
             else:

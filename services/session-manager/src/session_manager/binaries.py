@@ -14,7 +14,7 @@ import filetype
 
 logger = logging.getLogger(__name__)
 
-SECONDS_PER_DAY = 86400
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
 def _sanitize(name: str) -> str:
