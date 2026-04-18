@@ -284,6 +284,314 @@ def test_items_as_list_does_not_crash():
     rewrite_binary_params(schema)
 
 
+# ── Complex / adversarial schemas ───────────────────────────────────────
+
+def test_anyof_with_object_variant_containing_binary():
+    """A oneOf variant that's an object with a nested binary field.
+    We recurse into anyOf/oneOf/allOf variants only to rewrite direct
+    binary-string leaves. Objects inside variants are NOT traversed — gap."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "payload": {
+                "oneOf": [
+                    {"type": "null"},
+                    {
+                        "type": "object",
+                        "properties": {"data": {"type": "string", "format": "binary"}},
+                    },
+                ],
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    # Currently: not found (gap). Document the behavior.
+    assert paths == []
+
+
+def test_multiple_binaries_at_varying_depths():
+    schema = {
+        "type": "object",
+        "properties": {
+            "top": {"type": "string", "format": "binary"},
+            "container": {
+                "type": "object",
+                "properties": {
+                    "mid": {"type": "string", "format": "base64"},
+                    "deep": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "leaf": {"type": "string", "format": "byte"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    assert set(paths) == {
+        ("top",),
+        ("container", "mid"),
+        ("container", "deep", "[]", "leaf"),
+    }
+
+
+def test_deeply_nested_arrays_of_objects_of_arrays():
+    """list[dict[str, list[bytes]]] shape."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "outer": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "inner": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"},
+                        },
+                    },
+                },
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    assert paths == [("outer", "[]", "inner", "[]")]
+
+
+def test_optional_object_with_binary_inside():
+    """Optional[BaseModel] with a binary field in the model — inline form."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "profile": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "avatar": {"type": "string", "format": "binary"},
+                        },
+                    },
+                    {"type": "null"},
+                ],
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    # Same gap as the oneOf-with-object case — we don't recurse into
+    # non-binary object variants inside anyOf.
+    assert paths == []
+
+
+@pytest.mark.xfail(reason="$ref not resolved; jsonref inlining needed")
+def test_ref_at_root_property():
+    schema = {
+        "$defs": {
+            "Blob": {
+                "type": "object",
+                "properties": {"c": {"type": "string", "format": "binary"}},
+            },
+        },
+        "type": "object",
+        "properties": {"input": {"$ref": "#/$defs/Blob"}},
+    }
+    paths = rewrite_binary_params(schema)
+    assert paths == [("input", "c")]
+
+
+@pytest.mark.xfail(reason="$ref not resolved; nested ref chain")
+def test_chain_of_refs():
+    """Wrapper → DataHolder → ActualDataBlob.c (all via $ref)."""
+    schema = {
+        "$defs": {
+            "ActualDataBlob": {
+                "type": "object",
+                "properties": {"c": {"type": "string", "format": "binary"}},
+            },
+            "DataHolder": {
+                "type": "object",
+                "properties": {"b": {"$ref": "#/$defs/ActualDataBlob"}},
+            },
+            "Wrapper": {
+                "type": "object",
+                "properties": {"a": {"$ref": "#/$defs/DataHolder"}},
+            },
+        },
+        "type": "object",
+        "properties": {"input": {"$ref": "#/$defs/Wrapper"}},
+    }
+    paths = rewrite_binary_params(schema)
+    assert paths == [("input", "a", "b", "c")]
+
+
+@pytest.mark.xfail(reason="$ref not resolved; Optional[Model] with binary field")
+def test_optional_ref_with_binary_inside():
+    """Optional[Model] → {anyOf: [{$ref: Model}, null]}"""
+    schema = {
+        "$defs": {
+            "Avatar": {
+                "type": "object",
+                "properties": {"data": {"type": "string", "format": "binary"}},
+            },
+        },
+        "type": "object",
+        "properties": {
+            "profile": {
+                "anyOf": [
+                    {"$ref": "#/$defs/Avatar"},
+                    {"type": "null"},
+                ],
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    assert paths == [("profile", "data")]
+
+
+@pytest.mark.xfail(reason="$ref not resolved; list[Model] via $ref")
+def test_list_of_refs_with_binary_inside():
+    schema = {
+        "$defs": {
+            "File": {
+                "type": "object",
+                "properties": {"bytes": {"type": "string", "format": "base64"}},
+            },
+        },
+        "type": "object",
+        "properties": {
+            "files": {"type": "array", "items": {"$ref": "#/$defs/File"}},
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    assert paths == [("files", "[]", "bytes")]
+
+
+@pytest.mark.xfail(reason="$ref not resolved; circular schema never terminates or fails")
+def test_self_referential_schema():
+    """A TreeNode model with optional children referencing itself. A self-ref
+    means any ref-following walker must handle cycles."""
+    schema = {
+        "$defs": {
+            "TreeNode": {
+                "type": "object",
+                "properties": {
+                    "blob": {"type": "string", "format": "binary"},
+                    "children": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/TreeNode"},
+                    },
+                },
+            },
+        },
+        "type": "object",
+        "properties": {"root": {"$ref": "#/$defs/TreeNode"}},
+    }
+    paths = rewrite_binary_params(schema)
+    assert ("root", "blob") in paths
+
+
+@pytest.mark.xfail(reason="additionalProperties not traversed (dict[str, bytes])")
+def test_dict_of_binary_via_additional_properties():
+    """dict[str, bytes] → {type: object, additionalProperties: binary-string}."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "files": {
+                "type": "object",
+                "additionalProperties": {"type": "string", "format": "binary"},
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    # Arbitrary-key maps need their own traversal symbol — no support yet.
+    assert paths == [("files", "{}")]
+
+
+@pytest.mark.xfail(reason="tuple-style items (list of schemas) not traversed")
+def test_tuple_items_with_binary():
+    """JSON Schema tuple arrays — items is a list of per-position schemas."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "tuple": {
+                "type": "array",
+                "items": [
+                    {"type": "string"},
+                    {"type": "string", "format": "binary"},
+                ],
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    assert paths == [("tuple", "[1]")]
+
+
+@pytest.mark.xfail(reason="allOf merge with $ref — merge-then-search not implemented")
+def test_allof_merged_with_ref():
+    """allOf combining a $ref and a local extension — pydantic uses this
+    for Annotated[Model, ...] patterns."""
+    schema = {
+        "$defs": {
+            "Blob": {
+                "type": "object",
+                "properties": {"data": {"type": "string", "format": "binary"}},
+            },
+        },
+        "type": "object",
+        "properties": {
+            "x": {
+                "allOf": [
+                    {"$ref": "#/$defs/Blob"},
+                    {"description": "extra"},
+                ],
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    assert paths == [("x", "data")]
+
+
+@pytest.mark.xfail(reason="discriminated unions not handled")
+def test_discriminated_union_with_binary():
+    """Pydantic discriminated unions: tag field picks one of N model variants.
+    One variant contains binary, another doesn't."""
+    schema = {
+        "$defs": {
+            "TextMessage": {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "text"},
+                    "text": {"type": "string"},
+                },
+            },
+            "FileMessage": {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "file"},
+                    "data": {"type": "string", "format": "binary"},
+                },
+            },
+        },
+        "type": "object",
+        "properties": {
+            "message": {
+                "oneOf": [
+                    {"$ref": "#/$defs/TextMessage"},
+                    {"$ref": "#/$defs/FileMessage"},
+                ],
+                "discriminator": {"propertyName": "kind"},
+            },
+        },
+    }
+    paths = rewrite_binary_params(schema)
+    # FileMessage variant contributes a binary path; discriminator might mean
+    # only some args need resolution. Documenting expected-ideal here.
+    assert ("message", "data") in paths
+
+
 # ── resolve_pointer_args ─────────────────────────────────────────────────
 
 @pytest.fixture
