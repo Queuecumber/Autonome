@@ -18,8 +18,9 @@ def workspace_server(tmp_workspace, monkeypatch):
 
 def test_read_file(workspace_server, tmp_workspace):
     result = workspace_server.read_file("SOUL.md")
-    assert "I am a test agent" in result.data
-    assert result.content_type.startswith("text/")
+    # Text files now come back as a TextContent block, not a File dataclass.
+    assert "I am a test agent" in result.text
+    assert result.type == "text"
 
 
 def test_read_file_not_found(workspace_server):

@@ -583,12 +583,14 @@ def test_resolve_non_string_passes_through(store):
 
 def test_resolve_ignores_keys_not_in_names(store):
     """Other keys — even `pointer://` ones — are left alone."""
+    pointer = _save_hello(store)
     out = resolve_pointer_args(
-        {"description": _ptr("hello.txt"), "data": _ptr("hello.txt")},
+        {"description": pointer, "data": pointer},
         {"data"},
         store,
     )
-    assert out["description"] == _ptr("hello.txt")  # unchanged
+    assert out["description"] == pointer  # unchanged
+    assert out["data"] == HELLO_B64
 
 
 def test_resolve_list_under_known_key(store):

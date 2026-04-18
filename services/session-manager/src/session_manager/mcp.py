@@ -6,6 +6,7 @@ import json
 import logging
 
 import jsonref
+from jsonpath_ng import Fields
 from jsonpath_ng import parse as jsonpath_parse
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -40,15 +41,17 @@ def _rewrite_to_pointer(node: dict) -> None:
     ).strip()
 
 
-def _extract_property_name(full_path_str: str) -> str | None:
-    """Given a jsonpath like 'properties.avatar.anyOf.[0]', return the
-    nearest enclosing property name ('avatar'). Walks backward looking for
-    the last segment immediately preceded by 'properties'."""
-    parts = [p for p in full_path_str.split(".") if p and p != "$"]
-    for i in range(len(parts) - 1, 0, -1):
-        p = parts[i]
-        if parts[i - 1] == "properties" and not p.startswith("[") and p != "properties":
-            return p
+def _enclosing_property_name(match) -> str | None:
+    """Walk up the match's context chain and return the field name whose
+    parent is a `properties` dict — i.e., the user-visible argument name.
+    Returns None if no such ancestor exists."""
+    cur = match
+    while cur is not None and cur.context is not None:
+        parent_path = cur.context.path
+        if isinstance(parent_path, Fields) and parent_path.fields == ("properties",):
+            if isinstance(cur.path, Fields) and len(cur.path.fields) == 1:
+                return cur.path.fields[0]
+        cur = cur.context
     return None
 
 
@@ -57,17 +60,24 @@ def rewrite_binary_params(schema: dict) -> set[str]:
     pointer-typed string, and return the set of argument property names
     that may carry a pointer.
 
+    Matches on the `format` field itself (jsonpath-ng's $..* descends into
+    arrays but doesn't yield dict list-elements as top-level matches, so we
+    pivot off the leaf scalar and look up to the containing dict).
+
     Expects refs already resolved and `$defs` removed — see inline_refs().
     """
     names: set[str] = set()
     for match in _ALL_NODES.find(schema):
-        node = match.value
-        if not (isinstance(node, dict)
-                and node.get("type") == "string"
-                and node.get("format") in BINARY_FORMATS):
+        # Leaf `format: <binary-variant>` match?
+        if not isinstance(match.value, str) or match.value not in BINARY_FORMATS:
             continue
-        _rewrite_to_pointer(node)
-        name = _extract_property_name(str(match.full_path))
+        if not (isinstance(match.path, Fields) and match.path.fields == ("format",)):
+            continue
+        parent_dict = match.context.value
+        if not isinstance(parent_dict, dict) or parent_dict.get("type") != "string":
+            continue
+        _rewrite_to_pointer(parent_dict)
+        name = _enclosing_property_name(match.context)
         if name:
             names.add(name)
     return names
