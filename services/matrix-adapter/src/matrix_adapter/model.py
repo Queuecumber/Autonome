@@ -385,19 +385,31 @@ class MatrixClient:
             data = decrypt_attachment(data, enc["key"], enc["hash"], enc["iv"])
         return data, content_type
 
-    async def upload_and_send_image(self, room_id: str, data: bytes, content_type: str, filename: str) -> None:
+    async def _upload(self, data: bytes, content_type: str, filename: str) -> str:
+        """Upload bytes and return the mxc:// URL."""
         resp, _ = await self._client.upload(io.BytesIO(data), content_type=content_type, filename=filename)
+        content_uri = getattr(resp, "content_uri", None)
+        if not content_uri:
+            raise RuntimeError(f"Upload failed: {resp}")
+        return content_uri
+
+    async def upload_and_send_attachment(self, room_id: str, data: bytes, content_type: str, filename: str) -> None:
+        """Upload bytes and send to a room as either an image or a file."""
+        content_uri = await self._upload(data, content_type, filename)
+        msgtype = "m.image" if content_type.startswith("image/") else "m.file"
         await self._client.room_send(
             room_id, "m.room.message",
-            {"msgtype": "m.image", "url": resp.content_uri, "body": filename,
+            {"msgtype": msgtype, "url": content_uri, "body": filename,
              "info": {"mimetype": content_type, "size": len(data)}},
         )
 
     async def set_display_name(self, name: str) -> None:
         await self._client.set_displayname(name)
 
-    async def set_avatar(self, mxc_url: str) -> None:
-        await self._client.set_avatar(mxc_url)
+    async def upload_avatar(self, data: bytes, content_type: str, filename: str) -> None:
+        """Upload bytes and set as the profile avatar."""
+        content_uri = await self._upload(data, content_type, filename)
+        await self._client.set_avatar(content_uri)
 
     async def close(self) -> None:
         await self._client.close()

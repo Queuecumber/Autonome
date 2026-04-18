@@ -24,44 +24,50 @@ def mcp_tool_to_openai(tool) -> dict:
     }
 
 
-def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
-    """In-place rewrite of `{type: string, format: byte|binary}` fields to
-    pointer-typed strings. Returns the paths of rewritten fields so the
-    orchestrator can resolve them before dispatch.
+_BINARY_FORMATS = ("byte", "binary", "base64")
 
-    Handles nested anyOf/oneOf/allOf (e.g. Optional[bytes] → {anyOf:[
-    {type:string, format:binary}, {type:null}]}). Each matching variant
-    gets rewritten in place and the outer path is recorded once.
+
+def _is_binary_string(node: dict) -> bool:
+    return node.get("type") == "string" and node.get("format") in _BINARY_FORMATS
+
+
+def _rewrite_to_pointer(node: dict) -> None:
+    """Rewrite a binary-string schema node in place as a pointer-typed string."""
+    node.pop("format", None)
+    existing = node.get("description", "")
+    node["description"] = (
+        (existing + " " if existing else "")
+        + "Pointer to a stored binary. Do not pass raw bytes or base64."
+    ).strip()
+
+
+def _rewrite_binary_leaf(node: dict) -> bool:
+    """Rewrite either a direct binary-string node or any anyOf/oneOf/allOf
+    variant that is binary-string. Returns True if a rewrite occurred."""
+    if _is_binary_string(node):
+        _rewrite_to_pointer(node)
+        return True
+    rewrote = False
+    for combinator in ("anyOf", "oneOf", "allOf"):
+        for variant in node.get(combinator) or []:
+            if isinstance(variant, dict) and _is_binary_string(variant):
+                _rewrite_to_pointer(variant)
+                rewrote = True
+    return rewrote
+
+
+def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
+    """Find binary-string params and rewrite each to a pointer type.
+
+    Returns the paths (for passing to resolve_pointer_args) so the orchestrator
+    knows exactly which argument slots need pointer→bytes resolution.
     """
     paths: list[tuple[str, ...]] = []
 
-    def rewrite_node(node: dict) -> bool:
-        """Rewrite a binary-string node in place. Returns True if matched."""
-        if node.get("type") == "string" and node.get("format") in ("byte", "binary", "base64"):
-            node.pop("format", None)
-            existing = node.get("description", "")
-            node["description"] = (
-                (existing + " " if existing else "")
-                + "Pointer (filename) to a stored binary from a prior tool result. "
-                  "Do not pass raw bytes or base64."
-            ).strip()
-            return True
-        return False
-
-    def walk(node: dict, path: tuple[str, ...]) -> None:
+    def walk(node, path):
         if not isinstance(node, dict):
             return
-        if rewrite_node(node):
-            paths.append(path)
-            return
-        matched_here = False
-        for combinator in ("anyOf", "oneOf", "allOf"):
-            variants = node.get(combinator)
-            if isinstance(variants, list):
-                for variant in variants:
-                    if isinstance(variant, dict) and rewrite_node(variant):
-                        matched_here = True
-        if matched_here:
+        if _rewrite_binary_leaf(node):
             paths.append(path)
             return
         for key, child in (node.get("properties") or {}).items():
@@ -75,7 +81,12 @@ def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
 
 
 def resolve_pointer_args(args: dict, paths: list[tuple[str, ...]], store: BinaryStore) -> dict:
-    """Walk args and replace pointers at the given paths with base64-encoded bytes."""
+    """At each recorded path, replace the pointer string with base64 bytes.
+
+    Only paths that were rewritten by rewrite_binary_params are visited, so
+    there's no risk of touching unrelated string fields. If the value at a
+    path isn't a valid pointer, store.load raises and we leave it unchanged.
+    """
     if not paths:
         return args
     args = copy.deepcopy(args)
@@ -112,38 +123,38 @@ def _save_and_describe(store: BinaryStore, data_b64: str, mime_type: str) -> dic
         return None
 
 
+def _pointer_text(pointer: dict) -> dict:
+    return {"type": "input_text", "text": json.dumps({"pointer": pointer}, ensure_ascii=False)}
+
+
 def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
     """Convert MCP content blocks to OpenAI Responses API message content parts.
 
-    TextContent                → input_text
-    ImageContent               → input_image with a `_pointer` sidecar (model-consumable)
-    AudioContent               → input_text carrying the pointer JSON
-    EmbeddedResource (Blob)    → input_text carrying the pointer JSON
-    EmbeddedResource (Text)    → input_text with the resource's text content
-    Other                      → input_text with a string fallback
-
-    Non-text content is persisted to the BinaryStore when one is provided.
+    Every binary gets persisted to the BinaryStore and produces a pointer-JSON
+    input_text part. Images additionally produce an input_image part so the
+    model can see the bytes.
     """
     parts = []
     for block in content_blocks:
         if block.type == "text":
             parts.append({"type": "input_text", "text": block.text})
+
         elif block.type == "image":
-            part: dict = {
+            pointer = _save_and_describe(store, block.data, block.mimeType) if store else None
+            if pointer:
+                parts.append(_pointer_text(pointer))
+            parts.append({
                 "type": "input_image",
                 "image_url": f"data:{block.mimeType};base64,{block.data}",
-            }
-            if store is not None:
-                pointer = _save_and_describe(store, block.data, block.mimeType)
-                if pointer:
-                    part["_pointer"] = pointer
-            parts.append(part)
+            })
+
         elif block.type == "audio":
             pointer = _save_and_describe(store, block.data, block.mimeType) if store else None
             if pointer:
-                parts.append({"type": "input_text", "text": json.dumps({"pointer": pointer}, ensure_ascii=False)})
+                parts.append(_pointer_text(pointer))
             else:
                 parts.append({"type": "input_text", "text": f"[audio: {block.mimeType}]"})
+
         elif block.type == "resource":
             resource = getattr(block, "resource", None)
             blob = getattr(resource, "blob", None)
@@ -152,13 +163,14 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             if blob is not None:
                 pointer = _save_and_describe(store, blob, mime) if store else None
                 if pointer:
-                    parts.append({"type": "input_text", "text": json.dumps({"pointer": pointer}, ensure_ascii=False)})
+                    parts.append(_pointer_text(pointer))
                 else:
                     parts.append({"type": "input_text", "text": f"[resource: {mime}]"})
             elif text is not None:
                 parts.append({"type": "input_text", "text": text})
             else:
                 parts.append({"type": "input_text", "text": str(block)})
+
         else:
             parts.append({"type": "input_text", "text": str(block)})
     return parts

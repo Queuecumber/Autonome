@@ -1,6 +1,7 @@
 """Session manager: central orchestrator that receives events and drives LLM calls."""
 
 import asyncio
+import base64
 import json
 import logging
 from datetime import datetime
@@ -114,13 +115,8 @@ what's worth keeping long-term.
 
 
 def _prepare_for_history(item: dict) -> dict:
-    """Prepare an output item for session history — strip binary content.
-
-    input_image blocks are replaced with a JSON pointer reference. If the
-    block has a `_pointer` field (set by mcp_content_to_openai when a
-    BinaryStore is configured), the reference carries the pointer metadata
-    (id, content_type, size) so the agent can view_binary() later.
-    """
+    """Flatten content parts to a single string for history. Images map to
+    '[image]'; pointer JSON is already in the input_text parts."""
     item = dict(item)
     content = item.get("content")
     if not isinstance(content, list):
@@ -128,31 +124,15 @@ def _prepare_for_history(item: dict) -> dict:
     texts = []
     for block in content:
         if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
-            pointer = block.get("_pointer")
-            if pointer:
-                texts.append(json.dumps({"pointer": pointer}, ensure_ascii=False))
-            else:
-                texts.append("[image]")
+            texts.append("[image]")
+        elif isinstance(block, dict) and block.get("type") == "input_text":
+            texts.append(block["text"])
         elif isinstance(block, dict) and block.get("type") == "text":
             texts.append(block["text"])
         else:
             texts.append(str(block))
     item["content"] = "\n".join(texts) if texts else "(stripped)"
     return item
-
-
-def _strip_pointer_sidecars(item: dict) -> dict:
-    """Drop `_pointer` keys before sending to the LLM (OpenAI rejects
-    unknown fields). Does not mutate the input."""
-    content = item.get("content")
-    if not isinstance(content, list):
-        return item
-    cleaned = []
-    for block in content:
-        if isinstance(block, dict) and "_pointer" in block:
-            block = {k: v for k, v in block.items() if k != "_pointer"}
-        cleaned.append(block)
-    return {**item, "content": cleaned}
 
 
 def _describe_interrupted(completed_items: list) -> list[dict]:
@@ -276,18 +256,14 @@ class SessionOrchestrator:
         logger.debug(f"  {name} returned {len(content_blocks)} block(s): {[getattr(b, 'type', type(b).__name__) for b in content_blocks]}")
         openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
 
-        text_parts = []
-        image_items = []
-        for part in openai_parts:
-            if part.get("type") == "input_text":
-                text_parts.append(part["text"])
-            elif part.get("type") == "input_image":
-                pointer = part.get("_pointer")
-                if pointer:
-                    text_parts.append(json.dumps({"pointer": pointer}, ensure_ascii=False))
-                else:
-                    text_parts.append("[image attached]")
-                image_items.append({"role": "user", "content": [part]})
+        # input_text → function_call_output.output (a single string)
+        # input_image → separate user-role message (images can't ride inside
+        # function_call_output.output, which is string-only)
+        text_parts = [p["text"] for p in openai_parts if p.get("type") == "input_text"]
+        image_items = [
+            {"role": "user", "content": [p]}
+            for p in openai_parts if p.get("type") == "input_image"
+        ]
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
         return output, image_items
@@ -307,12 +283,9 @@ class SessionOrchestrator:
             )
 
         if mime.startswith("image/"):
-            import base64 as _b64
             part = {
                 "type": "input_image",
-                "image_url": f"data:{mime};base64,{_b64.b64encode(content).decode()}",
-                "_pointer": pointer,
-                "_mime_type": mime,
+                "image_url": f"data:{mime};base64,{base64.b64encode(content).decode()}",
             }
             output = {
                 "type": "function_call_output",
@@ -526,13 +499,9 @@ class SessionOrchestrator:
                     for img in images:
                         image_items.append(img)
 
-                # Images go after all tool results in the live input to satisfy
-                # Bedrock's adjacency requirement. They are NOT persisted to
-                # history — the pointer is already in the function_call_output
-                # text and the wrapping user-role message is an API-format
-                # artifact (images can't ride inside function_call_output).
-                sanitized_images = [_strip_pointer_sidecars(img) for img in image_items]
-                call_kwargs["input"] = input_items + response.output + tool_results + sanitized_images
+                # Images go after tool results (Bedrock adjacency) and aren't
+                # persisted — pointer lives in the function_call_output.
+                call_kwargs["input"] = input_items + response.output + tool_results + image_items
                 input_items = call_kwargs["input"]
                 continue
 

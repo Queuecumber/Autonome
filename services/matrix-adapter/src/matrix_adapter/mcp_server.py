@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import io
 import logging
 import os
 
@@ -73,14 +72,7 @@ async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
 @mcp.tool
 async def send_attachment(room_id: str, data: Base64Bytes, filename: str, content_type: str = "application/octet-stream") -> None:
     """Send a file attachment to a Matrix room."""
-    if content_type.startswith("image/"):
-        await client.upload_and_send_image(room_id, data, content_type, filename)
-    else:
-        resp, _ = await client._client.upload(io.BytesIO(data), content_type=content_type, filename=filename)
-        await client._client.room_send(
-            room_id, "m.room.message",
-            {"msgtype": "m.file", "url": resp.content_uri, "body": filename},
-        )
+    await client.upload_and_send_attachment(room_id, data, content_type, filename)
 
 
 @mcp.tool
@@ -90,16 +82,9 @@ async def update_profile(display_name: str | None = None, avatar: Base64Bytes | 
         await client.set_display_name(display_name)
     if avatar is not None:
         kind = filetype.guess(avatar)
-        content_type = kind.mime if kind else "image/png"
-        ext = kind.extension if kind else "png"
-        filename = f"avatar.{ext}"
-        logger.info(f"Uploading avatar: {len(avatar)} bytes, content_type={content_type}, filename={filename}")
-        resp, _ = await client._client.upload(io.BytesIO(avatar), content_type=content_type, filename=filename)
-        content_uri = getattr(resp, "content_uri", None)
-        logger.info(f"Upload response type={type(resp).__name__}, content_uri={content_uri!r}")
-        if not content_uri:
-            raise RuntimeError(f"Avatar upload returned no content_uri: {resp}")
-        await client.set_avatar(content_uri)
+        if not kind:
+            raise ValueError("Could not identify avatar image type")
+        await client.upload_avatar(avatar, kind.mime, f"avatar.{kind.extension}")
 
 
 # ── Inbound event forwarding ─────────────────────────────
