@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 
 POINTER_PREFIX = "pointer://"
 BINARY_FORMATS = {"binary", "byte", "base64"}
-_ALL_NODES = jsonpath_parse("$..*")
+
+# Find every `format` field anywhere in the schema. We filter in Python
+# for the binary-specific formats + string-type parent since jsonpath-ng's
+# filter dialect can't express `@.format in [...]` directly.
+_FORMAT_FIELDS = jsonpath_parse("$..format")
 
 
 def mcp_tool_to_openai(tool) -> dict:
@@ -42,7 +46,7 @@ def _rewrite_to_pointer(node: dict) -> None:
 
 
 def _enclosing_property_name(match) -> str | None:
-    """Walk up the match's context chain and return the field name whose
+    """Walk up a match's context chain and return the field name whose
     parent is a `properties` dict — i.e., the user-visible argument name.
     Returns None if no such ancestor exists."""
     cur = match
@@ -60,24 +64,17 @@ def rewrite_binary_params(schema: dict) -> set[str]:
     pointer-typed string, and return the set of argument property names
     that may carry a pointer.
 
-    Matches on the `format` field itself (jsonpath-ng's $..* descends into
-    arrays but doesn't yield dict list-elements as top-level matches, so we
-    pivot off the leaf scalar and look up to the containing dict).
-
     Expects refs already resolved and `$defs` removed — see inline_refs().
     """
     names: set[str] = set()
-    for match in _ALL_NODES.find(schema):
-        # Leaf `format: <binary-variant>` match?
-        if not isinstance(match.value, str) or match.value not in BINARY_FORMATS:
+    for match in _FORMAT_FIELDS.find(schema):
+        if match.value not in BINARY_FORMATS:
             continue
-        if not (isinstance(match.path, Fields) and match.path.fields == ("format",)):
+        parent = match.context
+        if not isinstance(parent.value, dict) or parent.value.get("type") != "string":
             continue
-        parent_dict = match.context.value
-        if not isinstance(parent_dict, dict) or parent_dict.get("type") != "string":
-            continue
-        _rewrite_to_pointer(parent_dict)
-        name = _enclosing_property_name(match.context)
+        _rewrite_to_pointer(parent.value)
+        name = _enclosing_property_name(parent)
         if name:
             names.add(name)
     return names
