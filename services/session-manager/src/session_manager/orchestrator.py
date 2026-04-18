@@ -12,7 +12,7 @@ from openai import AsyncOpenAI
 
 from session_manager.binaries import BinaryStore
 from session_manager.event import Event
-from session_manager.mcp import MCPConnection, mcp_content_to_openai
+from session_manager.mcp import POINTER_PREFIX, MCPConnection, mcp_content_to_openai
 from session_manager.session import SessionManager
 
 VIEW_BINARY_TOOL_NAME = "aptool-session-view_binary"
@@ -22,12 +22,12 @@ VIEW_BINARY_TOOL = {
     "description": (
         "Load a previously stored binary (by pointer) into your current input. "
         "For images this re-surfaces the image so you can look at it again. "
-        "Pointers look like '42-photo.jpg' and appear in tool result metadata."
+        "Pointers look like 'pointer://5-photo.jpg' and appear in tool result metadata."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "pointer": {"type": "string", "description": "The binary pointer."},
+            "pointer": {"type": "string", "description": "The binary pointer (may include the 'pointer://' prefix)."},
         },
         "required": ["pointer"],
     },
@@ -275,6 +275,8 @@ class SessionOrchestrator:
             pointer = args.get("pointer", "")
             if not pointer:
                 raise ValueError("pointer is required")
+            if pointer.startswith(POINTER_PREFIX):
+                pointer = pointer[len(POINTER_PREFIX):]
             content, mime = self.binaries.load(pointer)
         except Exception as e:
             return (

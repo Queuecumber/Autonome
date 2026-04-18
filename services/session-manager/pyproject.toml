@@ -10,6 +10,8 @@ dependencies = [
     "uvicorn>=0.30",
     "starlette>=0.40",
     "filetype>=1.2",
+    "jsonref>=1.1",
+    "jsonpath-ng>=1.6",
 ]
 
 [build-system]

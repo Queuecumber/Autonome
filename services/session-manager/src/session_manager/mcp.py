@@ -2,16 +2,21 @@
 
 import asyncio
 import base64
-import copy
 import json
 import logging
 
+import jsonref
+from jsonpath_ng import parse as jsonpath_parse
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from session_manager.binaries import BinaryStore
 
 logger = logging.getLogger(__name__)
+
+POINTER_PREFIX = "pointer://"
+BINARY_FORMATS = {"binary", "byte", "base64"}
+_ALL_NODES = jsonpath_parse("$..*")
 
 
 def mcp_tool_to_openai(tool) -> dict:
@@ -24,92 +29,99 @@ def mcp_tool_to_openai(tool) -> dict:
     }
 
 
-_BINARY_FORMATS = ("byte", "binary", "base64")
-
-
-def _is_binary_string(node: dict) -> bool:
-    return node.get("type") == "string" and node.get("format") in _BINARY_FORMATS
-
-
 def _rewrite_to_pointer(node: dict) -> None:
     """Rewrite a binary-string schema node in place as a pointer-typed string."""
     node.pop("format", None)
     existing = node.get("description", "")
     node["description"] = (
         (existing + " " if existing else "")
-        + "Pointer to a stored binary. Do not pass raw bytes or base64."
+        + f"Pointer to a stored binary (e.g. '{POINTER_PREFIX}5-photo.jpg'). "
+          "Do not pass raw bytes or base64."
     ).strip()
 
 
-def _rewrite_binary_leaf(node: dict) -> bool:
-    """Rewrite either a direct binary-string node or any anyOf/oneOf/allOf
-    variant that is binary-string. Returns True if a rewrite occurred."""
-    if _is_binary_string(node):
+def _extract_property_name(full_path_str: str) -> str | None:
+    """Given a jsonpath like 'properties.avatar.anyOf.[0]', return the
+    nearest enclosing property name ('avatar'). Walks backward looking for
+    the last segment immediately preceded by 'properties'."""
+    parts = [p for p in full_path_str.split(".") if p and p != "$"]
+    for i in range(len(parts) - 1, 0, -1):
+        p = parts[i]
+        if parts[i - 1] == "properties" and not p.startswith("[") and p != "properties":
+            return p
+    return None
+
+
+def rewrite_binary_params(schema: dict) -> set[str]:
+    """Find every binary-string schema node, rewrite each in place as a
+    pointer-typed string, and return the set of argument property names
+    that may carry a pointer.
+
+    Expects refs already resolved and `$defs` removed — see inline_refs().
+    """
+    names: set[str] = set()
+    for match in _ALL_NODES.find(schema):
+        node = match.value
+        if not (isinstance(node, dict)
+                and node.get("type") == "string"
+                and node.get("format") in BINARY_FORMATS):
+            continue
         _rewrite_to_pointer(node)
-        return True
-    rewrote = False
-    for combinator in ("anyOf", "oneOf", "allOf"):
-        for variant in node.get(combinator) or []:
-            if isinstance(variant, dict) and _is_binary_string(variant):
-                _rewrite_to_pointer(variant)
-                rewrote = True
-    return rewrote
+        name = _extract_property_name(str(match.full_path))
+        if name:
+            names.add(name)
+    return names
 
 
-def rewrite_binary_params(schema: dict) -> list[tuple[str, ...]]:
-    """Find binary-string params and rewrite each to a pointer type.
+def inline_refs(schema: dict) -> dict:
+    """Resolve every `$ref` and drop `$defs`, returning a plain dict.
 
-    Returns the paths (for passing to resolve_pointer_args) so the orchestrator
-    knows exactly which argument slots need pointer→bytes resolution.
+    Fully materializes (proxies=False) so downstream code can mutate the
+    schema freely. Self-referential schemas will expand infinitely and
+    aren't supported here.
     """
-    paths: list[tuple[str, ...]] = []
-
-    def walk(node, path):
-        if not isinstance(node, dict):
-            return
-        if _rewrite_binary_leaf(node):
-            paths.append(path)
-            return
-        for key, child in (node.get("properties") or {}).items():
-            walk(child, path + (key,))
-        items = node.get("items")
-        if isinstance(items, dict):
-            walk(items, path + ("[]",))
-
-    walk(schema, ())
-    return paths
+    resolved = jsonref.replace_refs(schema, proxies=False)
+    if isinstance(resolved, dict):
+        resolved.pop("$defs", None)
+    return resolved
 
 
-def resolve_pointer_args(args: dict, paths: list[tuple[str, ...]], store: BinaryStore) -> dict:
-    """At each recorded path, replace the pointer string with base64 bytes.
-
-    Only paths that were rewritten by rewrite_binary_params are visited, so
-    there's no risk of touching unrelated string fields. If the value at a
-    path isn't a valid pointer, store.load raises and we leave it unchanged.
+def resolve_pointer_args(args: dict, names: set[str], store: BinaryStore) -> dict:
+    """Walk args; whenever we're under a key whose schema was binary-typed,
+    replace every `pointer://...` string we find with its base64-encoded
+    bytes. Non-pointer values pass through. Expired pointers raise loudly.
     """
-    if not paths:
+    if not names:
         return args
-    args = copy.deepcopy(args)
 
-    def sub(node, path: tuple[str, ...]):
-        if not path:
-            if isinstance(node, str):
+    def resolve_deep(value):
+        """Value is nested under a binary-typed key — resolve any pointer."""
+        if isinstance(value, str):
+            if value.startswith(POINTER_PREFIX):
+                pointer = value[len(POINTER_PREFIX):]
                 try:
-                    content, _ = store.load(node)
+                    content, _ = store.load(pointer)
                 except FileNotFoundError:
-                    return node
+                    raise ValueError(
+                        f"Pointer {pointer!r} not found — it may have been garbage-collected. "
+                        "Ask for the binary to be re-produced."
+                    )
                 return base64.b64encode(content).decode()
-            return node
-        head, *rest = path
-        if head == "[]" and isinstance(node, list):
-            return [sub(item, tuple(rest)) for item in node]
-        if isinstance(node, dict) and head in node:
-            node[head] = sub(node[head], tuple(rest))
+            return value
+        if isinstance(value, list):
+            return [resolve_deep(item) for item in value]
+        if isinstance(value, dict):
+            return {k: resolve_deep(v) for k, v in value.items()}
+        return value
+
+    def walk(node):
+        if isinstance(node, dict):
+            return {k: (resolve_deep(v) if k in names else walk(v)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
         return node
 
-    for path in paths:
-        sub(args, path)
-    return args
+    return walk(args)
 
 
 def _save_and_describe(store: BinaryStore, data_b64: str, mime_type: str) -> dict | None:
@@ -117,7 +129,11 @@ def _save_and_describe(store: BinaryStore, data_b64: str, mime_type: str) -> dic
     try:
         raw = base64.b64decode(data_b64)
         pointer_id = store.save(raw, mime_type)
-        return {"id": pointer_id, "content_type": mime_type, "size": len(raw)}
+        return {
+            "id": f"{POINTER_PREFIX}{pointer_id}",
+            "content_type": mime_type,
+            "size": len(raw),
+        }
     except Exception as e:
         logger.warning(f"Failed to persist binary ({mime_type}) to BinaryStore: {e}")
         return None
@@ -186,7 +202,7 @@ class MCPConnection:
         self.prefix = prefix
         self.session: ClientSession | None = None
         self.tools: list[dict] = []
-        self.binary_param_paths: dict[str, list[tuple[str, ...]]] = {}
+        self.binary_param_names: dict[str, set[str]] = {}
         self.instructions: str = ""
         self._original_names: dict[str, str] = {}
         self._ready = asyncio.Event()
@@ -214,17 +230,19 @@ class MCPConnection:
 
                     result = await session.list_tools()
                     self.tools = []
-                    self.binary_param_paths: dict[str, list[tuple[str, ...]]] = {}
+                    self.binary_param_names: dict[str, set[str]] = {}
                     for t in result.tools:
                         openai_tool = mcp_tool_to_openai(t)
                         original_name = openai_tool["name"]
                         prefixed_name = f"{self.prefix}-{self.name}-{original_name}"
                         self._original_names[prefixed_name] = original_name
                         openai_tool["name"] = prefixed_name
-                        paths = rewrite_binary_params(openai_tool.get("parameters") or {})
-                        if paths:
-                            self.binary_param_paths[prefixed_name] = paths
-                            logger.info(f"  {prefixed_name}: {len(paths)} binary param(s) → pointer")
+                        schema = inline_refs(openai_tool.get("parameters") or {})
+                        openai_tool["parameters"] = schema
+                        names = rewrite_binary_params(schema)
+                        if names:
+                            self.binary_param_names[prefixed_name] = names
+                            logger.info(f"  {prefixed_name}: binary params → pointer ({sorted(names)})")
                         self.tools.append(openai_tool)
 
                     logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools, instructions={'yes' if self.instructions else 'no'}")
@@ -243,16 +261,16 @@ class MCPConnection:
         """Execute a tool call and return raw MCP content blocks.
 
         If a BinaryStore is provided and this tool has binary params, any
-        pointer strings in arguments are resolved to base64 bytes first.
+        pointer:// strings in arguments are resolved to base64 bytes first.
         """
         if self.session is None:
             raise RuntimeError(f"MCP server {self.name} not connected")
 
         original_name = self._original_names.get(prefixed_name, prefixed_name)
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
-        paths = self.binary_param_paths.get(prefixed_name, [])
-        if paths and store is not None:
-            args = resolve_pointer_args(args, paths, store)
+        names = self.binary_param_names.get(prefixed_name, set())
+        if names and store is not None:
+            args = resolve_pointer_args(args, names, store)
         result = await self.session.call_tool(original_name, args)
         return result.content
 
