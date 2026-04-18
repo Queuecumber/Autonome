@@ -151,12 +151,11 @@ def _pointer_text(pointer: dict) -> dict:
 
 
 def _describe_binary(data_b64: str, mime_type: str, store: BinaryStore | None) -> dict:
-    """Persist bytes and return an input_text pointer part, or a textual
-    placeholder if no store is available."""
+    """Persist bytes and return an input_text carrying pointer JSON. If no
+    store is available the shape still carries content_type with no id,
+    signaling 'binary present, no pointer to reference it by.'"""
     pointer = _save_and_describe(store, data_b64, mime_type) if store else None
-    if pointer:
-        return _pointer_text(pointer)
-    return {"type": "input_text", "text": f"[binary: {mime_type}]"}
+    return _pointer_text(pointer or {"content_type": mime_type})
 
 
 def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
