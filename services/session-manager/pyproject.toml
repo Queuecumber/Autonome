@@ -11,7 +11,7 @@ dependencies = [
     "starlette>=0.40",
     "filetype>=1.2",
     "jsonref>=1.1",
-    "jsonpath-ng>=1.6",
+    "python-jsonpath>=1.3",
 ]
 
 [build-system]

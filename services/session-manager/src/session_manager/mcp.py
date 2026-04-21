@@ -2,12 +2,14 @@
 
 import asyncio
 import base64
+import copy
 import json
 import logging
+from dataclasses import dataclass
+from functools import cached_property
 
+import jsonpath
 import jsonref
-from jsonpath_ng import Fields
-from jsonpath_ng import parse as jsonpath_parse
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -16,12 +18,16 @@ from session_manager.binaries import BinaryStore
 logger = logging.getLogger(__name__)
 
 POINTER_PREFIX = "pointer://"
-BINARY_FORMATS = {"binary", "byte", "base64"}
 
-# Find every `format` field anywhere in the schema. We filter in Python
-# for the binary-specific formats + string-type parent since jsonpath-ng's
-# filter dialect can't express `@.format in [...]` directly.
-_FORMAT_FIELDS = jsonpath_parse("$..format")
+# Select every schema node whose format marks it as binary content.
+_BINARY_FINDER = jsonpath.compile(
+    "$..[?(@.format == 'binary' or @.format == 'byte' or @.format == 'base64')]"
+)
+
+_POINTER_DESCRIPTION = (
+    f"Pointer to a stored binary (e.g. '{POINTER_PREFIX}5-photo.jpg'). "
+    "Do not pass raw bytes or base64."
+)
 
 
 def mcp_tool_to_openai(tool) -> dict:
@@ -34,101 +40,96 @@ def mcp_tool_to_openai(tool) -> dict:
     }
 
 
-def _rewrite_to_pointer(node: dict) -> None:
-    """Rewrite a binary-string schema node in place as a pointer-typed string."""
-    node.pop("format", None)
-    existing = node.get("description", "")
-    node["description"] = (
-        f"{existing} Pointer to a stored binary "
-        f"(e.g. '{POINTER_PREFIX}5-photo.jpg'). "
-        f"Do not pass raw bytes or base64."
-    ).strip()
+@dataclass
+class BinaryParam:
+    """A binary-typed parameter in a tool schema.
 
-
-def _enclosing_property_name(match) -> str | None:
-    """Walk up a match's context chain and return the field name whose
-    parent is a `properties` dict — i.e., the user-visible argument name.
-    Returns None if no such ancestor exists."""
-    cur = match
-    while cur is not None and cur.context is not None:
-        parent_path = cur.context.path
-        if isinstance(parent_path, Fields) and parent_path.fields == ("properties",):
-            if isinstance(cur.path, Fields) and len(cur.path.fields) == 1:
-                return cur.path.fields[0]
-        cur = cur.context
-    return None
-
-
-def rewrite_binary_params(schema: dict) -> set[str]:
-    """Find every binary-string schema node, rewrite each in place as a
-    pointer-typed string, and return the set of argument property names
-    that may carry a pointer.
-
-    Expects refs already resolved and `$defs` removed — see inline_refs().
+    Holds the JSONPointer into the (inlined) schema where the binary node
+    lives, and a cached JSONPath that translates that pointer into a
+    selector over runtime tool-call arguments.
     """
-    names: set[str] = set()
-    for match in _FORMAT_FIELDS.find(schema):
-        if match.value not in BINARY_FORMATS:
-            continue
-        parent = match.context
-        if not isinstance(parent.value, dict) or parent.value.get("type") != "string":
-            continue
-        _rewrite_to_pointer(parent.value)
-        name = _enclosing_property_name(parent)
-        if name:
-            names.add(name)
-    return names
+    schema_pointer: jsonpath.JSONPointer
+
+    @cached_property
+    def args_matcher(self) -> jsonpath.JSONPath:
+        """Translate the schema pointer into a JSONPath over args.
+
+        Strips schema-only segments (properties, anyOf, oneOf, and the
+        numeric variant indices they imply) and replaces container-shape
+        keywords (items, additionalProperties) with `*` to match every
+        runtime element.
+        """
+        parts = ["$"]
+        for part in self.schema_pointer.parts:
+            if part in ("properties", "anyOf", "oneOf"):
+                continue
+            if part.isnumeric():
+                continue
+            if part in ("items", "additionalProperties"):
+                parts.append("*")
+            else:
+                parts.append(part)
+        return jsonpath.compile(".".join(parts))
 
 
 def inline_refs(schema: dict) -> dict:
-    """Resolve every `$ref` and drop `$defs`, returning a plain dict.
+    """Resolve every `$ref`, drop `$defs`, and break shared object identity
+    so downstream JSONPath traversals don't dedupe ref-reuse sites.
 
-    Fully materializes (proxies=False) so downstream code can mutate the
-    schema freely. Self-referential schemas will expand infinitely and
-    aren't supported here.
+    jsonref.replace_refs(proxies=False) still reuses the same Python dict
+    for every ref to a given def; a JSON round-trip forces each occurrence
+    to become its own dict.
+
+    Self-referential schemas expand infinitely here and aren't supported.
     """
-    resolved = jsonref.replace_refs(schema, proxies=False)
+    resolved = json.loads(json.dumps(jsonref.replace_refs(schema, proxies=False)))
     if isinstance(resolved, dict):
         resolved.pop("$defs", None)
     return resolved
 
 
-def resolve_pointer_args(args: dict, names: set[str], store: BinaryStore) -> dict:
-    """Walk args; whenever we're under a key whose schema was binary-typed,
-    replace every `pointer://...` string we find with its base64-encoded
-    bytes. Non-pointer values pass through. Expired pointers raise loudly.
+def rewrite_binary_params(schema: dict) -> list[BinaryParam]:
+    """Find every binary-string node in the schema, rewrite each in place
+    (strip the binary `format`, add a pointer-usage description), and
+    return a list of BinaryParams for dispatch-time resolution.
+
+    Expects refs already resolved via inline_refs().
     """
-    if not names:
+    params: list[BinaryParam] = []
+    for match in _BINARY_FINDER.finditer(schema):
+        patch = (
+            jsonpath.JSONPatch()
+            .replace(match.pointer().join("format"), "string")
+            .add(match.pointer().join("description"), _POINTER_DESCRIPTION)
+        )
+        patch.apply(schema)
+        params.append(BinaryParam(match.pointer()))
+    return params
+
+
+def resolve_pointer_args(args: dict, params: list[BinaryParam], store: BinaryStore) -> dict:
+    """For each BinaryParam, find matching positions in args and replace
+    any `pointer://...` strings with their base64-encoded bytes. Non-pointer
+    values pass through untouched. Expired pointers raise loudly."""
+    if not params:
         return args
-
-    def resolve_deep(value):
-        """Value is nested under a binary-typed key — resolve any pointer."""
-        if isinstance(value, str):
-            if value.startswith(POINTER_PREFIX):
-                pointer = value[len(POINTER_PREFIX):]
-                try:
-                    content, _ = store.load(pointer)
-                except FileNotFoundError:
-                    raise ValueError(
-                        f"Pointer {pointer!r} not found — it may have been garbage-collected. "
-                        "Ask for the binary to be re-produced."
-                    )
-                return base64.b64encode(content).decode()
-            return value
-        if isinstance(value, list):
-            return [resolve_deep(item) for item in value]
-        if isinstance(value, dict):
-            return {k: resolve_deep(v) for k, v in value.items()}
-        return value
-
-    def walk(node):
-        if isinstance(node, dict):
-            return {k: (resolve_deep(v) if k in names else walk(v)) for k, v in node.items()}
-        if isinstance(node, list):
-            return [walk(item) for item in node]
-        return node
-
-    return walk(args)
+    args = copy.deepcopy(args)
+    for param in params:
+        for match in param.args_matcher.finditer(args):
+            val = match.value
+            if not isinstance(val, str) or not val.startswith(POINTER_PREFIX):
+                continue
+            pointer_id = val[len(POINTER_PREFIX):]
+            try:
+                content, _ = store.load(pointer_id)
+            except FileNotFoundError:
+                raise ValueError(
+                    f"Pointer {pointer_id!r} not found — it may have been "
+                    "garbage-collected. Ask for the binary to be re-produced."
+                )
+            encoded = base64.b64encode(content).decode()
+            jsonpath.JSONPatch().replace(match.pointer(), encoded).apply(args)
+    return args
 
 
 def _save_and_describe(store: BinaryStore, data_b64: str, mime_type: str) -> dict | None:
@@ -207,7 +208,7 @@ class MCPConnection:
         self.prefix = prefix
         self.session: ClientSession | None = None
         self.tools: list[dict] = []
-        self.binary_param_names: dict[str, set[str]] = {}
+        self.binary_params: dict[str, list[BinaryParam]] = {}
         self.instructions: str = ""
         self._original_names: dict[str, str] = {}
         self._ready = asyncio.Event()
@@ -235,7 +236,7 @@ class MCPConnection:
 
                     result = await session.list_tools()
                     self.tools = []
-                    self.binary_param_names: dict[str, set[str]] = {}
+                    self.binary_params: dict[str, list[BinaryParam]] = {}
                     for t in result.tools:
                         openai_tool = mcp_tool_to_openai(t)
                         original_name = openai_tool["name"]
@@ -244,10 +245,10 @@ class MCPConnection:
                         openai_tool["name"] = prefixed_name
                         schema = inline_refs(openai_tool.get("parameters") or {})
                         openai_tool["parameters"] = schema
-                        names = rewrite_binary_params(schema)
-                        if names:
-                            self.binary_param_names[prefixed_name] = names
-                            logger.info(f"  {prefixed_name}: binary params → pointer ({sorted(names)})")
+                        params = rewrite_binary_params(schema)
+                        if params:
+                            self.binary_params[prefixed_name] = params
+                            logger.info(f"  {prefixed_name}: {len(params)} binary param(s) → pointer")
                         self.tools.append(openai_tool)
 
                     logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools, instructions={'yes' if self.instructions else 'no'}")
@@ -273,9 +274,9 @@ class MCPConnection:
 
         original_name = self._original_names.get(prefixed_name, prefixed_name)
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
-        names = self.binary_param_names.get(prefixed_name, set())
-        if names and store is not None:
-            args = resolve_pointer_args(args, names, store)
+        params = self.binary_params.get(prefixed_name, [])
+        if params and store is not None:
+            args = resolve_pointer_args(args, params, store)
         result = await self.session.call_tool(original_name, args)
         return result.content
 

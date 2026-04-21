@@ -79,7 +79,7 @@ your interrupted response is still relevant or should be abandoned.
 
 Before doing anything else:
 
-1. Read your identity files (SOUL.md, etc.) — this is who you are
+1. Read your identity files (PERSONALITY.md, etc.) — this is who you are
 2. Read USER.md — this is who you're helping
 3. Read recent daily memories for context
 4. Read your global memory
@@ -159,6 +159,15 @@ def _developer_event(event_type: str, **fields) -> dict:
     return {"role": "developer", "content": json.dumps(payload, ensure_ascii=False)}
 
 
+def _log_exception_tree(e: BaseException, depth: int = 0) -> None:
+    """Recursively log a BaseExceptionGroup tree so TaskGroup wrappers don't
+    swallow the real cause."""
+    indent = "  " * depth
+    logger.error(f"{indent}{type(e).__name__}: {e}", exc_info=e)
+    for sub in getattr(e, "exceptions", ()) or ():
+        _log_exception_tree(sub, depth + 1)
+
+
 class _SessionState:
     """Per-session lock, cancellation event, and passive event queue."""
 
@@ -213,8 +222,9 @@ class SessionOrchestrator:
                     self._tool_to_mcp[tool_name] = conn
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except Exception as e:
-                logger.error(f"Failed to connect to MCP server {name} at {url}: {e}")
+            except BaseException as e:
+                logger.error(f"Failed to connect to MCP server {name} at {url}: {e!r}")
+                _log_exception_tree(e)
 
         logger.info(f"Connected to {len(self.mcp_connections)} MCP servers, {len(self.openai_tools)} tools total")
 
@@ -453,11 +463,11 @@ class SessionOrchestrator:
                 if item.type == "function_call":
                     tool_calls.append(item)
                 elif item.type == "reasoning":
-                    for content in item.content:
+                    for content in item.content or []:
                         if hasattr(content, "text"):
                             reasoning_text += content.text
                 elif item.type == "message":
-                    for content in item.content:
+                    for content in item.content or []:
                         if hasattr(content, "text"):
                             assistant_text += content.text
 
