@@ -1,6 +1,6 @@
 # Autonome
 
-Autonome is a platform for running autonomouse agents. It is not an OpenClaw clone, although it utlimately does something similar, the design philosphy is very different.
+Autonome is a platform for running autonomous agents. It is not an OpenClaw clone, although it utlimately does something similar, the design philosphy is very different.
 
 1. The agent has autonomy and true agency. This means a single "session" managing everything so the agent is allowed to make decisions on its own terms. We dont mean autonomy as in "the agent does what I want without intervention" we mean autonomy in the same way you have autonomy, the agent can make decisions for itself.
 2. Minimal: if someone else did it better first, don't reinvent it, reuse it. Rather than a large monolithic codebase that reimplements large swathes of the AI stack, Autonome provides the glue that pulls existing, tested, solutions together. If one of those other components breaks, its on them to fix not us
