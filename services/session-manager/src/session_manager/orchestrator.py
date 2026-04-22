@@ -414,7 +414,7 @@ class SessionOrchestrator:
             new_items.append(user_msg)
 
         # Build input: history + new events (filter reasoning — output-only type)
-        history = [m for m in raw_history if m.get("type") != "reasoning"]
+        history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
         input_items = history + new_items
 
         # Build API call kwargs
@@ -425,11 +425,15 @@ class SessionOrchestrator:
             "max_output_tokens": 16384,
         }
         if self.reasoning_effort:
-            call_kwargs["reasoning"] = {"effort": self.reasoning_effort}
+            call_kwargs["reasoning"] = {
+                "effort": self.reasoning_effort,
+                "summary": "detailed",
+            }
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
         logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools, {len(events)} event(s)")
+        logger.info(f"  reasoning={call_kwargs.get('reasoning')}")
 
         # Collect all new items to save to history
         all_new_messages = list(new_items)
@@ -454,18 +458,45 @@ class SessionOrchestrator:
 
             logger.info(f"LLM response (iter {iteration}): status={response.status}")
 
+            # Record token usage as a transcript comment — stripped from replay
+            # but preserved in the session log for cost/observability tracking.
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                details = getattr(usage, "output_tokens_details", None)
+                reasoning_tokens = getattr(details, "reasoning_tokens", 0) if details else 0
+                comment = {
+                    "type": "comment",
+                    "kind": "usage",
+                    "iteration": iteration,
+                    "input_tokens": getattr(usage, "input_tokens", None),
+                    "output_tokens": getattr(usage, "output_tokens", None),
+                    "reasoning_tokens": reasoning_tokens,
+                    "total_tokens": getattr(usage, "total_tokens", None),
+                }
+                all_new_messages.append(comment)
+                logger.info(
+                    f"  usage: in={comment['input_tokens']} "
+                    f"out={comment['output_tokens']} reasoning={reasoning_tokens} "
+                    f"total={comment['total_tokens']}"
+                )
+
             # Process output items
             tool_calls = []
             assistant_text = ""
             reasoning_text = ""
 
+            logger.info(f"response.output types: {[getattr(i, 'type', type(i).__name__) for i in response.output]}")
             for item in response.output:
                 if item.type == "function_call":
                     tool_calls.append(item)
                 elif item.type == "reasoning":
-                    for content in item.content or []:
-                        if hasattr(content, "text"):
-                            reasoning_text += content.text
+                    logger.info(f"reasoning item: summary={getattr(item, 'summary', None)!r} content={item.content!r}")
+                    for block in (getattr(item, "summary", None) or []):
+                        if hasattr(block, "text"):
+                            reasoning_text += block.text
+                    for block in (item.content or []):
+                        if hasattr(block, "text"):
+                            reasoning_text += block.text
                 elif item.type == "message":
                     for content in item.content or []:
                         if hasattr(content, "text"):
