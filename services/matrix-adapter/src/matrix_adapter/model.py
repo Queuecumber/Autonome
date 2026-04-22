@@ -24,6 +24,7 @@ from nio import (
     RoomMessageText,
     RoomMessageImage,
     RoomMessageFile,
+    RoomSendResponse,
     ReactionEvent,
     SyncResponse,
     ToDeviceError,
@@ -360,14 +361,22 @@ class MatrixClient:
 
     # ── Writing ──────────────────────────────────────────────
 
+    async def _room_send(self, room_id: str, message_type: str, content: dict) -> RoomSendResponse:
+        """Send a room event, raising a readable error if matrix-nio returns
+        a RoomSendError instead of the success response."""
+        resp = await self._client.room_send(room_id, message_type, content)
+        if not isinstance(resp, RoomSendResponse):
+            raise RuntimeError(f"Matrix room_send failed: {resp}")
+        return resp
+
     async def send_message(self, room_id: str, text: str) -> str:
-        resp = await self._client.room_send(
+        resp = await self._room_send(
             room_id, "m.room.message", {"msgtype": "m.text", "body": text},
         )
         return resp.event_id
 
     async def send_reaction(self, room_id: str, event_id: str, emoji: str) -> None:
-        await self._client.room_send(
+        await self._room_send(
             room_id, "m.reaction",
             {"m.relates_to": {"rel_type": "m.annotation", "event_id": event_id, "key": emoji}},
         )
@@ -396,13 +405,25 @@ class MatrixClient:
             data = decrypt_attachment(data, enc["key"], enc["hash"], enc["iv"])
         return data, content_type
 
-    async def _upload(self, data: bytes, content_type: str, filename: str) -> str:
-        """Upload bytes and return the mxc:// URL."""
-        resp, _ = await self._client.upload(io.BytesIO(data), content_type=content_type, filename=filename)
+    async def _upload(
+        self, data: bytes, content_type: str, filename: str, encrypt: bool = False
+    ) -> tuple[str, dict | None]:
+        """Upload bytes and return (mxc:// URL, decryption_info or None).
+
+        With encrypt=True the bytes are encrypted before upload and the
+        returned decryption_info carries the url/key/iv/hashes needed to
+        decrypt — which is what encrypted-room events put in their `file`
+        field."""
+        resp, decryption_info = await self._client.upload(
+            io.BytesIO(data),
+            content_type=content_type,
+            filename=filename,
+            encrypt=encrypt,
+        )
         content_uri = getattr(resp, "content_uri", None)
         if not content_uri:
             raise RuntimeError(f"Upload failed: {resp}")
-        return content_uri
+        return content_uri, decryption_info
 
     async def upload_and_send_attachment(
         self,
@@ -413,27 +434,39 @@ class MatrixClient:
         caption: str | None = None,
     ) -> None:
         """Upload bytes and send to a room as either an image or a file.
+        Auto-detects room encryption and adjusts the event shape accordingly.
 
         When a caption is present the message body carries the caption and
         `filename` is sent as a separate top-level field (per MSC2530). When
         there's no caption, body carries the filename (the legacy shape)."""
-        content_uri = await self._upload(data, content_type, filename)
+        room = self._client.rooms.get(room_id)
+        encrypted = bool(room and room.encrypted)
+
+        content_uri, decryption_info = await self._upload(data, content_type, filename, encrypt=encrypted)
         msgtype = "m.image" if content_type.startswith("image/") else "m.file"
         content: dict = {
             "msgtype": msgtype,
-            "url": content_uri,
             "body": caption if caption else filename,
             "filename": filename,
             "info": {"mimetype": content_type, "size": len(data)},
         }
-        await self._client.room_send(room_id, "m.room.message", content)
+        if encrypted and decryption_info:
+            # Encrypted-room shape: file carries url + encryption metadata,
+            # no top-level url field.
+            file_info = dict(decryption_info)
+            file_info["url"] = content_uri
+            content["file"] = file_info
+        else:
+            content["url"] = content_uri
+        await self._room_send(room_id, "m.room.message", content)
 
     async def set_display_name(self, name: str) -> None:
         await self._client.set_displayname(name)
 
     async def upload_avatar(self, data: bytes, content_type: str, filename: str) -> None:
-        """Upload bytes and set as the profile avatar."""
-        content_uri = await self._upload(data, content_type, filename)
+        """Upload bytes and set as the profile avatar. Profile content is
+        public; never encrypt."""
+        content_uri, _ = await self._upload(data, content_type, filename)
         await self._client.set_avatar(content_uri)
 
     async def close(self) -> None:
