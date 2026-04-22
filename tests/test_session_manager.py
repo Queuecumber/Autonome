@@ -10,7 +10,7 @@ from session_manager.orchestrator import SessionOrchestrator
 
 
 @pytest.fixture
-def orchestrator_config(tmp_workspace):
+def orchestrator_config(tmp_workspace, tmp_path):
     return {
         "model": {
             "model": "claude-opus-4-6",
@@ -19,6 +19,9 @@ def orchestrator_config(tmp_workspace):
         "session": {
             "store": "/tmp/test-sessions",
             "max_history_tokens": 100000,
+        },
+        "binaries": {
+            "store": str(tmp_path / "binaries"),
         },
     }
 

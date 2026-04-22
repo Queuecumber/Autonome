@@ -7,5 +7,5 @@ workspace/
 .env
 *.egg-info/
 dist/
-testbed/
-testbed.bak/
+testbed*/
+test_jsp.py
