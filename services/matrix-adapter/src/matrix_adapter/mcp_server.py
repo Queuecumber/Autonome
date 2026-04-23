@@ -60,6 +60,28 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
 
 
 @mcp.tool
+async def get_room_members(room_id: str) -> list[dict]:
+    """List the people currently in a Matrix room.
+
+    Each event already carries a `member_count` in its metadata — use that
+    as your first signal for how public a room is. Call this tool to see
+    who specifically is there when:
+
+    - You're about to share anything private or personal and the room has
+      more than two members
+    - Someone new joined the conversation and you don't recognize them
+    - A member_count you noticed before has changed
+
+    Returns [{id, name}, ...]. Large rooms are truncated to 50 entries
+    with a `_truncated` marker appended."""
+    members = client.get_room_members(room_id)
+    out: list[dict] = [{"id": m.id, "name": m.name} for m in members[:50]]
+    if len(members) > 50:
+        out.append({"id": "_truncated", "name": f"{len(members) - 50} more not shown"})
+    return out
+
+
+@mcp.tool
 async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
     """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent."""
     data, _ = await client.download_attachment(mxc_url)
@@ -70,9 +92,22 @@ async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
 
 
 @mcp.tool
-async def send_attachment(room_id: str, data: Base64Bytes, filename: str, content_type: str = "application/octet-stream") -> None:
-    """Send a file attachment to a Matrix room."""
-    await client.upload_and_send_attachment(room_id, data, content_type, filename)
+async def send_attachment(
+    room_id: str,
+    data: Base64Bytes,
+    filename: str,
+    content_type: str = "application/octet-stream",
+    caption: str | None = None,
+) -> None:
+    """Send a file attachment to a Matrix room.
+
+    `filename` is the filename the recipient will see in their client
+    (e.g. `photo.jpg`, `report.pdf`). Don't put a caption here.
+
+    `caption` is an optional message to go with the attachment — the thing
+    you'd type alongside the image. Leave it off if the attachment speaks
+    for itself."""
+    await client.upload_and_send_attachment(room_id, data, content_type, filename, caption=caption)
 
 
 @mcp.tool

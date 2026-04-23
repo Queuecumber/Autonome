@@ -48,6 +48,7 @@ class Room:
     display_name: str | None = None
     canonical_alias: str | None = None
     encrypted: bool = False
+    member_count: int = 0
 
     @property
     def name(self) -> str:
@@ -60,6 +61,7 @@ class Room:
             display_name=room.display_name,
             canonical_alias=room.canonical_alias,
             encrypted=room.encrypted,
+            member_count=len(room.users or {}),
         )
 
 
@@ -87,6 +89,7 @@ class Message:
             "room_id": self.room.id,
             "room_name": self.room.name,
             "encrypted": self.room.encrypted,
+            "member_count": self.room.member_count,
         }
         if self.attachments:
             metadata["attachments"] = [
@@ -375,6 +378,14 @@ class MatrixClient:
     async def send_read_receipt(self, room_id: str, event_id: str) -> None:
         await self._client.room_read_markers(room_id, fully_read_event=event_id, read_event=event_id)
 
+    def get_room_members(self, room_id: str) -> list[Sender]:
+        """Return the current member list for a room from nio's synced state.
+        Returns an empty list if the room isn't known to this client."""
+        room = self._client.rooms.get(room_id)
+        if room is None:
+            return []
+        return [Sender(id=uid, name=user.display_name) for uid, user in (room.users or {}).items()]
+
     async def download_attachment(self, mxc_url: str) -> tuple[bytes, str | None]:
         resp = await self._client.download(mxc_url)
         data = resp.body
@@ -393,15 +404,29 @@ class MatrixClient:
             raise RuntimeError(f"Upload failed: {resp}")
         return content_uri
 
-    async def upload_and_send_attachment(self, room_id: str, data: bytes, content_type: str, filename: str) -> None:
-        """Upload bytes and send to a room as either an image or a file."""
+    async def upload_and_send_attachment(
+        self,
+        room_id: str,
+        data: bytes,
+        content_type: str,
+        filename: str,
+        caption: str | None = None,
+    ) -> None:
+        """Upload bytes and send to a room as either an image or a file.
+
+        When a caption is present the message body carries the caption and
+        `filename` is sent as a separate top-level field (per MSC2530). When
+        there's no caption, body carries the filename (the legacy shape)."""
         content_uri = await self._upload(data, content_type, filename)
         msgtype = "m.image" if content_type.startswith("image/") else "m.file"
-        await self._client.room_send(
-            room_id, "m.room.message",
-            {"msgtype": msgtype, "url": content_uri, "body": filename,
-             "info": {"mimetype": content_type, "size": len(data)}},
-        )
+        content: dict = {
+            "msgtype": msgtype,
+            "url": content_uri,
+            "body": caption if caption else filename,
+            "filename": filename,
+            "info": {"mimetype": content_type, "size": len(data)},
+        }
+        await self._client.room_send(room_id, "m.room.message", content)
 
     async def set_display_name(self, name: str) -> None:
         await self._client.set_displayname(name)
