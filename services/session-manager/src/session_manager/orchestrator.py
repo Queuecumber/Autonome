@@ -186,6 +186,10 @@ class SessionOrchestrator:
         model_config = config.get("model", {})
         self.model = model_config.get("model", "")
         self.reasoning_effort = model_config.get("reasoning_effort")
+        # Anthropic-specific: forces non-adaptive thinking with a fixed
+        # token budget. Sent as extra_body on the Responses call — litellm
+        # forwards provider-specific keys through to Bedrock.
+        self.thinking_budget_tokens = model_config.get("thinking_budget_tokens")
 
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
@@ -418,22 +422,32 @@ class SessionOrchestrator:
         input_items = history + new_items
 
         # Build API call kwargs
+        max_output_tokens = 16384
+        if self.thinking_budget_tokens:
+            # Anthropic requires max_tokens > budget_tokens. Leave 4k of
+            # headroom for the actual response past the thinking block.
+            max_output_tokens = max(max_output_tokens, self.thinking_budget_tokens + 4096)
+
         call_kwargs: dict[str, Any] = {
             "model": self.model,
             "instructions": self._build_instructions(),
             "input": input_items,
-            "max_output_tokens": 16384,
+            "max_output_tokens": max_output_tokens,
         }
         if self.reasoning_effort:
             call_kwargs["reasoning"] = {
                 "effort": self.reasoning_effort,
                 "summary": "detailed",
             }
+        if self.thinking_budget_tokens:
+            call_kwargs["extra_body"] = {
+                "thinking": {"type": "enabled", "budget_tokens": self.thinking_budget_tokens},
+            }
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
         logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools, {len(events)} event(s)")
-        logger.info(f"  reasoning={call_kwargs.get('reasoning')}")
+        logger.info(f"  reasoning={call_kwargs.get('reasoning')} thinking={call_kwargs.get('extra_body', {}).get('thinking')}")
 
         # Collect all new items to save to history
         all_new_messages = list(new_items)
