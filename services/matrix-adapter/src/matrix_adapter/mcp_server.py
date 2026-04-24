@@ -86,8 +86,9 @@ async def send_message(room_id: str, text: str) -> None:
     """Send a text message to a Matrix room. Automatically stops typing indicator."""
     try:
         await client.send_typing(room_id, typing=False)
-    except Exception:
-        pass
+    except Exception as e:
+        # Typing indicator is best-effort — never let it block the actual send.
+        logger.debug(f"stop-typing before send_message failed: {e!r}")
     await client.send_message(room_id, text)
 
 
