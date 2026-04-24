@@ -186,10 +186,11 @@ class SessionOrchestrator:
         model_config = config.get("model", {})
         self.model = model_config.get("model", "")
         self.reasoning_effort = model_config.get("reasoning_effort")
-        # Anthropic-specific: forces non-adaptive thinking with a fixed
-        # token budget. Sent as extra_body on the Responses call — litellm
-        # forwards provider-specific keys through to Bedrock.
-        self.thinking_budget_tokens = model_config.get("thinking_budget_tokens")
+        # Anthropic thinking config is passed straight through as
+        # extra_body.thinking on the Responses call. Shape is the caller's
+        # responsibility (e.g. {type: enabled, budget_tokens: N, display:
+        # summarized} on 4.6, {type: adaptive, display: summarized} on 4.7).
+        self.thinking = model_config.get("thinking")
 
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
@@ -423,10 +424,11 @@ class SessionOrchestrator:
 
         # Build API call kwargs
         max_output_tokens = 16384
-        if self.thinking_budget_tokens:
+        budget = (self.thinking or {}).get("budget_tokens")
+        if budget:
             # Anthropic requires max_tokens > budget_tokens. Leave 4k of
             # headroom for the actual response past the thinking block.
-            max_output_tokens = max(max_output_tokens, self.thinking_budget_tokens + 4096)
+            max_output_tokens = max(max_output_tokens, budget + 4096)
 
         call_kwargs: dict[str, Any] = {
             "model": self.model,
@@ -439,10 +441,8 @@ class SessionOrchestrator:
                 "effort": self.reasoning_effort,
                 "summary": "detailed",
             }
-        if self.thinking_budget_tokens:
-            call_kwargs["extra_body"] = {
-                "thinking": {"type": "enabled", "budget_tokens": self.thinking_budget_tokens},
-            }
+        if self.thinking:
+            call_kwargs["extra_body"] = {"thinking": self.thinking}
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
