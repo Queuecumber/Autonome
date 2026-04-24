@@ -184,8 +184,7 @@ class SessionOrchestrator:
         self.config = config
 
         model_config = config.get("model", {})
-        # Accept both `name` (current) and `model` (legacy) for the model id.
-        self.model = model_config.get("name") or model_config.get("model") or ""
+        self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
 
         self.llm = AsyncOpenAI(
