@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
+import mistune
 from nio import (
     AsyncClient,
     AsyncClientConfig,
@@ -31,6 +32,11 @@ from nio import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Markdown → HTML for outbound messages. task_lists is deliberately omitted:
+# Matrix's org.matrix.custom.html allowlist rejects <input>, so checklists
+# render as empty boxes. Users can fall back to emoji.
+_MARKDOWN = mistune.create_markdown(plugins=["strikethrough", "table", "url"])
 
 
 @dataclass
@@ -370,9 +376,15 @@ class MatrixClient:
         return resp
 
     async def send_message(self, room_id: str, text: str) -> str:
-        resp = await self._room_send(
-            room_id, "m.room.message", {"msgtype": "m.text", "body": text},
-        )
+        html = _MARKDOWN(text).strip()
+        content: dict = {"msgtype": "m.text", "body": text}
+        # Only send formatted_body when rendering actually adds markup —
+        # for plain text like "ok" the HTML is just "<p>ok</p>" wrapping,
+        # which some clients render with extra padding.
+        if html and html != f"<p>{text}</p>":
+            content["format"] = "org.matrix.custom.html"
+            content["formatted_body"] = html
+        resp = await self._room_send(room_id, "m.room.message", content)
         return resp.event_id
 
     async def send_reaction(self, room_id: str, event_id: str, emoji: str) -> None:
