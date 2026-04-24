@@ -186,11 +186,10 @@ class SessionOrchestrator:
         model_config = config.get("model", {})
         self.model = model_config.get("model", "")
         self.reasoning_effort = model_config.get("reasoning_effort")
-        # Anthropic thinking config is passed straight through as
-        # extra_body.thinking on the Responses call. Shape is the caller's
-        # responsibility (e.g. {type: enabled, budget_tokens: N, display:
-        # summarized} on 4.6, {type: adaptive, display: summarized} on 4.7).
-        self.thinking = model_config.get("thinking")
+        # Passthrough for provider-specific request-body params (Anthropic
+        # thinking, output_config, etc.). Shape is the caller's
+        # responsibility; litellm forwards through to Bedrock.
+        self.extra_body = model_config.get("extra_body")
 
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
@@ -422,32 +421,27 @@ class SessionOrchestrator:
         history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
         input_items = history + new_items
 
-        # Build API call kwargs
-        max_output_tokens = 16384
-        budget = (self.thinking or {}).get("budget_tokens")
-        if budget:
-            # Anthropic requires max_tokens > budget_tokens. Leave 4k of
-            # headroom for the actual response past the thinking block.
-            max_output_tokens = max(max_output_tokens, budget + 4096)
-
+        # Build API call kwargs. 64K is comfortably above any thinking
+        # budget (max is 48k); billing is per actual token, so there's no
+        # reason to cap lower.
         call_kwargs: dict[str, Any] = {
             "model": self.model,
             "instructions": self._build_instructions(),
             "input": input_items,
-            "max_output_tokens": max_output_tokens,
+            "max_output_tokens": 65536,
         }
         if self.reasoning_effort:
             call_kwargs["reasoning"] = {
                 "effort": self.reasoning_effort,
                 "summary": "detailed",
             }
-        if self.thinking:
-            call_kwargs["extra_body"] = {"thinking": self.thinking}
+        if self.extra_body:
+            call_kwargs["extra_body"] = self.extra_body
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
         logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools, {len(events)} event(s)")
-        logger.info(f"  reasoning={call_kwargs.get('reasoning')} thinking={call_kwargs.get('extra_body', {}).get('thinking')}")
+        logger.info(f"  reasoning={call_kwargs.get('reasoning')} extra_body={call_kwargs.get('extra_body')}")
 
         # Collect all new items to save to history
         all_new_messages = list(new_items)
