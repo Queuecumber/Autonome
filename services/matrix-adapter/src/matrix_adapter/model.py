@@ -269,13 +269,13 @@ class MatrixClient:
             await self._on_message(msg)
 
     async def _on_media(self, room: MatrixRoom, event) -> None:
-        url, mimetype, caption, size = self._extract_media(event)
+        url, mimetype, caption, filename, size = self._extract_media(event)
         msg = Message(
             sender=Sender(id=event.sender, name=room.user_name(event.sender)),
             room=Room.from_nio(room),
             event_id=event.event_id,
             text=caption,
-            attachments=[Attachment(url=url, content_type=mimetype, filename=event.body, size=size)],
+            attachments=[Attachment(url=url, content_type=mimetype, filename=filename, size=size)],
         )
         logger.info(f"Received media in {msg.room.name} from {msg.sender.name}")
         if self._on_message:
@@ -343,8 +343,14 @@ class MatrixClient:
 
     # ── Helpers ──────────────────────────────────────────────
 
-    def _extract_media(self, event) -> tuple[str, str | None, str | None, int | None]:
-        """Extract mxc URL, mimetype, caption, and size. Cache encryption info."""
+    def _extract_media(self, event) -> tuple[str, str | None, str | None, str, int | None]:
+        """Extract mxc URL, mimetype, caption, filename, and size.
+
+        MSC2530 shape: body carries the caption, filename lives in a
+        top-level `filename` field. Legacy shape: body carries the
+        filename and there's no explicit filename field. We normalize
+        both into (caption, filename) here so downstream code doesn't
+        need to know which shape was used."""
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
 
@@ -360,10 +366,17 @@ class MatrixClient:
         else:
             url = event.url or ""
 
-        filename = content.get("filename") or info.get("filename")
-        caption = event.body if event.body != filename else None
+        top_filename = content.get("filename") or info.get("filename")
+        if top_filename and top_filename != event.body:
+            # MSC2530: body is the caption, filename is the real filename.
+            filename = top_filename
+            caption = event.body
+        else:
+            # Legacy or no-caption: body is the filename.
+            filename = top_filename or event.body
+            caption = None
 
-        return url, info.get("mimetype"), caption, info.get("size")
+        return url, info.get("mimetype"), caption, filename, info.get("size")
 
     # ── Writing ──────────────────────────────────────────────
 
