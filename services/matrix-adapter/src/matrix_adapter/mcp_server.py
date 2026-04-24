@@ -2,9 +2,12 @@
 
 import asyncio
 import base64
+import io
+import json
 import logging
 import os
 
+import exifread
 import filetype
 import httpx
 from fastmcp import FastMCP
@@ -12,6 +15,53 @@ from mcp.types import ImageContent, TextContent
 from pydantic import Base64Bytes
 
 from matrix_adapter.model import MatrixClient, Message, Reaction
+
+
+def _exif_summary(data: bytes) -> dict | None:
+    """Extract a small, useful subset of EXIF from image bytes.
+    Returns None if no EXIF present or parsing fails."""
+    try:
+        tags = exifread.process_file(io.BytesIO(data), details=False)
+    except Exception:
+        return None
+    if not tags:
+        return None
+
+    out: dict = {}
+
+    dt = tags.get("EXIF DateTimeOriginal") or tags.get("Image DateTime")
+    if dt:
+        out["datetime"] = str(dt)
+
+    make = tags.get("Image Make")
+    model = tags.get("Image Model")
+    if make or model:
+        out["camera"] = " ".join(str(x) for x in (make, model) if x).strip()
+
+    lat = tags.get("GPS GPSLatitude")
+    lat_ref = tags.get("GPS GPSLatitudeRef")
+    lon = tags.get("GPS GPSLongitude")
+    lon_ref = tags.get("GPS GPSLongitudeRef")
+    if lat and lon and lat_ref and lon_ref:
+        try:
+            def _to_deg(ratio, ref):
+                d, m, s = [float(r.num) / float(r.den) for r in ratio.values]
+                decimal = d + m / 60 + s / 3600
+                return -decimal if str(ref) in ("S", "W") else decimal
+            out["gps"] = {"lat": round(_to_deg(lat, lat_ref), 6), "lon": round(_to_deg(lon, lon_ref), 6)}
+        except Exception:
+            pass
+
+    w = tags.get("EXIF ExifImageWidth") or tags.get("Image ImageWidth")
+    h = tags.get("EXIF ExifImageLength") or tags.get("Image ImageLength")
+    if w and h:
+        out["dimensions"] = f"{w}x{h}"
+
+    software = tags.get("Image Software")
+    if software:
+        out["software"] = str(software)
+
+    return out or None
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +132,28 @@ async def get_room_members(room_id: str) -> list[dict]:
 
 
 @mcp.tool
-async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent."""
+async def get_attachment(mxc_url: str) -> list[ImageContent | TextContent]:
+    """Fetch a Matrix attachment by mxc:// URL.
+
+    For images, returns the image content plus (when present) an EXIF
+    summary with the fields most likely to tell you something useful:
+    datetime the photo was taken, camera make/model, GPS coordinates,
+    dimensions, and editing software. Photos from phones and most
+    cameras carry this; screenshots and many forwarded images don't.
+
+    Non-image attachments return a single text block describing the
+    file."""
     data, _ = await client.download_attachment(mxc_url)
     kind = filetype.guess(data)
     if kind and kind.mime.startswith("image/"):
-        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=kind.mime)
-    return TextContent(type="text", text=f"[attachment: {kind.mime if kind else 'unknown'}, {len(data)} bytes]")
+        result: list[ImageContent | TextContent] = [
+            ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=kind.mime),
+        ]
+        exif = _exif_summary(data)
+        if exif:
+            result.append(TextContent(type="text", text=json.dumps(exif)))
+        return result
+    return [TextContent(type="text", text=f"[attachment: {kind.mime if kind else 'unknown'}, {len(data)} bytes]")]
 
 
 @mcp.tool
