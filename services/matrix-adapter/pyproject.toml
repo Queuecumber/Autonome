@@ -8,7 +8,6 @@ dependencies = [
     "filetype>=1.2",
     "httpx>=0.27",
     "mistune>=3.0",
-    "exifread>=3.0",
 ]
 
 [build-system]

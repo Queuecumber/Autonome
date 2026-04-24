@@ -3,11 +3,14 @@
 import asyncio
 import base64
 import copy
+import io
 import json
 import logging
 from dataclasses import dataclass
 from functools import cached_property
 
+import exifread
+import exifread.utils
 import jsonpath
 import jsonref
 from mcp import ClientSession
@@ -143,7 +146,7 @@ def _save_and_describe(store: BinaryStore, data_b64: str, mime_type: str) -> dic
             "size": len(raw),
         }
     except Exception as e:
-        logger.warning(f"Failed to persist binary ({mime_type}) to BinaryStore: {e}")
+        logger.warning("Failed to persist binary (%s) to BinaryStore: %s", mime_type, e)
         return None
 
 
@@ -159,12 +162,48 @@ def _describe_binary(data_b64: str, mime_type: str, store: BinaryStore | None) -
     return _pointer_text(pointer or {"content_type": mime_type})
 
 
+def _exif_summary(data: bytes) -> dict | None:
+    """Extract a useful subset of EXIF from image bytes. Returns None if no
+    EXIF is present. exifread supports JPEG/TIFF/HEIC/RAW; PNG and WebP
+    have no EXIF, so this returns None on those (which is fine)."""
+    tags = exifread.process_file(io.BytesIO(data), details=False)
+    if not tags:
+        return None
+    out: dict = {}
+
+    dt = tags.get("EXIF DateTimeOriginal") or tags.get("Image DateTime")
+    if dt:
+        out["datetime"] = str(dt)
+
+    make = tags.get("Image Make")
+    model = tags.get("Image Model")
+    if make or model:
+        out["camera"] = " ".join(str(x) for x in (make, model) if x).strip()
+
+    coords = exifread.utils.get_gps_coords(tags)
+    if coords:
+        lat, lon = coords
+        out["gps"] = {"lat": round(lat, 6), "lon": round(lon, 6)}
+
+    w = tags.get("EXIF ExifImageWidth") or tags.get("Image ImageWidth")
+    h = tags.get("EXIF ExifImageLength") or tags.get("Image ImageLength")
+    if w and h:
+        out["dimensions"] = f"{w}x{h}"
+
+    software = tags.get("Image Software")
+    if software:
+        out["software"] = str(software)
+
+    return out or None
+
+
 def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
     """Convert MCP content blocks to OpenAI Responses API message content parts.
 
     Every binary gets persisted to the BinaryStore and produces an input_text
     part carrying the pointer JSON. Images additionally produce an input_image
-    part so the model can see the bytes.
+    part so the model can see the bytes, and an EXIF summary text part when
+    metadata is present.
     """
     parts = []
     for block in content_blocks:
@@ -173,6 +212,10 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
 
         elif block.type == "image":
             parts.append(_describe_binary(block.data, block.mimeType, store))
+            raw = base64.b64decode(block.data) if isinstance(block.data, str) else block.data
+            exif = _exif_summary(raw)
+            if exif:
+                parts.append({"type": "input_text", "text": json.dumps(exif)})
             parts.append({
                 "type": "input_image",
                 "image_url": f"data:{block.mimeType};base64,{block.data}",
@@ -248,12 +291,13 @@ class MCPConnection:
                         params = rewrite_binary_params(schema)
                         if params:
                             self.binary_params[prefixed_name] = params
-                            logger.info(f"  {prefixed_name}: {len(params)} binary param(s) → pointer")
+                            logger.debug("  %s: %d binary param(s) → pointer", prefixed_name, len(params))
                         self.tools.append(openai_tool)
 
-                    logger.info(f"MCP [{self.name}]: connected, {len(self.tools)} tools, instructions={'yes' if self.instructions else 'no'}")
+                    logger.info("MCP [%s]: connected, %d tools, instructions=%s",
+                                self.name, len(self.tools), "yes" if self.instructions else "no")
                     for t in self.tools:
-                        logger.info(f"  - {t['name']}")
+                        logger.debug("  - %s", t["name"])
 
                     self._ready.set()
                     await self._shutdown.wait()

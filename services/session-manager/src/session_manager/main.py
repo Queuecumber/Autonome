@@ -45,7 +45,7 @@ async def startup():
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
-            logger.warning(f"MCP connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            logger.warning("MCP connection attempt %d/%d failed: %s", attempt + 1, max_retries, e)
         await asyncio.sleep(2)
 
     if not orchestrator.openai_tools:

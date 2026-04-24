@@ -183,18 +183,18 @@ class MatrixClient:
             self._client.user_id = creds["user_id"]
             self._client.device_id = creds["device_id"]
             self._client.load_store()
-            logger.info(f"Restored session for {creds['user_id']} device {creds['device_id']}")
+            logger.info("Restored session for %s device %s", creds["user_id"], creds["device_id"])
         elif self.access_token:
             self._client.access_token = self.access_token
             self._client.user_id = self.user_id
             self._client.device_id = self.device_id
             self._client.load_store()
-            logger.info(f"Using provided access token for {self.user_id} device {self.device_id}")
+            logger.info("Using provided access token for %s device %s", self.user_id, self.device_id)
         else:
             resp = await self._client.login(self.password, device_name="Autonome")
             if not isinstance(resp, LoginResponse):
                 raise RuntimeError(f"Matrix login failed: {resp}")
-            logger.info(f"Logged in as {self.user_id} device {resp.device_id}")
+            logger.info("Logged in as %s device %s", self.user_id, resp.device_id)
             if creds_path:
                 creds_path.parent.mkdir(parents=True, exist_ok=True)
                 creds_path.write_text(json.dumps({
@@ -206,11 +206,11 @@ class MatrixClient:
         await self._client.sync(timeout=10000)
 
         for room_id in list(self._client.invited_rooms.keys()):
-            logger.info(f"Accepting pending invite to {room_id}")
+            logger.info("Accepting pending invite to %s", room_id)
             await self._client.join(room_id)
 
         self._trust_all_devices()
-        logger.info(f"Ready: {len(self._client.rooms)} rooms")
+        logger.info("Ready: %d rooms", len(self._client.rooms))
 
     # ── Listening ────────────────────────────────────────────
 
@@ -236,7 +236,7 @@ class MatrixClient:
             try:
                 await self._client.sync_forever(timeout=30000, full_state=True)
             except LocalProtocolError as e:
-                logger.warning(f"Sync protocol error (retrying): {e}")
+                logger.warning("Sync protocol error (retrying): %s", e)
                 continue
 
     # ── Generic event dispatch ───────────────────────────────
@@ -264,20 +264,20 @@ class MatrixClient:
             event_id=event.event_id,
             text=event.body,
         )
-        logger.info(f"Received text in {msg.room.name} from {msg.sender.name}")
+        logger.info("Received text in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
     async def _on_media(self, room: MatrixRoom, event) -> None:
-        url, mimetype, caption, filename, size = self._extract_media(event)
+        attachment, caption = self._extract_media(event)
         msg = Message(
             sender=Sender(id=event.sender, name=room.user_name(event.sender)),
             room=Room.from_nio(room),
             event_id=event.event_id,
             text=caption,
-            attachments=[Attachment(url=url, content_type=mimetype, filename=filename, size=size)],
+            attachments=[attachment],
         )
-        logger.info(f"Received media in {msg.room.name} from {msg.sender.name}")
+        logger.info("Received media in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
@@ -290,7 +290,8 @@ class MatrixClient:
             emoji=relates_to.get("key", ""),
             target_event_id=relates_to.get("event_id", ""),
         )
-        logger.info(f"Received reaction in {reaction.room.name} from {reaction.sender.name}: {reaction.emoji}")
+        logger.info("Received reaction in %s from %s: %s",
+                    reaction.room.name, reaction.sender.name, reaction.emoji)
         if self._on_message:
             await self._on_message(reaction)
 
@@ -310,47 +311,44 @@ class MatrixClient:
                 await self._client.joined_members(room_id)
 
     async def _handle_verification_start(self, event: KeyVerificationStart) -> None:
-        logger.info(f"Verification request from {event.sender} (tx: {event.transaction_id})")
+        logger.info("Verification request from %s (tx: %s)", event.sender, event.transaction_id)
         resp = await self._client.accept_key_verification(event.transaction_id)
         if isinstance(resp, ToDeviceError):
-            logger.error(f"Failed to accept verification: {resp}")
+            logger.error("Failed to accept verification: %s", resp)
 
     async def _handle_verification_key(self, event: KeyVerificationKey) -> None:
         sas = self._client.key_verifications.get(event.transaction_id)
         if sas:
             emojis = sas.get_emoji()
             emoji_str = " ".join(f"{e[0]} ({e[1]})" for e in emojis)
-            logger.info(f"🔐 VERIFY EMOJIS: {emoji_str}")
+            logger.info("🔐 VERIFY EMOJIS: %s", emoji_str)
             logger.info("Confirm these match in Element, then the bot will auto-confirm.")
             resp = await self._client.confirm_key_verification(event.transaction_id)
             if isinstance(resp, ToDeviceError):
-                logger.error(f"Failed to confirm verification: {resp}")
+                logger.error("Failed to confirm verification: %s", resp)
 
     async def _handle_verification_mac(self, event: KeyVerificationMac) -> None:
-        logger.info(f"Verification complete (tx: {event.transaction_id})")
+        logger.info("Verification complete (tx: %s)", event.transaction_id)
 
     async def _handle_verification_cancel(self, event: KeyVerificationCancel) -> None:
-        logger.info(f"Verification cancelled (tx: {event.transaction_id}): {event.reason}")
+        logger.info("Verification cancelled (tx: %s): %s", event.transaction_id, event.reason)
 
     async def _handle_megolm(self, room: MatrixRoom, event: MegolmEvent) -> None:
-        logger.warning(f"Undecryptable message in {room.room_id} from {event.sender}")
+        logger.warning("Undecryptable message in %s from %s", room.room_id, event.sender)
 
     async def _handle_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:
         if event.state_key != self.user_id:
             return
-        logger.info(f"Accepting invite to {room.room_id} from {event.sender}")
+        logger.info("Accepting invite to %s from %s", room.room_id, event.sender)
         await self._client.join(room.room_id)
 
     # ── Helpers ──────────────────────────────────────────────
 
-    def _extract_media(self, event) -> tuple[str, str | None, str | None, str, int | None]:
-        """Extract mxc URL, mimetype, caption, filename, and size.
-
-        MSC2530 shape: body carries the caption, filename lives in a
-        top-level `filename` field. Legacy shape: body carries the
-        filename and there's no explicit filename field. We normalize
-        both into (caption, filename) here so downstream code doesn't
-        need to know which shape was used."""
+    def _extract_media(self, event) -> tuple[Attachment, str | None]:
+        """Build an Attachment from an inbound media event and extract any
+        caption. MSC2530 shape: body is the caption, filename lives in a
+        top-level `filename` field. Legacy shape: body is the filename
+        and there's no explicit filename field."""
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
 
@@ -368,15 +366,19 @@ class MatrixClient:
 
         top_filename = content.get("filename") or info.get("filename")
         if top_filename and top_filename != event.body:
-            # MSC2530: body is the caption, filename is the real filename.
             filename = top_filename
             caption = event.body
         else:
-            # Legacy or no-caption: body is the filename.
             filename = top_filename or event.body
             caption = None
 
-        return url, info.get("mimetype"), caption, filename, info.get("size")
+        attachment = Attachment(
+            url=url,
+            content_type=info.get("mimetype"),
+            filename=filename,
+            size=info.get("size"),
+        )
+        return attachment, caption
 
     # ── Writing ──────────────────────────────────────────────
 
@@ -390,13 +392,12 @@ class MatrixClient:
 
     async def send_message(self, room_id: str, text: str) -> str:
         html = _MARKDOWN(text).strip()
-        content: dict = {"msgtype": "m.text", "body": text}
-        # Only send formatted_body when rendering actually adds markup —
-        # for plain text like "ok" the HTML is just "<p>ok</p>" wrapping,
-        # which some clients render with extra padding.
-        if html and html != f"<p>{text}</p>":
-            content["format"] = "org.matrix.custom.html"
-            content["formatted_body"] = html
+        content: dict = {
+            "msgtype": "m.text",
+            "body": text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html,
+        }
         resp = await self._room_send(room_id, "m.room.message", content)
         return resp.event_id
 

@@ -2,66 +2,16 @@
 
 import asyncio
 import base64
-import io
-import json
 import logging
 import os
 
-import exifread
 import filetype
 import httpx
 from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 from pydantic import Base64Bytes
 
-from matrix_adapter.model import MatrixClient, Message, Reaction
-
-
-def _exif_summary(data: bytes) -> dict | None:
-    """Extract a small, useful subset of EXIF from image bytes.
-    Returns None if no EXIF present or parsing fails."""
-    try:
-        tags = exifread.process_file(io.BytesIO(data), details=False)
-    except Exception:
-        return None
-    if not tags:
-        return None
-
-    out: dict = {}
-
-    dt = tags.get("EXIF DateTimeOriginal") or tags.get("Image DateTime")
-    if dt:
-        out["datetime"] = str(dt)
-
-    make = tags.get("Image Make")
-    model = tags.get("Image Model")
-    if make or model:
-        out["camera"] = " ".join(str(x) for x in (make, model) if x).strip()
-
-    lat = tags.get("GPS GPSLatitude")
-    lat_ref = tags.get("GPS GPSLatitudeRef")
-    lon = tags.get("GPS GPSLongitude")
-    lon_ref = tags.get("GPS GPSLongitudeRef")
-    if lat and lon and lat_ref and lon_ref:
-        try:
-            def _to_deg(ratio, ref):
-                d, m, s = [float(r.num) / float(r.den) for r in ratio.values]
-                decimal = d + m / 60 + s / 3600
-                return -decimal if str(ref) in ("S", "W") else decimal
-            out["gps"] = {"lat": round(_to_deg(lat, lat_ref), 6), "lon": round(_to_deg(lon, lon_ref), 6)}
-        except Exception:
-            pass
-
-    w = tags.get("EXIF ExifImageWidth") or tags.get("Image ImageWidth")
-    h = tags.get("EXIF ExifImageLength") or tags.get("Image ImageLength")
-    if w and h:
-        out["dimensions"] = f"{w}x{h}"
-
-    software = tags.get("Image Software")
-    if software:
-        out["software"] = str(software)
-
-    return out or None
+from matrix_adapter.model import MatrixClient, Message, Reaction, Sender
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +38,7 @@ async def send_message(room_id: str, text: str) -> None:
         await client.send_typing(room_id, typing=False)
     except Exception as e:
         # Typing indicator is best-effort — never let it block the actual send.
-        logger.debug(f"stop-typing before send_message failed: {e!r}")
+        logger.warning("stop-typing before send_message failed: %r", e)
     await client.send_message(room_id, text)
 
 
@@ -111,7 +61,7 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
 
 
 @mcp.tool
-async def get_room_members(room_id: str) -> list[dict]:
+async def get_room_members(room_id: str) -> list[Sender]:
     """List the people currently in a Matrix room.
 
     Each event already carries a `member_count` in its metadata — use that
@@ -122,39 +72,20 @@ async def get_room_members(room_id: str) -> list[dict]:
       more than two members
     - Someone new joined the conversation and you don't recognize them
     - A member_count you noticed before has changed
-
-    Returns [{id, name}, ...]. Large rooms are truncated to 50 entries
-    with a `_truncated` marker appended."""
-    members = client.get_room_members(room_id)
-    out: list[dict] = [{"id": m.id, "name": m.name} for m in members[:50]]
-    if len(members) > 50:
-        out.append({"id": "_truncated", "name": f"{len(members) - 50} more not shown"})
-    return out
+    """
+    return client.get_room_members(room_id)
 
 
 @mcp.tool
-async def get_attachment(mxc_url: str) -> list[ImageContent | TextContent]:
-    """Fetch a Matrix attachment by mxc:// URL.
-
-    For images, returns the image content plus (when present) an EXIF
-    summary with the fields most likely to tell you something useful:
-    datetime the photo was taken, camera make/model, GPS coordinates,
-    dimensions, and editing software. Photos from phones and most
-    cameras carry this; screenshots and many forwarded images don't.
-
-    Non-image attachments return a single text block describing the
-    file."""
+async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
+    """Fetch a Matrix attachment by mxc:// URL. Images come back as
+    ImageContent (the session-manager extracts EXIF on the way through
+    if any is present). Non-image attachments return a text descriptor."""
     data, _ = await client.download_attachment(mxc_url)
     kind = filetype.guess(data)
     if kind and kind.mime.startswith("image/"):
-        result: list[ImageContent | TextContent] = [
-            ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=kind.mime),
-        ]
-        exif = _exif_summary(data)
-        if exif:
-            result.append(TextContent(type="text", text=json.dumps(exif)))
-        return result
-    return [TextContent(type="text", text=f"[attachment: {kind.mime if kind else 'unknown'}, {len(data)} bytes]")]
+        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=kind.mime)
+    return TextContent(type="text", text=f"[attachment: {kind.mime if kind else 'unknown'}, {len(data)} bytes]")
 
 
 @mcp.tool
@@ -191,11 +122,11 @@ async def update_profile(display_name: str | None = None, avatar: Base64Bytes | 
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message | Reaction) -> None:
-    logger.info(f"Received: {msg}")
+    logger.info("Received: %s", msg)
     try:
         await _http.post(f"{session_manager_url}/event", json=msg.to_event())
     except Exception as e:
-        logger.error(f"Failed to push event to session manager: {e}")
+        logger.error("Failed to push event to session manager: %s", e)
 
 
 # ── Entrypoint ───────────────────────────────────────────
