@@ -11,7 +11,7 @@ from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 from pydantic import Base64Bytes
 
-from matrix_adapter.model import MatrixClient, Message, Reaction
+from matrix_adapter.model import MatrixClient, Message, Reaction, Sender
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,9 @@ async def send_message(room_id: str, text: str) -> None:
     """Send a text message to a Matrix room. Automatically stops typing indicator."""
     try:
         await client.send_typing(room_id, typing=False)
-    except Exception:
-        pass
+    except Exception as e:
+        # Typing indicator is best-effort — never let it block the actual send.
+        logger.warning("stop-typing before send_message failed: %r", e)
     await client.send_message(room_id, text)
 
 
@@ -60,8 +61,26 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
 
 
 @mcp.tool
+async def get_room_members(room_id: str) -> list[Sender]:
+    """List the people currently in a Matrix room.
+
+    Each event already carries a `member_count` in its metadata — use that
+    as your first signal for how public a room is. Call this tool to see
+    who specifically is there when:
+
+    - You're about to share anything private or personal and the room has
+      more than two members
+    - Someone new joined the conversation and you don't recognize them
+    - A member_count you noticed before has changed
+    """
+    return client.get_room_members(room_id)
+
+
+@mcp.tool
 async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment by mxc:// URL. Images are returned as ImageContent."""
+    """Fetch a Matrix attachment by mxc:// URL. Images come back as
+    ImageContent (the session-manager extracts EXIF on the way through
+    if any is present). Non-image attachments return a text descriptor."""
     data, _ = await client.download_attachment(mxc_url)
     kind = filetype.guess(data)
     if kind and kind.mime.startswith("image/"):
@@ -70,9 +89,22 @@ async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
 
 
 @mcp.tool
-async def send_attachment(room_id: str, data: Base64Bytes, filename: str, content_type: str = "application/octet-stream") -> None:
-    """Send a file attachment to a Matrix room."""
-    await client.upload_and_send_attachment(room_id, data, content_type, filename)
+async def send_attachment(
+    room_id: str,
+    data: Base64Bytes,
+    filename: str,
+    content_type: str = "application/octet-stream",
+    caption: str | None = None,
+) -> None:
+    """Send a file attachment to a Matrix room.
+
+    `filename` is the filename the recipient will see in their client
+    (e.g. `photo.jpg`, `report.pdf`). Don't put a caption here.
+
+    `caption` is an optional message to go with the attachment — the thing
+    you'd type alongside the image. Leave it off if the attachment speaks
+    for itself."""
+    await client.upload_and_send_attachment(room_id, data, content_type, filename, caption=caption)
 
 
 @mcp.tool
@@ -90,11 +122,11 @@ async def update_profile(display_name: str | None = None, avatar: Base64Bytes | 
 # ── Inbound event forwarding ─────────────────────────────
 
 async def on_message(msg: Message | Reaction) -> None:
-    logger.info(f"Received: {msg}")
+    logger.info("Received: %s", msg)
     try:
         await _http.post(f"{session_manager_url}/event", json=msg.to_event())
     except Exception as e:
-        logger.error(f"Failed to push event to session manager: {e}")
+        logger.error("Failed to push event to session manager: %s", e)
 
 
 # ── Entrypoint ───────────────────────────────────────────

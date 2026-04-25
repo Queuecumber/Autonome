@@ -52,7 +52,7 @@ class BinaryStore:
             counter += 1
 
         path.write_bytes(content)
-        logger.info(f"Saved binary {path.name} ({len(content)} bytes, {mime_type})")
+        logger.info("Saved binary %s (%d bytes, %s)", path.name, len(content), mime_type)
         return path.name
 
     def load(self, pointer: str) -> tuple[bytes, str]:
@@ -75,5 +75,5 @@ class BinaryStore:
                 path.unlink()
                 removed += 1
         if removed:
-            logger.info(f"GC: removed {removed} binaries older than {self.retention_days}d")
+            logger.info("GC: removed %d binaries older than %dd", removed, self.retention_days)
         return removed

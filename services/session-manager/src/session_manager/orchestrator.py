@@ -163,7 +163,7 @@ def _log_exception_tree(e: BaseException, depth: int = 0) -> None:
     """Recursively log a BaseExceptionGroup tree so TaskGroup wrappers don't
     swallow the real cause."""
     indent = "  " * depth
-    logger.error(f"{indent}{type(e).__name__}: {e}", exc_info=e)
+    logger.error("%s%s: %s", indent, type(e).__name__, e, exc_info=e)
     for sub in getattr(e, "exceptions", ()) or ():
         _log_exception_tree(sub, depth + 1)
 
@@ -184,8 +184,8 @@ class SessionOrchestrator:
         self.config = config
 
         model_config = config.get("model", {})
-        self.model = model_config.get("model", "")
-        self.reasoning_effort = model_config.get("reasoning_effort")
+        self.model = model_config.get("name", "")
+        self.call_config = model_config.get("config") or {}
 
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
@@ -223,10 +223,11 @@ class SessionOrchestrator:
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException as e:
-                logger.error(f"Failed to connect to MCP server {name} at {url}: {e!r}")
+                logger.error("Failed to connect to MCP server %s at %s: %r", name, url, e)
                 _log_exception_tree(e)
 
-        logger.info(f"Connected to {len(self.mcp_connections)} MCP servers, {len(self.openai_tools)} tools total")
+        logger.info("Connected to %d MCP servers, %d tools total",
+                    len(self.mcp_connections), len(self.openai_tools))
 
     def _get_session(self, session_id: str) -> _SessionState:
         if session_id not in self._sessions:
@@ -263,7 +264,8 @@ class SessionOrchestrator:
             return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}, []
 
         content_blocks = await conn.call_tool(name, arguments, store=self.binaries)
-        logger.debug(f"  {name} returned {len(content_blocks)} block(s): {[getattr(b, 'type', type(b).__name__) for b in content_blocks]}")
+        logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),
+                     [getattr(b, "type", type(b).__name__) for b in content_blocks])
         openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
 
         # input_text → function_call_output.output (a single string)
@@ -338,7 +340,7 @@ class SessionOrchestrator:
                 status = getattr(resp, "status", "unknown")
                 error = getattr(resp, "error", None)
                 model = getattr(resp, "model", "unknown")
-                logger.error(f"LLM stream failed: status={status} model={model} error={error}")
+                logger.error("LLM stream failed: status=%s model=%s error=%s", status, model, error)
                 return None, completed_items
 
         return response, completed_items
@@ -353,12 +355,12 @@ class SessionOrchestrator:
         state = self._get_session(event.session_id)
 
         if event.energy == "passive" and state.lock.locked():
-            logger.info(f"Queuing passive event for {event.session_id}: {event.text[:60]}")
+            logger.info("Queuing passive event for %s: %s", event.session_id, event.text[:60])
             state.passive_queue.append(event)
             return None
 
         if event.energy == "active" and state.cancel is not None:
-            logger.info(f"Interrupting in-progress response for {event.session_id}")
+            logger.info("Interrupting in-progress response for %s", event.session_id)
             state.cancel.set()
 
         async with state.lock:
@@ -374,7 +376,7 @@ class SessionOrchestrator:
         if state.passive_queue:
             batch = state.passive_queue
             state.passive_queue = []
-            logger.info(f"Draining {len(batch)} passive events for {event.session_id}")
+            logger.info("Draining %d passive events for %s", len(batch), event.session_id)
             async with state.lock:
                 cancel = asyncio.Event()
                 state.cancel = cancel
@@ -414,22 +416,22 @@ class SessionOrchestrator:
             new_items.append(user_msg)
 
         # Build input: history + new events (filter reasoning — output-only type)
-        history = [m for m in raw_history if m.get("type") != "reasoning"]
+        history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
         input_items = history + new_items
 
-        # Build API call kwargs
-        call_kwargs: dict[str, Any] = {
-            "model": self.model,
-            "instructions": self._build_instructions(),
-            "input": input_items,
-            "max_output_tokens": 16384,
-        }
-        if self.reasoning_effort:
-            call_kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        # User config (reasoning, extra_body, etc.) starts as the base;
+        # orchestrator-owned fields overwrite it. max_output_tokens uses
+        # setdefault so user can override the 64K fallback.
+        call_kwargs: dict[str, Any] = dict(self.call_config)
+        call_kwargs["model"] = self.model
+        call_kwargs["instructions"] = self._build_instructions()
+        call_kwargs["input"] = input_items
+        call_kwargs.setdefault("max_output_tokens", 65536)
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
-        logger.info(f"Calling LLM: {len(input_items)} input items, {len(self.openai_tools)} tools, {len(events)} event(s)")
+        logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
+                    len(input_items), len(self.openai_tools), len(events))
 
         # Collect all new items to save to history
         all_new_messages = list(new_items)
@@ -438,7 +440,7 @@ class SessionOrchestrator:
             try:
                 response, completed_items = await self._stream_response(call_kwargs, cancel)
             except Exception as e:
-                logger.error(f"LLM call failed: {type(e).__name__}: {e!r}", exc_info=True)
+                logger.error("LLM call failed: %s: %r", type(e).__name__, e, exc_info=True)
                 return None
 
             # --- Interrupted during streaming ---
@@ -446,26 +448,53 @@ class SessionOrchestrator:
                 partial = _describe_interrupted(completed_items)
                 if partial:
                     all_new_messages.append(_developer_event("interrupted", partial=partial))
-                    logger.info(f"Interrupted, partial: {partial}")
+                    logger.info("Interrupted, partial: %s", partial)
                 else:
                     logger.info("Interrupted before any output completed")
                 self.session.append(session_id, all_new_messages)
                 return None
 
-            logger.info(f"LLM response (iter {iteration}): status={response.status}")
+            logger.debug("LLM response (iter %d): status=%s", iteration, response.status)
+
+            # Record token usage as a transcript comment — stripped from replay
+            # but preserved in the session log for cost/observability tracking.
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                details = getattr(usage, "output_tokens_details", None)
+                reasoning_tokens = getattr(details, "reasoning_tokens", 0) if details else 0
+                comment = {
+                    "type": "comment",
+                    "kind": "usage",
+                    "iteration": iteration,
+                    "input_tokens": getattr(usage, "input_tokens", None),
+                    "output_tokens": getattr(usage, "output_tokens", None),
+                    "reasoning_tokens": reasoning_tokens,
+                    "total_tokens": getattr(usage, "total_tokens", None),
+                }
+                all_new_messages.append(comment)
+                logger.info("  usage: in=%s out=%s reasoning=%d total=%s",
+                            comment["input_tokens"], comment["output_tokens"],
+                            reasoning_tokens, comment["total_tokens"])
 
             # Process output items
             tool_calls = []
             assistant_text = ""
             reasoning_text = ""
 
+            logger.debug("response.output types: %s",
+                         [getattr(i, "type", type(i).__name__) for i in response.output])
             for item in response.output:
                 if item.type == "function_call":
                     tool_calls.append(item)
                 elif item.type == "reasoning":
-                    for content in item.content or []:
-                        if hasattr(content, "text"):
-                            reasoning_text += content.text
+                    logger.debug("reasoning item: summary=%r content=%r",
+                                 getattr(item, "summary", None), item.content)
+                    for block in (getattr(item, "summary", None) or []):
+                        if hasattr(block, "text"):
+                            reasoning_text += block.text
+                    for block in (item.content or []):
+                        if hasattr(block, "text"):
+                            reasoning_text += block.text
                 elif item.type == "message":
                     for content in item.content or []:
                         if hasattr(content, "text"):
@@ -498,14 +527,14 @@ class SessionOrchestrator:
                             except (json.JSONDecodeError, AttributeError):
                                 args = t.arguments
                             pending.append({"tool": t.name, "arguments": args})
-                        logger.info(f"Interrupted between tool calls, pending: {pending}")
+                        logger.info("Interrupted between tool calls, pending: %s", pending)
                         all_new_messages.append(_developer_event("interrupted", pending=pending))
                         self.session.append(session_id, all_new_messages)
                         return None
 
-                    logger.info(f"  Tool call: {tc.name}({tc.arguments[:100]})")
+                    logger.info("  Tool call: %s(%s)", tc.name, tc.arguments[:100])
                     result, images = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
-                    logger.info(f"  Result: {result['output'][:200]}")
+                    logger.debug("  Result: %s", result["output"][:200])
                     tool_results.append(result)
                     all_new_messages.append(_prepare_for_history(result))
                     for img in images:
@@ -523,10 +552,10 @@ class SessionOrchestrator:
 
             self.session.append(session_id, all_new_messages)
 
-            logger.info(f"Final response: {assistant_text[:200]}")
+            logger.info("Final response: %s", assistant_text[:200])
             return assistant_text
 
-        logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
+        logger.warning("Max tool iterations (%d) reached", self.max_tool_iterations)
         self.session.append(session_id, all_new_messages)
         return None
 
@@ -540,5 +569,5 @@ class SessionOrchestrator:
             try:
                 self.binaries.gc()
             except Exception as e:
-                logger.error(f"Binary GC error: {e}")
+                logger.error("Binary GC error: %s", e)
             await asyncio.sleep(interval_seconds)
