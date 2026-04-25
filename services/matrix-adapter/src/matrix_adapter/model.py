@@ -78,6 +78,7 @@ class Attachment:
     content_type: str | None = None
     filename: str | None = None
     size: int | None = None
+    caption: str | None = None
 
 
 @dataclass
@@ -100,7 +101,12 @@ class Message:
         }
         if self.attachments:
             metadata["attachments"] = [
-                {"url": att.url, "content_type": att.content_type, "filename": att.filename}
+                {
+                    "url": att.url,
+                    "content_type": att.content_type,
+                    "filename": att.filename,
+                    "caption": att.caption,
+                }
                 for att in self.attachments
             ]
         return {
@@ -269,12 +275,12 @@ class MatrixClient:
             await self._on_message(msg)
 
     async def _on_media(self, room: MatrixRoom, event) -> None:
-        attachment, caption = self._extract_media(event)
+        attachment = self._extract_media(event)
         msg = Message(
             sender=Sender(id=event.sender, name=room.user_name(event.sender)),
             room=Room.from_nio(room),
             event_id=event.event_id,
-            text=caption,
+            text=attachment.caption,
             attachments=[attachment],
         )
         logger.info("Received media in %s from %s", msg.room.name, msg.sender.name)
@@ -344,11 +350,10 @@ class MatrixClient:
 
     # ── Helpers ──────────────────────────────────────────────
 
-    def _extract_media(self, event) -> tuple[Attachment, str | None]:
-        """Build an Attachment from an inbound media event and extract any
-        caption. MSC2530 shape: body is the caption, filename lives in a
-        top-level `filename` field. Legacy shape: body is the filename
-        and there's no explicit filename field."""
+    def _extract_media(self, event) -> Attachment:
+        """Build an Attachment from an inbound media event. MSC2530: body is
+        the caption, filename lives in a top-level `filename` field. Legacy:
+        body is the filename, no explicit filename field."""
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
 
@@ -372,13 +377,13 @@ class MatrixClient:
             filename = top_filename or event.body
             caption = None
 
-        attachment = Attachment(
+        return Attachment(
             url=url,
             content_type=info.get("mimetype"),
             filename=filename,
             size=info.get("size"),
+            caption=caption,
         )
-        return attachment, caption
 
     # ── Writing ──────────────────────────────────────────────
 
