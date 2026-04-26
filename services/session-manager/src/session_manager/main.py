@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from session_manager import cache_mcp
 from session_manager.event import Event
 from session_manager.orchestrator import SessionOrchestrator
 
@@ -28,14 +29,29 @@ async def startup():
 
     session_dir = Path(config.get("session", {}).get("store", "./sessions"))
     port = int(os.environ.get("SESSION_MANAGER_PORT", "5000"))
+    cache_mcp_port = int(os.environ.get("CACHE_MCP_PORT", "5001"))
 
     orchestrator = SessionOrchestrator(
         config=config,
         session_dir=session_dir,
     )
 
+    # Cache MCP server runs in-process and shares the orchestrator's
+    # BinaryStore. The orchestrator connects to it as just another MCP
+    # server (over loopback HTTP), which is how the read_binary tool
+    # reaches the LLM and how pointer:// resources show up to MCP clients.
+    cache_mcp.binary_store = orchestrator.binaries
+    asyncio.create_task(
+        cache_mcp.mcp.run_async(transport="http", host="0.0.0.0", port=cache_mcp_port),
+        name="cache-mcp",
+    )
+    # Give the MCP server a moment to bind before the orchestrator tries
+    # to connect to it.
+    await asyncio.sleep(0.5)
+
     # Connect to MCP servers (retry until available)
-    mcp_urls = config.get("mcp_servers", {})
+    mcp_urls = dict(config.get("mcp_servers", {}) or {})
+    mcp_urls.setdefault("session", f"http://localhost:{cache_mcp_port}/mcp")
     max_retries = 30
     for attempt in range(max_retries):
         try:

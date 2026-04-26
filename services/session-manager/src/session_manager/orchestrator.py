@@ -1,7 +1,6 @@
 """Session manager: central orchestrator that receives events and drives LLM calls."""
 
 import asyncio
-import base64
 import json
 import logging
 from datetime import datetime
@@ -12,26 +11,8 @@ from openai import AsyncOpenAI
 
 from session_manager.binaries import BinaryStore
 from session_manager.event import Event
-from session_manager.mcp import POINTER_PREFIX, MCPConnection, mcp_content_to_openai
+from session_manager.mcp import MCPConnection, mcp_content_to_openai
 from session_manager.session import SessionManager
-
-VIEW_BINARY_TOOL_NAME = "aptool-session-view_binary"
-VIEW_BINARY_TOOL = {
-    "type": "function",
-    "name": VIEW_BINARY_TOOL_NAME,
-    "description": (
-        "Load a previously stored binary (by pointer) into your current input. "
-        "For images this re-surfaces the image so you can look at it again. "
-        "Pointers look like 'pointer://5-photo.jpg' and appear in tool result metadata."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "pointer": {"type": "string", "description": "The binary pointer (may include the 'pointer://' prefix)."},
-        },
-        "required": ["pointer"],
-    },
-}
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +259,7 @@ class SessionOrchestrator:
         self._sessions: dict[str, _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
-        self.openai_tools: list[dict] = [VIEW_BINARY_TOOL]
+        self.openai_tools: list[dict] = []
         self._tool_to_mcp: dict[str, MCPConnection] = {}
 
         self.max_tool_iterations = 20
@@ -354,9 +335,6 @@ class SessionOrchestrator:
           - function_call_output: the output item with text content
           - image_items: user messages with image_url content for the model to see
         """
-        if name == VIEW_BINARY_TOOL_NAME:
-            return self._view_binary(call_id, arguments)
-
         conn = self._tool_to_mcp.get(name)
 
         if conn is None:
@@ -378,41 +356,6 @@ class SessionOrchestrator:
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
         return output, image_items
-
-    def _view_binary(self, call_id: str, arguments: str) -> tuple[dict, list[dict]]:
-        """Built-in: resolve a pointer into the current turn's input."""
-        try:
-            args = json.loads(arguments) if isinstance(arguments, str) else arguments
-            pointer = args.get("pointer", "")
-            if not pointer:
-                raise ValueError("pointer is required")
-            if pointer.startswith(POINTER_PREFIX):
-                pointer = pointer[len(POINTER_PREFIX):]
-            content, mime = self.binaries.load(pointer)
-        except Exception as e:
-            return (
-                {"type": "function_call_output", "call_id": call_id, "output": f"Error: {e}"},
-                [],
-            )
-
-        if mime.startswith("image/"):
-            part = {
-                "type": "input_image",
-                "image_url": f"data:{mime};base64,{base64.b64encode(content).decode()}",
-            }
-            output = {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": f"[loaded image, pointer={pointer}]",
-            }
-            return output, [{"role": "user", "content": [part]}]
-
-        output = {
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": f"[binary {pointer} ({mime}, {len(content)} bytes) — non-visual, not loaded]",
-        }
-        return output, []
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
         """Stream an LLM response, collecting completed items.
