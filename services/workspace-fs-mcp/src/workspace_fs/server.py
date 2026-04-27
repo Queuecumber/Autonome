@@ -19,6 +19,7 @@ from mcp.types import (
     ImageContent,
     TextContent,
 )
+from pydantic import Base64Bytes
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
@@ -34,9 +35,15 @@ files.
 
 @dataclass
 class File:
-    """A file's content with its MIME type and path."""
+    """A file's content with its MIME type and path.
+
+    `data` accepts either plain text (for text MIME types) or base64-
+    encoded bytes (for binary). The orchestrator's pointer-rewriting
+    layer treats the bytes branch of the union as eligible for pointer
+    auto-resolution, so callers can pass `pointer://...` URIs directly
+    instead of pre-fetching and base64-encoding."""
     content_type: str
-    data: str
+    data: str | Base64Bytes
     path: str | None = None
 
 
@@ -131,13 +138,14 @@ def write_file(path: str, file: File) -> str:
     """
     target = _safe_resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    data = file.data
     if _is_text_type(file.content_type):
-        target.write_text(file.data)
-        return f"Wrote {len(file.data)} chars to {path}"
-    else:
-        raw = base64.b64decode(file.data)
-        target.write_bytes(raw)
-        return f"Wrote {len(raw)} bytes to {path}"
+        text = data.decode("utf-8") if isinstance(data, bytes) else data
+        target.write_text(text)
+        return f"Wrote {len(text)} chars to {path}"
+    raw = data if isinstance(data, bytes) else base64.b64decode(data)
+    target.write_bytes(raw)
+    return f"Wrote {len(raw)} bytes to {path}"
 
 
 @mcp.tool
