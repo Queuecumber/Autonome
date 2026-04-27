@@ -453,7 +453,23 @@ class MatrixClient:
         )
         content_uri = getattr(resp, "content_uri", None)
         if not content_uri:
-            raise RuntimeError(f"Upload failed: {resp}")
+            # nio collapses validation failures into ErrorResponse(message="unknown
+            # error") which is useless for diagnosis. Pull every plausible field
+            # off the response object so we can see status, message, raw body.
+            detail_parts = [
+                f"type={type(resp).__name__}",
+                f"status_code={getattr(resp, 'status_code', None)!r}",
+                f"message={getattr(resp, 'message', None)!r}",
+                f"transport_response={getattr(resp, 'transport_response', None)!r}",
+            ]
+            try:
+                detail_parts.append(f"attrs={vars(resp)!r}")
+            except TypeError:
+                pass
+            raise RuntimeError(
+                f"Upload failed (encrypt={encrypt}, content_type={content_type}, "
+                f"size={len(data)}): " + " ".join(detail_parts)
+            )
         return content_uri, decryption_info
 
     async def upload_and_send_attachment(
