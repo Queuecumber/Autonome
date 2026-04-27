@@ -16,6 +16,56 @@ from session_manager.session import SessionManager
 
 logger = logging.getLogger(__name__)
 
+
+# Harness-level tools that bridge MCP resource verbs to the LLM. These
+# can't be hosted by any single MCP server because they aggregate /
+# route across all connected ones.
+RESOURCES_LIST_TOOL_NAME = "aptool-resources_list"
+RESOURCES_TEMPLATE_LIST_TOOL_NAME = "aptool-resources_template_list"
+RESOURCES_READ_TOOL_NAME = "aptool-resources_read"
+
+RESOURCE_BRIDGE_TOOLS = [
+    {
+        "type": "function",
+        "name": RESOURCES_LIST_TOOL_NAME,
+        "description": (
+            "List MCP resources from all connected servers. Returns "
+            "[{server, uri, name, description, mimeType}, ...]. Use this "
+            "to discover what's currently available before reading."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": RESOURCES_TEMPLATE_LIST_TOOL_NAME,
+        "description": (
+            "List MCP resource templates from all connected servers. "
+            "Templates are URI patterns like `pointer://{name}` that "
+            "describe families of resources you can address by filling "
+            "in the parameters."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": RESOURCES_READ_TOOL_NAME,
+        "description": (
+            "Read a resource by URI from any connected MCP server. The "
+            "URI can be a static resource (from resources_list) or a "
+            "concrete instance of a template (e.g. `pointer://5-photo.jpg`). "
+            "Returns whatever content the resource provides — text, image, "
+            "or binary descriptor."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string", "description": "Full resource URI."},
+            },
+            "required": ["uri"],
+        },
+    },
+]
+
 # TODO: make configurable, iterate on prompting
 SYSTEM_PROMPT = """\
 # Autonome
@@ -259,7 +309,7 @@ class SessionOrchestrator:
         self._sessions: dict[str, _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
-        self.openai_tools: list[dict] = []
+        self.openai_tools: list[dict] = list(RESOURCE_BRIDGE_TOOLS)
         self._tool_to_mcp: dict[str, MCPConnection] = {}
 
         self.max_tool_iterations = 20
@@ -335,6 +385,13 @@ class SessionOrchestrator:
           - function_call_output: the output item with text content
           - image_items: user messages with image_url content for the model to see
         """
+        if name == RESOURCES_LIST_TOOL_NAME:
+            return await self._resources_list(call_id)
+        if name == RESOURCES_TEMPLATE_LIST_TOOL_NAME:
+            return await self._resources_template_list(call_id)
+        if name == RESOURCES_READ_TOOL_NAME:
+            return await self._resources_read(call_id, arguments)
+
         conn = self._tool_to_mcp.get(name)
 
         if conn is None:
@@ -355,6 +412,85 @@ class SessionOrchestrator:
         ]
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
+        return output, image_items
+
+    async def _resources_list(self, call_id: str) -> tuple[dict, list[dict]]:
+        """Aggregate resources/list across every connected MCP server."""
+        out: list[dict] = []
+        for conn in self.mcp_connections.values():
+            try:
+                resources = await conn.list_resources()
+            except Exception as e:
+                logger.debug("resources_list: %s failed: %r", conn.name, e)
+                continue
+            for r in resources:
+                out.append({
+                    "server": conn.name,
+                    "uri": str(getattr(r, "uri", "")),
+                    "name": getattr(r, "name", None),
+                    "description": getattr(r, "description", None),
+                    "mimeType": getattr(r, "mimeType", None),
+                })
+        return ({"type": "function_call_output", "call_id": call_id, "output": json.dumps(out)}, [])
+
+    async def _resources_template_list(self, call_id: str) -> tuple[dict, list[dict]]:
+        """Aggregate resources/templates/list across every connected server."""
+        out: list[dict] = []
+        for conn in self.mcp_connections.values():
+            try:
+                templates = await conn.list_resource_templates()
+            except Exception as e:
+                logger.debug("resources_template_list: %s failed: %r", conn.name, e)
+                continue
+            for t in templates:
+                out.append({
+                    "server": conn.name,
+                    "uriTemplate": getattr(t, "uriTemplate", None),
+                    "name": getattr(t, "name", None),
+                    "description": getattr(t, "description", None),
+                    "mimeType": getattr(t, "mimeType", None),
+                })
+        return ({"type": "function_call_output", "call_id": call_id, "output": json.dumps(out)}, [])
+
+    async def _resources_read(self, call_id: str, arguments: str) -> tuple[dict, list[dict]]:
+        """Read a resource by URI, trying each connected server until one
+        succeeds. Translates the MCP ResourceContents result through
+        mcp_content_to_openai so images surface as input_image, blobs
+        get pointer-text, and text comes through as text."""
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+            uri = args.get("uri", "")
+            if not uri:
+                raise ValueError("uri is required")
+        except Exception as e:
+            return ({"type": "function_call_output", "call_id": call_id, "output": f"Error: {e}"}, [])
+
+        last_error: Exception | None = None
+        contents: list = []
+        for conn in self.mcp_connections.values():
+            try:
+                contents = await conn.read_resource(uri)
+                break
+            except Exception as e:
+                last_error = e
+        else:
+            err = f"No server could read resource {uri!r}"
+            if last_error:
+                err += f" (last error: {last_error!r})"
+            return ({"type": "function_call_output", "call_id": call_id, "output": err}, [])
+
+        # Wrap each ResourceContents in an EmbeddedResource-shaped dict so
+        # mcp_content_to_openai's "resource" branch handles it uniformly.
+        wrapped = [type("_Wrap", (), {"type": "resource", "resource": c})() for c in contents]
+        openai_parts = mcp_content_to_openai(wrapped, store=self.binaries)
+
+        text_parts = [p["text"] for p in openai_parts if p.get("type") == "input_text"]
+        image_items = [
+            {"role": "user", "content": [p]}
+            for p in openai_parts if p.get("type") == "input_image"
+        ]
+        output = {"type": "function_call_output", "call_id": call_id,
+                  "output": "\n".join(text_parts) or f"[read {uri}]"}
         return output, image_items
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):

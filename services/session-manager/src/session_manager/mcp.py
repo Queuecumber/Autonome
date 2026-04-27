@@ -231,6 +231,15 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
             if blob is not None:
                 parts.append(_describe_binary(blob, mime, store))
+                if mime.startswith("image/"):
+                    raw = base64.b64decode(blob) if isinstance(blob, str) else blob
+                    exif = _exif_summary(raw)
+                    if exif:
+                        parts.append({"type": "input_text", "text": json.dumps(exif)})
+                    parts.append({
+                        "type": "input_image",
+                        "image_url": f"data:{mime};base64,{blob}",
+                    })
             elif text is not None:
                 parts.append({"type": "input_text", "text": text})
             else:
@@ -323,6 +332,25 @@ class MCPConnection:
             args = resolve_pointer_args(args, params, store)
         result = await self.session.call_tool(original_name, args)
         return result.content
+
+    async def list_resources(self) -> list:
+        if self.session is None:
+            raise RuntimeError(f"MCP server {self.name} not connected")
+        result = await self.session.list_resources()
+        return list(result.resources or [])
+
+    async def list_resource_templates(self) -> list:
+        if self.session is None:
+            raise RuntimeError(f"MCP server {self.name} not connected")
+        result = await self.session.list_resource_templates()
+        return list(result.resourceTemplates or [])
+
+    async def read_resource(self, uri: str) -> list:
+        """Read a resource and return its contents as MCP ResourceContents."""
+        if self.session is None:
+            raise RuntimeError(f"MCP server {self.name} not connected")
+        result = await self.session.read_resource(uri)
+        return list(result.contents or [])
 
     async def close(self) -> None:
         self._shutdown.set()
