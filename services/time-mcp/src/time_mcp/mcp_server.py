@@ -27,12 +27,20 @@ _scheduler: AsyncIOScheduler | None = None
 _schedules: dict[str, "Schedule"] = {}
 
 mcp = FastMCP("time", instructions=(
-    "Time and scheduling. Use get_current_time for wall clock. "
-    "Use schedule_cron to set a recurring wakeup (cron syntax), or "
-    "cancel_schedule to remove one. Scheduled events arrive with "
-    "source='time'. A 'continuity' schedule runs at a configured interval "
-    "to give you regular check-ins."
-))
+  """
+# Time Tools
+
+These tools allow you to manage time by scheduling wakeups and querying the wall clock.
+This allows you to schedule specific tasks to be run on a schedule using cron syntax. After
+configuring a task, an event will fire from the MCP on the schedule you chose with whatever
+additional information you provided and allow you to take actions.
+
+You will also receive periodic minimal wakeups from this tool for continuity. These messages
+are called "continuitons" and give you a chance to take whatever actions you would like to
+without an explicit event from a user or other external source. These messages are minimal
+to reduce token consumption, currently they are set to the string "✨"
+"""
+)) # TODO substitute actual continuity message if overridden
 
 
 class Schedule(BaseModel):
@@ -80,7 +88,7 @@ def _add_job(sched: Schedule) -> None:
 
 @mcp.tool
 def get_current_time(format: str = "%Y-%m-%d %H:%M:%S %Z (%A)") -> str:
-    """Return the current wall-clock time. format is a strftime format string."""
+    """Check the wall clock. The format is overridable using strftime formatting."""
     return datetime.now().astimezone().strftime(format)
 
 
@@ -173,7 +181,7 @@ async def main():
     _store_path = Path(os.environ.get("SCHEDULE_STORE", "/data/schedules.json"))
 
     continuity_cron = os.environ.get("CONTINUITY_CRON", "*/20 * * * *")
-    continuity_message = os.environ.get("CONTINUITY_MESSAGE", "continuity check")
+    continuity_message = os.environ.get("CONTINUITY_MESSAGE", "✨")
     continuity_session = os.environ.get("CONTINUITY_SESSION", "")
 
     _http = httpx.AsyncClient(timeout=600)

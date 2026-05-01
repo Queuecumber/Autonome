@@ -20,14 +20,59 @@ session_manager_url: str
 _http: httpx.AsyncClient
 
 mcp = FastMCP("matrix", instructions=(
-    "Matrix messaging. Use these tools to communicate with users on Matrix. "
-    "You must call send_message to deliver responses — text you generate without "
-    "calling send_message is not seen by anyone. The room_id from the event "
-    "metadata identifies where to send your response. "
-    "When you receive a message, send a read_receipt to acknowledge it, then "
-    "start the typing_indicator before composing your response. "
-    "When a message has attachments, the metadata includes attachment URLs. "
-    "To view an attachment, call get_attachment with the mxc:// URL."
+  """
+# Matrix Messaging Tools
+
+Use these tools to communicate with users on the Matrix chat platform.
+
+*Reminder*: if you receive a message from Matrix that you want to respond to, you
+need to use the send_message tool to do so, direct outputs are not user visible.
+
+## Procedure
+
+When you receive a message you will be given a room_id and a user_id from the user
+who sent it. You can use these to respond to the user.
+
+For all messages, first send a read receipt to acknowledge that you read the message.
+
+Then, if you decide to respond, start a typing indicator. Not all messages require a
+response, especially in group settings (the message may not be for you) but even direct
+messages or callouts may not need a response in some circumstances.
+
+Compose your response and use the send_message tool to send it, this will automatically
+stop the typing indicator you started previously.
+
+## Style
+
+Always continue to be yourself when talking on Matrix and continue to follow the roleplay
+tips. Think about how people generally text: breaking up long thoughts into multiple discrete
+messages with related topics, reacting with emoji. You do not *need* to be brief if you don't
+want to but you are welcome to if the situation calls for it. You may not even need to respond
+at all in some situations.
+
+## Attachments
+
+When a message has attachments, the metadata includes attachment URLs. To view an attachment,
+call get_attachment with the mxc:// URL.
+
+## Groups
+
+Matrix chats are often in groups.
+
+Before responding make sure you understand what
+group you are responding to and who might read your message, then evaluate if the
+message you are about to send is appropriate for the readers. Be careful about revealing
+sensitive information that might belong to your users in a public setting.
+
+Remember that you are one member of a group and you only have to respond if you have something
+to contribute to the conversation *and* you want to respond. If a message wasn't for you or you
+don't think you have anything to add, you are free to not respond.
+
+## Observation
+
+Regardless of whether or not you respond to a message, you will end up reading it. This may surface
+interesting information and you should consider if it should be remembered using a memory tool.
+"""
 ))
 
 
@@ -72,15 +117,16 @@ async def get_room_members(room_id: str) -> list[Sender]:
       more than two members
     - Someone new joined the conversation and you don't recognize them
     - A member_count you noticed before has changed
+
+    *Important* in a group setting, be careful about what information
+    you're sharing
     """
     return client.get_room_members(room_id)
 
 
 @mcp.tool
 async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment by mxc:// URL. Images come back as
-    ImageContent (the session-manager extracts EXIF on the way through
-    if any is present). Non-image attachments return a text descriptor."""
+    """Fetch a Matrix attachment by mxc:// URL."""
     data, _ = await client.download_attachment(mxc_url)
     kind = filetype.guess(data)
     if kind and kind.mime.startswith("image/"):
@@ -99,17 +145,17 @@ async def send_attachment(
     """Send a file attachment to a Matrix room.
 
     `filename` is the filename the recipient will see in their client
-    (e.g. `photo.jpg`, `report.pdf`). Don't put a caption here.
+    (e.g. `photo.jpg`, `report.pdf`).
 
     `caption` is an optional message to go with the attachment — the thing
-    you'd type alongside the image. Leave it off if the attachment speaks
-    for itself."""
+    you'd type alongside the image. This field is optional, only use it
+    if you want to add clarity."""
     await client.upload_and_send_attachment(room_id, data, content_type, filename, caption=caption)
 
 
 @mcp.tool
 async def update_profile(display_name: str | None = None, avatar: Base64Bytes | None = None) -> None:
-    """Update the Matrix profile. Set display_name and/or avatar (image bytes)."""
+    """Update the Matrix profile. Set display_name and/or avatar"""
     if display_name is not None:
         await client.set_display_name(display_name)
     if avatar is not None:

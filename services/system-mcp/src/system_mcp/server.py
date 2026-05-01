@@ -11,8 +11,12 @@ SEARCH_API_KEY = os.environ.get("SEARCH_API_KEY", "")
 MAX_FETCH_CHARS = int(os.environ.get("MAX_FETCH_CHARS", "20000"))
 
 mcp = FastMCP("system", instructions=(
-    "System tools. Use web_search to find information online, "
-    "and web_fetch to retrieve the full content of a specific URL."
+  """
+# System Tools
+
+These tools are general system actions you can take. They
+allow you to search the web and fetch URLs.
+"""
 ))
 
 _http = httpx.AsyncClient(timeout=30, headers={"User-Agent": "Autonome/1.0"})

@@ -12,14 +12,23 @@ from pathlib import Path
 
 import filetype
 from fastmcp import FastMCP
-from mcp.types import AudioContent, BlobResourceContents, EmbeddedResource, ImageContent, TextContent
+from mcp.types import (
+    AudioContent,
+    BlobResourceContents,
+    EmbeddedResource,
+    ImageContent,
+    TextContent,
+)
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
 mcp = FastMCP("workspace-fs", instructions=(
-    "Workspace filesystem access. Contains your personality files (SOUL.md, USER.md, etc.), "
-    "configuration (HEARTBEAT.md, TOOLS.md), and other workspace files. "
-    "Use at startup to read your identity and context. Paths are relative to workspace root."
+  """
+# Workspace Tools
+
+The workspace tools allow file access to your personal files, you can store anything you want in these
+files. This is also where you will find your PERSONALITY.md which you should read on session start.
+"""
 ))
 
 
@@ -49,16 +58,7 @@ def _is_text_type(content_type: str) -> bool:
 
 @mcp.tool
 def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | TextContent:
-    """Read a file from the workspace.
-
-    Images and audio are returned as their MCP content blocks so the session
-    manager can persist them as binary pointers and surface the bytes to the
-    model. Text files come back as TextContent with the file content. Other
-    binaries (PDFs, zips, etc.) come back as an EmbeddedResource with
-    base64 blob — the session manager persists them as pointers the agent
-    can forward through tools, even though there's no model modality for
-    viewing them directly.
-    """
+    """Read a file from the workspace."""
     target = _safe_resolve(path)
     if not target.exists():
         raise FileNotFoundError(f"{path} not found")
