@@ -15,6 +15,12 @@ class SessionManager:
         safe_id = session_id.replace("/", "_").replace("\\", "_")
         return self.store_dir / f"{safe_id}.jsonl"
 
+    def list_session_ids(self) -> list[str]:
+        """Enumerate known session IDs by scanning the store directory.
+        Returns the on-disk (sanitized) IDs — for our session ID conventions
+        (matrix:..., signal:..., time:...) sanitization is a no-op."""
+        return sorted(p.stem for p in self.store_dir.glob("*.jsonl"))
+
     def load(self, session_id: str) -> list[dict[str, Any]]:
         path = self._session_path(session_id)
         if not path.exists():

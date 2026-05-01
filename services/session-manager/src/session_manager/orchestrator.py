@@ -229,6 +229,26 @@ class SessionOrchestrator:
         logger.info("Connected to %d MCP servers, %d tools total",
                     len(self.mcp_connections), len(self.openai_tools))
 
+    async def bootstrap_existing_sessions(self) -> None:
+        """Emit a passive `boot` event to every known session so the agent
+        knows the system just came up and what model it's running. Each
+        event triggers a normal turn (queues if anything else is in flight)."""
+        boot_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
+        session_ids = self.session.list_session_ids()
+        if not session_ids:
+            return
+        logger.info("Sending boot event to %d existing session(s)", len(session_ids))
+        for session_id in session_ids:
+            event = Event(
+                session_id=session_id,
+                source="system",
+                event_type="boot",
+                text="",
+                energy="passive",
+                metadata={"time": boot_time, "model": self.model, "note": "Welcome back!"},
+            )
+            asyncio.create_task(self.handle_event(event), name=f"boot-{session_id}")
+
     def _get_session(self, session_id: str) -> _SessionState:
         if session_id not in self._sessions:
             self._sessions[session_id] = _SessionState()
