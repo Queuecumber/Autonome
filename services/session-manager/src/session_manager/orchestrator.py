@@ -110,7 +110,7 @@ When something happens that requires your attention (including a user interactio
 - `event` — what kind of thing happened. Common values:
   - `message` — someone is talking to you
   - `cron` — a scheduled tick (heartbeat, daily reminder, etc.)
-  - `boot` — the platform just started up; payload includes `time` and `model` (which version of you is running). Sent once per known session at startup.
+  - `boot` — the platform just started up; payload includes `boot_time` and `model` (which version of you is running). Sent once per known session at startup.
   - `continuity` — you've come back online after a gap; re-orient before doing anything else
   - `interrupted` — you were generating when new input arrived. The payload will include either `partial` (text you'd composed) or `pending` (tool calls you were about to make). Decide whether to continue that thread, pivot, or abandon.
   - `reaction` — someone reacted to a message
@@ -287,7 +287,7 @@ class SessionOrchestrator:
                 event_type="boot",
                 text="",
                 energy="active",
-                metadata={"time": boot_time, "model": self.model, "note": "Welcome back!"},
+                metadata={"boot_time": boot_time, "model": self.model, "note": "Welcome back!"},
             )
             asyncio.create_task(self.handle_event(event), name=f"boot-{session_id}")
 
