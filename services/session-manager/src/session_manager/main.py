@@ -64,7 +64,6 @@ async def startup():
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info"))
 
     asyncio.create_task(orchestrator.run_binary_gc())
-    asyncio.create_task(orchestrator.bootstrap_existing_sessions())
 
     await server.serve()
 

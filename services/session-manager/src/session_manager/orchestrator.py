@@ -243,6 +243,14 @@ class SessionOrchestrator:
         retention = int(binaries_config.get("retention_days", 30))
         self.binaries = BinaryStore(store_dir=binary_dir, retention_days=retention)
 
+        # Boot-event state. The first time any session is seen after this
+        # process started, _process_events prepends a synthetic boot event
+        # so the agent learns when the system came up and what model is
+        # running. Covers both existing sessions (their first event after
+        # boot) and brand-new sessions (their first event ever).
+        self._boot_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
+        self._seen_since_boot: set[str] = set()
+
         self._sessions: dict[str, _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
@@ -271,25 +279,23 @@ class SessionOrchestrator:
         logger.info("Connected to %d MCP servers, %d tools total",
                     len(self.mcp_connections), len(self.openai_tools))
 
-    async def bootstrap_existing_sessions(self) -> None:
-        """Emit a passive `boot` event to every known session so the agent
-        knows the system just came up and what model it's running. Each
-        event triggers a normal turn (queues if anything else is in flight)."""
-        boot_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
-        session_ids = self.session.list_session_ids()
-        if not session_ids:
-            return
-        logger.info("Sending boot event to %d existing session(s)", len(session_ids))
-        for session_id in session_ids:
-            event = Event(
-                session_id=session_id,
-                source="orchestrator",
-                event_type="boot",
-                text="",
-                energy="active",
-                metadata={"boot_time": boot_time, "model": self.model, "note": "Welcome back!"},
-            )
-            asyncio.create_task(self.handle_event(event), name=f"boot-{session_id}")
+    def _maybe_boot_event(self, session_id: str) -> Event | None:
+        """Return a synthetic boot event the first time a session is seen
+        after this process started, otherwise None. Marks the session as
+        seen so subsequent calls return None. Covers both pre-existing
+        sessions (their first event after boot) and brand-new sessions
+        (their first event ever)."""
+        if session_id in self._seen_since_boot:
+            return None
+        self._seen_since_boot.add(session_id)
+        return Event(
+            session_id=session_id,
+            source="orchestrator",
+            event_type="boot",
+            text="",
+            energy="passive",
+            metadata={"boot_time": self._boot_time, "model": self.model, "note": "Welcome back!"},
+        )
 
     def _get_session(self, session_id: str) -> _SessionState:
         if session_id not in self._sessions:
@@ -457,6 +463,14 @@ class SessionOrchestrator:
         cancel: asyncio.Event,
     ) -> str | None:
         """Process one or more events as a single turn with cancellation support."""
+        # First time this session is seen since process start? Prepend a
+        # synthetic boot event so the agent learns when the system came
+        # up and what model is running. Rides alongside the real events
+        # in the same turn.
+        boot_event = self._maybe_boot_event(session_id)
+        if boot_event is not None:
+            events = [boot_event] + list(events)
+
         # Load session history
         raw_history = self.session.load_truncated(session_id)
 
