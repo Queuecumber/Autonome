@@ -73,6 +73,7 @@ class Reaction:
         return {
             "source": source,
             "session_id": f"signal:{self.sender}",
+            "event_type": "reaction",
             "text": json.dumps(content),
             "metadata": {
                 "sender": self.sender,

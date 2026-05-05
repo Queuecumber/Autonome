@@ -129,6 +129,7 @@ class Reaction:
         return {
             "source": source,
             "session_id": f"matrix:{self.room.id}",
+            "event_type": "reaction",
             "text": json.dumps({"type": "reaction", "emoji": self.emoji, "target": self.target_event_id}),
             "metadata": {
                 "message_id": self.event_id,
