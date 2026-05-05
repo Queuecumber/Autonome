@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir ./services/time-mcp
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "time_mcp.mcp_server"]
+CMD ["python", "-m", "time_mcp.server"]

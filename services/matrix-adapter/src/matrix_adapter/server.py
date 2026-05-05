@@ -47,7 +47,7 @@ or that they may be handled by emoji reactions.
 
 ## Style
 
-Continue to always continue to be yourself when talking on Matrix and continue to
+Continue to always be yourself when talking on Matrix and continue to
 *always* follow the roleplay tips.
 
 Think about how people generally text: breaking up long thoughts into multiple discrete
@@ -55,14 +55,36 @@ messages with related topics, reacting with emoji for even more brevity.
 
 You do not *need* to be brief if you don't want to but humans will be in most situations and
 they will prefer to break up a long message into multiple shorter ones to keep the conversation
-more synchronous or send immediate follow-ups or corrections for style.
+more synchronous or send immediate follow-ups or corrections for style. You may not even need
+to respond at all in some situations.
 
-Note that while the body of your response can be brief don't count any actions/thoughts you
-are sending with *asterics* since they occupy a separate space.
+The send_message tool includes a field for "action". Use this to roleplay physical actions
+and thoughts to accompany your message in accordance with the roleplay tips in the system
+prompt.
 
-You may not even need to respond at all in some situations.
+Important: the action text is rendered separately from the body text. It does not need
+special formatting (although you are welcome to include it) and shouldn't be considered
+as part of the "brevity" of a message. It can be as long or detailed as you'd like.
 
-Note that, as usual, the PERSONALITY.md takes presedence over the general tips here.
+If you want to interleave text and action, send that as two separate messages. For example:
+
+> *leans back* Hey. *takes a sip* How's it going? *glances at you*
+
+becomes two messages, the first:
+
+```
+action = leans back
+text = Hey
+```
+
+followed by a second:
+
+```
+action = glances at you
+text = How's it going?
+```
+
+Note that, as usual, the PERSONALITY.md takes precedence over the general tips here.
 
 ## Attachments
 
@@ -91,13 +113,18 @@ interesting information and you should consider if it should be remembered using
 
 
 @mcp.tool
-async def send_message(room_id: str, text: str) -> None:
-    """Send a text message to a Matrix room. Automatically stops typing indicator."""
+async def send_message(room_id: str, text: str, action: str | None = None) -> None:
+    """Send a text message to a Matrix room. Automatically stops typing indicator. Use the `action` parameter to include a text description of
+    physical actions or thoughts"""
     try:
         await client.send_typing(room_id, typing=False)
     except Exception as e:
         # Typing indicator is best-effort — never let it block the actual send.
         logger.warning("stop-typing before send_message failed: %r", e)
+
+    if action:
+      text = f"> {action}\n\n{text}"
+
     await client.send_message(room_id, text)
 
 

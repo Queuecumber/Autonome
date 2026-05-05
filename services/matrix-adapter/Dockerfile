@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir ./services/matrix-adapter
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "matrix_adapter.mcp_server"]
+CMD ["python", "-m", "matrix_adapter.server"]
