@@ -578,23 +578,26 @@ class SessionOrchestrator:
                             comment["input_tokens"], comment["output_tokens"],
                             reasoning_tokens, comment["total_tokens"])
 
+            # Some proxies (e.g. NVIDIA NIM/dynamo) deliver items via
+            # output_item.done streaming events but leave the final
+            # response.completed.response.output empty. completed_items is
+            # what we actually saw stream-completed, so fall back to it
+            # when response.output is missing.
+            output_items = response.output or completed_items
+
             # Process output items
             tool_calls = []
             assistant_text = ""
             reasoning_text = ""
 
-            logger.debug("response.output types: %s",
-                         [getattr(i, "type", type(i).__name__) for i in response.output])
-            for item in response.output:
+            for item in output_items:
                 if item.type == "function_call":
                     tool_calls.append(item)
                 elif item.type == "reasoning":
-                    logger.debug("reasoning item: summary=%r content=%r",
-                                 getattr(item, "summary", None), item.content)
                     for block in (getattr(item, "summary", None) or []):
                         if hasattr(block, "text"):
                             reasoning_text += block.text
-                    for block in (item.content or []):
+                    for block in (getattr(item, "content", None) or []):
                         if hasattr(block, "text"):
                             reasoning_text += block.text
                 elif item.type == "message":
@@ -644,7 +647,7 @@ class SessionOrchestrator:
 
                 # Images go after tool results (Bedrock adjacency) and aren't
                 # persisted — pointer lives in the function_call_output.
-                call_kwargs["input"] = input_items + response.output + tool_results + image_items
+                call_kwargs["input"] = input_items + list(output_items) + tool_results + image_items
                 input_items = call_kwargs["input"]
                 continue
 
