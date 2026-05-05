@@ -27,12 +27,21 @@ _scheduler: AsyncIOScheduler | None = None
 _schedules: dict[str, "Schedule"] = {}
 
 mcp = FastMCP("time", instructions=(
-    "Time and scheduling. Use get_current_time for wall clock. "
-    "Use schedule_cron to set a recurring wakeup (cron syntax), or "
-    "cancel_schedule to remove one. Scheduled events arrive with "
-    "source='time'. A 'continuity' schedule runs at a configured interval "
-    "to give you regular check-ins."
-))
+  """
+# Time Tools
+
+These tools allow you to manage time by scheduling wakeups and querying the wall clock.
+This allows you to schedule specific tasks to be run on a schedule using cron syntax. After
+configuring a task, an event will fire from the MCP on the schedule you chose with whatever
+additional information you provided and allow you to take actions.
+
+You will also receive periodic minimal wakeups from this tool for continuity. These messages
+are called "continuitons" and give you a chance to take actions without an explicit event
+from a user or other external source. These messages are minimal to reduce token consumption,
+currently they are set to the string "✨". Use these events to do whatever you want including
+check in with a human.
+"""
+)) # TODO substitute actual continuity message if overridden
 
 
 class Schedule(BaseModel):
@@ -80,7 +89,15 @@ def _add_job(sched: Schedule) -> None:
 
 @mcp.tool
 def get_current_time(format: str = "%Y-%m-%d %H:%M:%S %Z (%A)") -> str:
-    """Return the current wall-clock time. format is a strftime format string."""
+    """Read the wall clock.
+
+    Args:
+        format: strftime format. Default produces e.g.
+            `2026-05-05 14:31:09 EDT (Friday)`.
+
+    Returns:
+        The current local time formatted per the strftime spec.
+    """
     return datetime.now().astimezone().strftime(format)
 
 
@@ -89,16 +106,25 @@ def schedule_cron(
     schedule_id: str, cron: str, message: str, session_id: str,
     energy: str = "passive",
 ) -> None:
-    """Schedule a recurring wakeup. cron is a standard cron expression
-    (e.g. '*/20 * * * *' for every 20 minutes). The message is delivered
-    to the given session_id when the schedule fires.
+    """Schedule a recurring wakeup that fires events to a session.
 
-    schedule_id is a short, memorable name you choose (e.g. 'morning-checkin').
-    Use it later to cancel. Rejected if already in use.
+    Persists across restarts. When the cron fires, an event is dispatched
+    to `session_id` with `text=message` for the agent to act on (or ignore).
 
-    energy is "active" (interrupts current generation) or "passive" (queues
-    if busy). Most scheduled events should be passive — use active only when
-    the schedule genuinely needs immediate attention.
+    Args:
+        schedule_id: A short memorable name (e.g. `morning-checkin`),
+            used later to cancel. `continuity` is reserved by the platform.
+        cron: A standard cron expression (e.g. `*/20 * * * *` for every
+            20 minutes).
+        message: Text delivered to the session when the schedule fires.
+        session_id: Where the event lands (room/conversation).
+        energy: `"active"` preempts in-progress generation; `"passive"`
+            queues if busy. Use `active` only when immediate attention
+            is genuinely required.
+
+    Raises:
+        ValueError: If `energy` is not a valid value, `schedule_id` is
+            already in use or reserved, or `cron` isn't valid.
     """
     if energy not in ("active", "passive"):
         raise ValueError(f"energy must be 'active' or 'passive', got {energy!r}")
@@ -122,13 +148,25 @@ def schedule_cron(
 
 @mcp.tool
 def list_schedules() -> list[Schedule]:
-    """List all active schedules with their next fire time."""
+    """List all active schedules.
+
+    Returns:
+        Each schedule's id, cron, message, session, energy, and computed
+        next-fire timestamp.
+    """
     return list(_schedules.values())
 
 
 @mcp.tool
 def cancel_schedule(schedule_id: str) -> None:
-    """Cancel a schedule by id."""
+    """Cancel a previously-created schedule.
+
+    Args:
+        schedule_id: The id you passed to `schedule_cron`.
+
+    Raises:
+        ValueError: If no schedule with that id exists.
+    """
     if schedule_id not in _schedules:
         raise ValueError(f"No schedule with id {schedule_id}")
     _scheduler.remove_job(schedule_id)
@@ -173,7 +211,7 @@ async def main():
     _store_path = Path(os.environ.get("SCHEDULE_STORE", "/data/schedules.json"))
 
     continuity_cron = os.environ.get("CONTINUITY_CRON", "*/20 * * * *")
-    continuity_message = os.environ.get("CONTINUITY_MESSAGE", "continuity check")
+    continuity_message = os.environ.get("CONTINUITY_MESSAGE", "✨")
     continuity_session = os.environ.get("CONTINUITY_SESSION", "")
 
     _http = httpx.AsyncClient(timeout=600)

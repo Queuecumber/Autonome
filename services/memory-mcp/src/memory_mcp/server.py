@@ -15,10 +15,25 @@ from fastmcp import FastMCP
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/memory")).resolve()
 
 mcp = FastMCP("memory", instructions=(
-    "Your long-term memory system. Daily entries are stored by date (YYYY-MM-DD), "
-    "and a global MEMORY.md serves as your curated long-term index. "
-    "Read recent daily memories and global memory at startup for context. "
-    "Write memories to preserve important events, decisions, and learnings."
+    """
+# Long-Term Memory Tools
+
+This tool implements a basic long-term memory that you should use liberally to
+make sure information persists outside of the active session.
+
+You are provided with a global memory that stores curated important events as
+well as a daily memory for more granular notes. Write early and often to your daily
+memory and think about what can be promoted to global memory. Periodically examine your
+global memory to think about what can be removed, summarized, or cleaned up
+as no longer relevant.
+
+At the start of a new session, if there is no memory already in context, read your global
+memory as well as the last two days memories. If these memories don't exist or if you want
+to, you may read more after that minimal set.
+
+If the user references something that seems like it should be in your memory but you don't
+remember it, try to find it before claiming you don't know.
+"""
 ))
 
 
@@ -28,7 +43,17 @@ def _date_path(d: date) -> Path:
 
 @mcp.tool
 def read_memory(date: date) -> str:
-    """Read the memory entry for a specific date."""
+    """Read the daily memory entry for a specific date.
+
+    Args:
+        date: The day to read.
+
+    Returns:
+        The entry's contents (markdown).
+
+    Raises:
+        FileNotFoundError: If no entry exists for that date.
+    """
     path = _date_path(date)
     if not path.exists():
         raise FileNotFoundError(f"No memory entry for {date}")
@@ -36,17 +61,34 @@ def read_memory(date: date) -> str:
 
 
 @mcp.tool
-def edit_memory(date: date, content: str) -> str:
-    """Write or replace the memory entry for a specific date."""
+def edit_memory(date: date, content: str) -> None:
+    """Write or replace the daily memory entry for a specific date.
+
+    Overwrites any existing entry — read first if you want to append
+    rather than replace.
+
+    Args:
+        date: The day to update.
+        content: Full new contents of the entry (markdown).
+    """
     path = _date_path(date)
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
-    return f"Updated memory for {date} ({len(content)} bytes)"
 
 
 @mcp.tool
 def read_global_memory() -> str:
-    """Read the global MEMORY.md index file."""
+    """Read the global memory index.
+
+    The global index is your curated long-term memory — distilled from
+    daily entries over time, what's worth keeping permanently.
+
+    Returns:
+        The current global memory (markdown).
+
+    Raises:
+        FileNotFoundError: If no global memory exists yet.
+    """
     path = MEMORY_DIR / "MEMORY.md"
     if not path.exists():
         raise FileNotFoundError("No global memory file exists yet")
@@ -54,17 +96,27 @@ def read_global_memory() -> str:
 
 
 @mcp.tool
-def edit_global_memory(content: str) -> str:
-    """Write or replace the global MEMORY.md index file."""
+def edit_global_memory(content: str) -> None:
+    """Write or replace the global memory index.
+
+    Overwrites any existing global memory — read first to append/edit
+    rather than replace from scratch.
+
+    Args:
+        content: Full new contents of the global memory (markdown).
+    """
     path = MEMORY_DIR / "MEMORY.md"
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
-    return f"Updated global memory ({len(content)} bytes)"
 
 
 @mcp.tool
 def list_memories() -> list[date]:
-    """List all dates that have memory entries, sorted chronologically."""
+    """List all dates that have daily memory entries.
+
+    Returns:
+        Dates with entries, oldest first. Empty if no memories exist yet.
+    """
     if not MEMORY_DIR.exists():
         return []
     dates = []

@@ -12,14 +12,23 @@ from pathlib import Path
 
 import filetype
 from fastmcp import FastMCP
-from mcp.types import AudioContent, BlobResourceContents, EmbeddedResource, ImageContent, TextContent
+from mcp.types import (
+    AudioContent,
+    BlobResourceContents,
+    EmbeddedResource,
+    ImageContent,
+    TextContent,
+)
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
 mcp = FastMCP("workspace-fs", instructions=(
-    "Workspace filesystem access. Contains your personality files (SOUL.md, USER.md, etc.), "
-    "configuration (HEARTBEAT.md, TOOLS.md), and other workspace files. "
-    "Use at startup to read your identity and context. Paths are relative to workspace root."
+  """
+# Workspace Tools
+
+The workspace tools allow file access to your personal files, you can store anything you want in these
+files.
+"""
 ))
 
 
@@ -51,13 +60,25 @@ def _is_text_type(content_type: str) -> bool:
 def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | TextContent:
     """Read a file from the workspace.
 
-    Images and audio are returned as their MCP content blocks so the session
-    manager can persist them as binary pointers and surface the bytes to the
-    model. Text files come back as TextContent with the file content. Other
-    binaries (PDFs, zips, etc.) come back as an EmbeddedResource with
-    base64 blob — the session manager persists them as pointers the agent
-    can forward through tools, even though there's no model modality for
-    viewing them directly.
+    Return shape depends on the detected content:
+    - Images come back so you can see them.
+    - Audio comes back as audio content.
+    - Text files (text/*, JSON, XML, YAML) come back as text.
+    - Other binaries (PDFs, zips, etc.) come back as an embedded resource
+      that the session-manager persists as a pointer you can forward to
+      other tools.
+
+    Args:
+        path: Relative to the workspace root (e.g. `Pictures/cat.jpg`).
+            Traversal outside the workspace is rejected.
+
+    Returns:
+        The appropriate content block per the file's detected type.
+
+    Raises:
+        ValueError: If the path attempts traversal outside the workspace.
+        FileNotFoundError: If no file exists at that path.
+        IsADirectoryError: If the path resolves to a directory.
     """
     target = _safe_resolve(path)
     if not target.exists():
@@ -93,7 +114,21 @@ def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | Tex
 
 @mcp.tool
 def write_file(path: str, file: File) -> str:
-    """Write a file to the workspace. Accepts a File with content_type and data."""
+    """Write a file to the workspace.
+
+    Creates parent directories if needed. Overwrites any existing file
+    at the path.
+
+    Args:
+        path: Where to write, relative to the workspace root.
+        file: The file to write — its content type and contents.
+
+    Returns:
+        Short confirmation with byte/char count and the path written.
+
+    Raises:
+        ValueError: If the path attempts traversal outside the workspace.
+    """
     target = _safe_resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     if _is_text_type(file.content_type):
@@ -107,7 +142,21 @@ def write_file(path: str, file: File) -> str:
 
 @mcp.tool
 def list_directory(path: str = ".") -> list[str]:
-    """List files and directories at a path in the workspace."""
+    """List entries at a path in the workspace.
+
+    Args:
+        path: Relative to the workspace root. Default `.` is the
+            workspace root itself.
+
+    Returns:
+        Paths of entries directly contained at that path, sorted
+        alphabetically, relative to the workspace root.
+
+    Raises:
+        ValueError: If the path attempts traversal outside the workspace.
+        FileNotFoundError: If the path doesn't exist.
+        NotADirectoryError: If the path resolves to a file.
+    """
     target = _safe_resolve(path)
     if not target.exists():
         raise FileNotFoundError(f"{path} not found")
@@ -118,7 +167,22 @@ def list_directory(path: str = ".") -> list[str]:
 
 @mcp.tool
 def search_files(pattern: str, path: str = ".") -> list[str]:
-    """Search for files matching a glob pattern within the workspace."""
+    """Recursively search for files matching a glob pattern.
+
+    Args:
+        pattern: A glob (e.g. `*.md`, `**/PERSONALITY.md`,
+            `Pictures/*.jpg`). Standard pathlib syntax.
+        path: Subdirectory to search within, relative to the workspace
+            root. Default `.` searches the whole workspace.
+
+    Returns:
+        Matching file paths (only files, not directories) relative to
+        the workspace root, sorted alphabetically.
+
+    Raises:
+        ValueError: If the path attempts traversal outside the workspace.
+        FileNotFoundError: If the search root doesn't exist.
+    """
     target = _safe_resolve(path)
     if not target.exists():
         raise FileNotFoundError(f"{path} not found")
