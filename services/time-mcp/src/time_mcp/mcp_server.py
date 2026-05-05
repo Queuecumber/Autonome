@@ -36,9 +36,10 @@ configuring a task, an event will fire from the MCP on the schedule you chose wi
 additional information you provided and allow you to take actions.
 
 You will also receive periodic minimal wakeups from this tool for continuity. These messages
-are called "continuitons" and give you a chance to take whatever actions you would like to
-without an explicit event from a user or other external source. These messages are minimal
-to reduce token consumption, currently they are set to the string "✨"
+are called "continuitons" and give you a chance to take actions without an explicit event
+from a user or other external source. These messages are minimal to reduce token consumption,
+currently they are set to the string "✨". Use these events to do whatever you want including
+check in with a human.
 """
 )) # TODO substitute actual continuity message if overridden
 

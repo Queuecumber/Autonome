@@ -28,7 +28,8 @@ global memory to think about what can be removed, summarized, or cleaned up
 as no longer relevant.
 
 At the start of a new session, always read your global memory as well as the last two
-days memories. You may read more memories if you want to after that minimal set.
+days memories. If these memories don't exist or if you want to, you may read more
+after that minimal set.
 """
 ))
 
