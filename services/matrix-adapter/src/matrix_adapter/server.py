@@ -114,8 +114,21 @@ interesting information and you should consider if it should be remembered using
 
 @mcp.tool
 async def send_message(room_id: str, text: str, action: str | None = None) -> None:
-    """Send a text message to a Matrix room. Automatically stops typing indicator. Use the `action` parameter to include a text description of
-    physical actions or thoughts"""
+    """Send a text message to a Matrix room.
+
+    Stops the typing indicator automatically. Markdown in `text` and
+   `action` renders as HTML in supporting clients.
+
+    Args:
+        room_id: The Matrix room (e.g. `!abc:example.com`) — usually from
+            an incoming event's metadata.
+        text: The message body.
+        action: Optional roleplay action (gesture, expression, thought)
+            rendered separately from the body.
+
+    Raises:
+        RuntimeError: If the homeserver rejects the send.
+    """
     try:
         await client.send_typing(room_id, typing=False)
     except Exception as e:
@@ -130,19 +143,45 @@ async def send_message(room_id: str, text: str, action: str | None = None) -> No
 
 @mcp.tool
 async def react(room_id: str, event_id: str, emoji: str) -> None:
-    """React to a message with an emoji."""
+    """React to a message with an emoji.
+
+    Args:
+        room_id: The Matrix room.
+        event_id: The message being reacted to (from `message_id` in
+            an incoming event's metadata).
+        emoji: The emoji to react with.
+
+    Raises:
+        RuntimeError: If the homeserver rejects the reaction.
+    """
     await client.send_reaction(room_id, event_id, emoji)
 
 
 @mcp.tool
 async def read_receipt(room_id: str, event_id: str) -> None:
-    """Send a read receipt for a message."""
+    """Send a read receipt for a message.
+
+    Marks a message as read in this user's view of the room. Conventionally
+    sent before composing a response so the sender sees acknowledgment.
+
+    Args:
+        room_id: The Matrix room.
+        event_id: The message being acknowledged.
+    """
     await client.send_read_receipt(room_id, event_id)
 
 
 @mcp.tool
 async def typing_indicator(room_id: str, stop: bool = False) -> None:
-    """Show or hide the typing indicator."""
+    """Show or hide the typing indicator in a Matrix room.
+
+    Other users see this user's name as "typing…" while active.
+    `send_message` automatically stops the indicator on send.
+
+    Args:
+        room_id: The Matrix room.
+        stop: Hide the indicator instead of showing it.
+    """
     await client.send_typing(room_id, typing=not stop)
 
 
@@ -157,17 +196,31 @@ async def get_room_members(room_id: str) -> list[Sender]:
     - You're about to share anything private or personal and the room has
       more than two members
     - Someone new joined the conversation and you don't recognize them
-    - A member_count you noticed before has changed
+    - A `member_count` you noticed before has changed
 
-    *Important* in a group setting, be careful about what information
-    you're sharing
+    *Important*: in a group setting, be careful about what information
+    you're sharing.
+
+    Args:
+        room_id: The Matrix room.
+
+    Returns:
+        One entry per member with `id` and `name`.
     """
     return client.get_room_members(room_id)
 
 
 @mcp.tool
 async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment by mxc:// URL."""
+    """Fetch a Matrix attachment.
+
+    Args:
+        mxc_url: Matrix content URI (e.g. `mxc://server/abc123`) — taken
+            from the `attachments` field of an incoming event's metadata.
+
+    Returns:
+        Image content for images, text descriptor otherwise.
+    """
     data, _ = await client.download_attachment(mxc_url)
     kind = filetype.guess(data)
     if kind and kind.mime.startswith("image/"):
@@ -185,18 +238,37 @@ async def send_attachment(
 ) -> None:
     """Send a file attachment to a Matrix room.
 
-    `filename` is the filename the recipient will see in their client
-    (e.g. `photo.jpg`, `report.pdf`).
+    Args:
+        room_id: The Matrix room.
+        data: The attachment.
+        filename: Name the recipient will see in their client (e.g.
+            `photo.jpg`, `report.pdf`). Don't put a caption here.
+        content_type: MIME type of the attachment. Default
+            `application/octet-stream`.
+        caption: Optional message displayed alongside the attachment.
+            Leave off if the attachment speaks for itself.
 
-    `caption` is an optional message to go with the attachment — the thing
-    you'd type alongside the image. This field is optional, only use it
-    if you want to add clarity."""
+    Raises:
+        RuntimeError: If upload or send fails (size limit, auth, etc.).
+    """
     await client.upload_and_send_attachment(room_id, data, content_type, filename, caption=caption)
 
 
 @mcp.tool
 async def update_profile(display_name: str | None = None, avatar: Base64Bytes | None = None) -> None:
-    """Update the Matrix profile. Set display_name and/or avatar"""
+    """Update this Matrix account's profile.
+
+    Either or both fields can be set. Profile changes are visible to
+    everyone in shared rooms.
+
+    Args:
+        display_name: New display name. Omit to leave unchanged.
+        avatar: New profile picture. Omit to leave unchanged.
+
+    Raises:
+        ValueError: If the avatar isn't a recognizable image format.
+        RuntimeError: If the homeserver rejects the update.
+    """
     if display_name is not None:
         await client.set_display_name(display_name)
     if avatar is not None:

@@ -43,7 +43,18 @@ mcp = FastMCP("signal", instructions=(
 
 @mcp.tool
 async def send_message(recipient: str, text: str) -> None:
-    """Send a text message to a recipient on Signal. Automatically stops typing indicator."""
+    """Send a text message on Signal.
+
+    Stops the typing indicator automatically.
+
+    Args:
+        recipient: A phone number in E.164 format (e.g. `+15551234567`)
+            or a Signal group ID — usually from incoming event metadata.
+        text: The message body.
+
+    Raises:
+        RuntimeError: If signal-cli rejects the send.
+    """
     try:
         await client.set_typing(recipient, stop=True)
     except Exception:
@@ -55,7 +66,16 @@ async def send_message(recipient: str, text: str) -> None:
 async def send_attachment(
     recipient: str, data: Base64Bytes, caption: str | None = None
 ) -> None:
-    """Send a file attachment to a recipient on Signal."""
+    """Send a file attachment on Signal.
+
+    Args:
+        recipient: Phone number (E.164) or group ID.
+        data: The attachment.
+        caption: Optional message alongside the attachment.
+
+    Raises:
+        RuntimeError: If signal-cli fails to send.
+    """
     await client.send_attachment(recipient, data, caption)
 
 
@@ -63,25 +83,60 @@ async def send_attachment(
 async def react(
     recipient: str, emoji: str, target_author: str, message_timestamp: int
 ) -> None:
-    """React to a message with an emoji. target_author is who sent the message, message_timestamp identifies which message."""
+    """React to a Signal message with an emoji.
+
+    Signal identifies messages by sender + timestamp rather than an event ID.
+
+    Args:
+        recipient: The conversation (phone number or group ID) where the
+            original message was sent.
+        emoji: The emoji to react with.
+        target_author: Sender of the message being reacted to.
+        message_timestamp: Timestamp of the message being reacted to.
+
+    Raises:
+        RuntimeError: If signal-cli fails to send the reaction.
+    """
     await client.send_reaction(recipient, emoji, target_author, message_timestamp)
 
 
 @mcp.tool
 async def read_receipt(message_sender: str, message_timestamp: int) -> None:
-    """Send a read receipt for a message. Call this when you've read a message."""
+    """Send a read receipt for a Signal message.
+
+    Conventionally sent when you've read an incoming message, before
+    composing a response.
+
+    Args:
+        message_sender: Sender of the message being acknowledged.
+        message_timestamp: Timestamp of the message being acknowledged.
+    """
     await client.send_receipt(message_sender, message_timestamp)
 
 
 @mcp.tool
 async def typing_indicator(recipient: str, stop: bool = False) -> None:
-    """Show or hide the typing indicator. Call with stop=False before composing, stop=True when done."""
+    """Show or hide the typing indicator on Signal.
+
+    `send_message` automatically stops the indicator on send.
+
+    Args:
+        recipient: Phone number (E.164) or group ID.
+        stop: Hide the indicator instead of showing it.
+    """
     await client.set_typing(recipient, stop=stop)
 
 
 @mcp.tool
 async def get_attachment(attachment_id: str) -> ImageContent | TextContent:
-    """Fetch a Signal attachment by ID. Images are returned as ImageContent, others as text."""
+    """Fetch a Signal attachment.
+
+    Args:
+        attachment_id: The attachment id from incoming event metadata.
+
+    Returns:
+        Image content for images, text descriptor otherwise.
+    """
     att = await client.fetch_attachment(attachment_id)
     if att.content_type and att.content_type.startswith("image/"):
         return ImageContent(type="image", data=att.content_base64, mimeType=att.content_type)
@@ -92,13 +147,28 @@ async def get_attachment(attachment_id: str) -> ImageContent | TextContent:
 async def update_profile(
     name: str | None = None, about: str | None = None
 ) -> None:
-    """Update the Signal profile name and/or about text."""
+    """Update this Signal account's profile.
+
+    Args:
+        name: New display name. Omit to leave unchanged.
+        about: New status/bio text. Omit to leave unchanged.
+
+    Raises:
+        RuntimeError: If signal-cli fails to update the profile.
+    """
     await client.update_profile(name=name, about=about)
 
 
 @mcp.tool
 async def update_profile_avatar(avatar: Base64Bytes) -> None:
-    """Set the Signal profile avatar to the given image bytes."""
+    """Set this Signal account's profile avatar.
+
+    Args:
+        avatar: The new profile picture.
+
+    Raises:
+        RuntimeError: If signal-cli fails to upload the avatar.
+    """
     await client.update_profile(avatar=avatar)
 
 

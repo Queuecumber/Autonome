@@ -89,7 +89,15 @@ def _add_job(sched: Schedule) -> None:
 
 @mcp.tool
 def get_current_time(format: str = "%Y-%m-%d %H:%M:%S %Z (%A)") -> str:
-    """Check the wall clock. The format is overridable using strftime formatting."""
+    """Read the wall clock.
+
+    Args:
+        format: strftime format. Default produces e.g.
+            `2026-05-05 14:31:09 EDT (Friday)`.
+
+    Returns:
+        The current local time formatted per the strftime spec.
+    """
     return datetime.now().astimezone().strftime(format)
 
 
@@ -98,16 +106,25 @@ def schedule_cron(
     schedule_id: str, cron: str, message: str, session_id: str,
     energy: str = "passive",
 ) -> None:
-    """Schedule a recurring wakeup. cron is a standard cron expression
-    (e.g. '*/20 * * * *' for every 20 minutes). The message is delivered
-    to the given session_id when the schedule fires.
+    """Schedule a recurring wakeup that fires events to a session.
 
-    schedule_id is a short, memorable name you choose (e.g. 'morning-checkin').
-    Use it later to cancel. Rejected if already in use.
+    Persists across restarts. When the cron fires, an event is dispatched
+    to `session_id` with `text=message` for the agent to act on (or ignore).
 
-    energy is "active" (interrupts current generation) or "passive" (queues
-    if busy). Most scheduled events should be passive — use active only when
-    the schedule genuinely needs immediate attention.
+    Args:
+        schedule_id: A short memorable name (e.g. `morning-checkin`),
+            used later to cancel. `continuity` is reserved by the platform.
+        cron: A standard cron expression (e.g. `*/20 * * * *` for every
+            20 minutes).
+        message: Text delivered to the session when the schedule fires.
+        session_id: Where the event lands (room/conversation).
+        energy: `"active"` preempts in-progress generation; `"passive"`
+            queues if busy. Use `active` only when immediate attention
+            is genuinely required.
+
+    Raises:
+        ValueError: If `energy` is not a valid value, `schedule_id` is
+            already in use or reserved, or `cron` isn't valid.
     """
     if energy not in ("active", "passive"):
         raise ValueError(f"energy must be 'active' or 'passive', got {energy!r}")
@@ -131,13 +148,25 @@ def schedule_cron(
 
 @mcp.tool
 def list_schedules() -> list[Schedule]:
-    """List all active schedules with their next fire time."""
+    """List all active schedules.
+
+    Returns:
+        Each schedule's id, cron, message, session, energy, and computed
+        next-fire timestamp.
+    """
     return list(_schedules.values())
 
 
 @mcp.tool
 def cancel_schedule(schedule_id: str) -> None:
-    """Cancel a schedule by id."""
+    """Cancel a previously-created schedule.
+
+    Args:
+        schedule_id: The id you passed to `schedule_cron`.
+
+    Raises:
+        ValueError: If no schedule with that id exists.
+    """
     if schedule_id not in _schedules:
         raise ValueError(f"No schedule with id {schedule_id}")
     _scheduler.remove_job(schedule_id)

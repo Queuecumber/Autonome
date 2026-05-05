@@ -43,7 +43,17 @@ def _date_path(d: date) -> Path:
 
 @mcp.tool
 def read_memory(date: date) -> str:
-    """Read the memory entry for a specific date, formatted as YYYY-MM-DD"""
+    """Read the daily memory entry for a specific date.
+
+    Args:
+        date: The day to read.
+
+    Returns:
+        The entry's contents (markdown).
+
+    Raises:
+        FileNotFoundError: If no entry exists for that date.
+    """
     path = _date_path(date)
     if not path.exists():
         raise FileNotFoundError(f"No memory entry for {date}")
@@ -51,17 +61,34 @@ def read_memory(date: date) -> str:
 
 
 @mcp.tool
-def edit_memory(date: date, content: str) -> str:
-    """Write or replace the memory entry for a specific date, formatted as YYYY-MM-DD"""
+def edit_memory(date: date, content: str) -> None:
+    """Write or replace the daily memory entry for a specific date.
+
+    Overwrites any existing entry — read first if you want to append
+    rather than replace.
+
+    Args:
+        date: The day to update.
+        content: Full new contents of the entry (markdown).
+    """
     path = _date_path(date)
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
-    return f"Updated memory for {date} ({len(content)} bytes)" # FOLLOWUP: no news is good news
 
 
 @mcp.tool
 def read_global_memory() -> str:
-    """Read the global MEMORY.md index file."""
+    """Read the global memory index.
+
+    The global index is your curated long-term memory — distilled from
+    daily entries over time, what's worth keeping permanently.
+
+    Returns:
+        The current global memory (markdown).
+
+    Raises:
+        FileNotFoundError: If no global memory exists yet.
+    """
     path = MEMORY_DIR / "MEMORY.md"
     if not path.exists():
         raise FileNotFoundError("No global memory file exists yet")
@@ -69,17 +96,27 @@ def read_global_memory() -> str:
 
 
 @mcp.tool
-def edit_global_memory(content: str) -> str:
-    """Write or replace the global MEMORY.md index file."""
+def edit_global_memory(content: str) -> None:
+    """Write or replace the global memory index.
+
+    Overwrites any existing global memory — read first to append/edit
+    rather than replace from scratch.
+
+    Args:
+        content: Full new contents of the global memory (markdown).
+    """
     path = MEMORY_DIR / "MEMORY.md"
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
-    return f"Updated global memory ({len(content)} bytes)"
 
 
 @mcp.tool
 def list_memories() -> list[date]:
-    """List all dates that have memory entries, sorted chronologically."""
+    """List all dates that have daily memory entries.
+
+    Returns:
+        Dates with entries, oldest first. Empty if no memories exist yet.
+    """
     if not MEMORY_DIR.exists():
         return []
     dates = []

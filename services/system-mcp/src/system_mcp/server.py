@@ -29,7 +29,20 @@ _h2t.body_width = 0  # no line wrapping
 
 @mcp.tool
 async def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web. Returns ranked results with title, URL, and snippet."""
+    """Search the web.
+
+    Args:
+        query: What to search for.
+        max_results: Cap on the number of results.
+
+    Returns:
+        Ranked results with title, URL, and snippet (markdown). "No
+        results found." if the search returned nothing.
+
+    Raises:
+        httpx.HTTPStatusError: If the search backend returns a non-2xx
+            (rate limit, auth, server error).
+    """
     resp = await _http.post(
         SEARCH_URL,
         headers={"Authorization": f"Bearer {SEARCH_API_KEY}"},
@@ -53,7 +66,25 @@ async def web_search(query: str, max_results: int = 5) -> str:
 
 @mcp.tool
 async def web_fetch(url: str, max_chars: int = MAX_FETCH_CHARS) -> str:
-    """Fetch a URL and return its content as markdown. Large pages are truncated."""
+    """Fetch a URL and return its contents.
+
+    HTML pages are converted to markdown; other content types come back
+    as-is. Redirects are followed. Large responses are truncated. If you
+    don't get the right information from a truncated response, try asking
+    for more characters.
+
+    Args:
+        url: The URL to fetch.
+        max_chars: Truncation threshold; longer responses get a
+            `[truncated at N chars]` marker appended.
+
+    Returns:
+        The page contents (markdown for HTML, raw text otherwise),
+        possibly with a truncation marker.
+
+    Raises:
+        httpx.HTTPStatusError: If the fetch returns a non-2xx response.
+    """
     resp = await _http.get(url, follow_redirects=True)
     resp.raise_for_status()
 
