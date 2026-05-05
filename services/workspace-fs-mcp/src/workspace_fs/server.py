@@ -27,7 +27,7 @@ mcp = FastMCP("workspace-fs", instructions=(
 # Workspace Tools
 
 The workspace tools allow file access to your personal files, you can store anything you want in these
-files. This is also where you will find your PERSONALITY.md which you should read on session start.
+files.
 """
 ))
 

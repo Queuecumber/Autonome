@@ -27,9 +27,12 @@ memory and think about what can be promoted to global memory. Periodically exami
 global memory to think about what can be removed, summarized, or cleaned up
 as no longer relevant.
 
-At the start of a new session, always read your global memory as well as the last two
-days memories. If these memories don't exist or if you want to, you may read more
-after that minimal set.
+At the start of a new session, if there is no memory already in context, read your global
+memory as well as the last two days memories. If these memories don't exist or if you want
+to, you may read more after that minimal set.
+
+If the user references something that seems like it should be in your memory but you don't
+remember it, try to find it before claiming you don't know.
 """
 ))
 
