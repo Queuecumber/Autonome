@@ -1,8 +1,10 @@
 """Canonical event schema for the session manager.
 
 Adapters (signal, matrix, time, etc.) produce events that conform to this
-shape and POST them to the /event endpoint. The session manager validates
-on receipt and routes to the session identified by session_id.
+shape and POST them to the /event endpoint. Events without a session_id
+route to the default session — the agent has one unified history. A
+schedule or other source can target a different session by setting
+session_id explicitly.
 """
 
 from dataclasses import dataclass, field
@@ -11,15 +13,17 @@ from typing import Any, Literal
 
 Energy = Literal["active", "passive"]
 
+DEFAULT_SESSION_ID = "main"
+
 
 @dataclass
 class Event:
-    """An inbound event targeting a specific session.
+    """An inbound event.
 
     Attributes:
-        session_id: Routing key — the session to append this event to.
-            Adapters should namespace their session_ids (e.g. "matrix:!roomid",
-            "signal:+1234") to avoid collisions.
+        session_id: Routing key. Empty/omitted means route to the default
+            session — the common case. A schedule (or other source) can
+            target a specific session by setting this explicitly.
         source: Where the event came from ("matrix", "signal", "time", etc.).
             Metadata only, not used for routing.
         event_type: What kind of event this is ("message", "cron", "continuity",
@@ -32,7 +36,7 @@ class Event:
         metadata: Source-specific extras (sender, room_id, emoji, schedule_id, etc.).
             Surfaced to the agent in the developer context message.
     """
-    session_id: str
+    session_id: str = DEFAULT_SESSION_ID
     source: str = "unknown"
     event_type: str = "message"
     text: str = ""
@@ -42,13 +46,11 @@ class Event:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Event":
         """Build an Event from a JSON payload. Raises ValueError on invalid input."""
-        if "session_id" not in data:
-            raise ValueError("Event missing required field: session_id")
         energy = data.get("energy", "active")
         if energy not in ("active", "passive"):
             raise ValueError(f"Event energy must be 'active' or 'passive', got {energy!r}")
         return cls(
-            session_id=data["session_id"],
+            session_id=data.get("session_id") or DEFAULT_SESSION_ID,
             source=data.get("source", "unknown"),
             event_type=data.get("event_type", "message"),
             text=data.get("text", ""),

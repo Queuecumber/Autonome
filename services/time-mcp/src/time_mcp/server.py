@@ -48,7 +48,7 @@ class Schedule(BaseModel):
     id: str
     cron: str
     message: str
-    session_id: str
+    session_id: str | None = None
     energy: str = "passive"
 
     @computed_field
@@ -103,21 +103,25 @@ def get_current_time(format: str = "%Y-%m-%d %H:%M:%S %Z (%A)") -> str:
 
 @mcp.tool
 def schedule_cron(
-    schedule_id: str, cron: str, message: str, session_id: str,
+    schedule_id: str, cron: str, message: str,
+    session_id: str | None = None,
     energy: str = "passive",
 ) -> None:
-    """Schedule a recurring wakeup that fires events to a session.
+    """Schedule a recurring wakeup that fires events.
 
     Persists across restarts. When the cron fires, an event is dispatched
-    to `session_id` with `text=message` for the agent to act on (or ignore).
+    with `text=message` for the agent to act on (or ignore). Defaults to
+    landing in your current session — pass `session_id` only to target a
+    different one.
 
     Args:
         schedule_id: A short memorable name (e.g. `morning-checkin`),
             used later to cancel. `continuity` is reserved by the platform.
         cron: A standard cron expression (e.g. `*/20 * * * *` for every
             20 minutes).
-        message: Text delivered to the session when the schedule fires.
-        session_id: Where the event lands (room/conversation).
+        message: Text delivered when the schedule fires.
+        session_id: Optional explicit target session. Omit to land in the
+            default session.
         energy: `"active"` preempts in-progress generation; `"passive"`
             queues if busy. Use `active` only when immediate attention
             is genuinely required.
@@ -178,9 +182,8 @@ def cancel_schedule(schedule_id: str) -> None:
 
 async def _fire(sched: Schedule) -> None:
     """POST a scheduled event to the session manager."""
-    event = {
+    event: dict = {
         "source": "time",
-        "session_id": sched.session_id,
         "event_type": "continuity" if sched.id == "continuity" else "cron",
         "text": sched.message,
         "energy": sched.energy,
@@ -189,7 +192,9 @@ async def _fire(sched: Schedule) -> None:
             "cron": sched.cron,
         },
     }
-    logger.info(f"Firing schedule {sched.id} ({sched.energy}) → {sched.session_id}")
+    if sched.session_id:
+        event["session_id"] = sched.session_id
+    logger.info(f"Firing schedule {sched.id} ({sched.energy}) → {sched.session_id or 'default'}")
     try:
         await _http.post(f"{session_manager_url}/event", json=event)
     except Exception as e:
@@ -212,7 +217,6 @@ async def main():
 
     continuity_cron = os.environ.get("CONTINUITY_CRON", "*/20 * * * *")
     continuity_message = os.environ.get("CONTINUITY_MESSAGE", "✨")
-    continuity_session = os.environ.get("CONTINUITY_SESSION", "")
 
     _http = httpx.AsyncClient(timeout=600)
     _scheduler = AsyncIOScheduler()
@@ -220,16 +224,12 @@ async def main():
 
     _load()
 
-    if continuity_session:
-        _add_job(Schedule(
-            id="continuity",
-            cron=continuity_cron,
-            message=continuity_message,
-            session_id=continuity_session,
-        ))
-        logger.info(f"Continuity schedule registered: {continuity_cron} → {continuity_session}")
-    else:
-        logger.warning("CONTINUITY_SESSION not set — skipping continuity schedule")
+    _add_job(Schedule(
+        id="continuity",
+        cron=continuity_cron,
+        message=continuity_message,
+    ))
+    logger.info(f"Continuity schedule registered: {continuity_cron}")
 
     try:
         await mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port)

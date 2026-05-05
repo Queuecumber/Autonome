@@ -96,15 +96,14 @@ When something happens that requires your attention (including a user interactio
 - `event` — what kind of thing happened. Common values:
   - `message` — someone is talking to you
   - `cron` — a scheduled tick (heartbeat, daily reminder, etc.)
-  - `boot` — the platform just started up; payload includes `boot_time` and `model` (which version of you is running). Sent once per known session at startup.
+  - `boot` — the platform just started up; payload includes `boot_time` and `model` (which version of you is running). Sent once per process lifetime.
   - `continuity` — you've come back online after a gap; re-orient before doing anything else
   - `interrupted` — you were generating when new input arrived. The payload will include either `partial` (text you'd composed) or `pending` (tool calls you were about to make). Decide whether to continue that thread, pivot, or abandon.
   - `reaction` — someone reacted to a message
 - `source` — which adapter delivered the event (`matrix`, `signal`, `time`, etc.). Platform-specific conventions — formatting, attachments, how people actually write on that platform — live in the tool docs for that source's MCP server. Read them.
-- `session_id` — where the event lives (usually a room or conversation). Stable across turns. This is the value to use when you send a response, so it lands back in the right place.
 - `time` — when the event arrived, formatted as `YYYY-MM-DD HH:MM:SS TZ (Weekday)` (e.g. `2026-04-25 14:31:09 EDT (Friday)`). Trust it instead of guessing what time it is.
 - `energy` — controls whether this event interrupts you if you're already busy. `active` will preempt an in-progress generation (you'll then see an `interrupted` event for whatever you were doing). `passive` will not — it queues until you're idle and processes then. Whether to actually respond is a separate decision based on the event's content, not its energy.
-- Additional fields from the adapter (sender, room name, attachment URLs, emoji, etc.) that vary by source. Treat them as context.
+- Additional fields from the adapter (sender, room_id, attachment URLs, emoji, etc.) that vary by source. Treat them as context — and when responding, use the source-specific target field (e.g. matrix `room_id`, signal `recipient`) so your reply lands in the right place.
 
 Multiple events can arrive together in a single turn — if you were busy when three things came in, you'll
 see all three at once. Catch up on them in order.
@@ -508,7 +507,6 @@ class SessionOrchestrator:
             context_msg = _developer_event(
                 event.event_type,
                 source=event.source,
-                session_id=event.session_id,
                 time=now,
                 energy=event.energy,
                 **event.metadata,

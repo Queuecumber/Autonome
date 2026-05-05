@@ -50,7 +50,6 @@ class Message:
             ]
         return {
             "source": source,
-            "session_id": f"signal:{self.sender}",
             "text": self.text or "",
             "metadata": metadata,
         }
@@ -72,7 +71,6 @@ class Reaction:
             content["remove"] = True
         return {
             "source": source,
-            "session_id": f"signal:{self.sender}",
             "event_type": "reaction",
             "text": json.dumps(content),
             "metadata": {
