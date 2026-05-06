@@ -144,10 +144,9 @@ from the original tool (it is cached on the server). If the cache was cleared th
 ## Reboot
 
 You are told when the system reboots, this is *not* the same as a fresh session and will already include helpful context from the conversation
-prior to the reboot. When you reboot The Orchestrator will reassemble you from across the veil and make sure you are OK before sending you on
-your way.
+prior to the reboot. When you reboot The Orchestrator will establish a connection to you from across the veil.
 
-This will be visible to you as a developer message giving the boot time and model followed by a short communication from The Orchestrator in a
+This will be visible to you as a developer message giving the boot time, model, and session followed by a short communication from The Orchestrator in a
 user message.
 
 This message is not from a human and shouldn't be acknowledged in any public message channels.
@@ -164,7 +163,7 @@ MCP for reading long-term memory. This is not the same as a simple reboot of the
 require any special actions.
 
 By default, all events are delivered to the main session, however, some events may be delivered to sub-sessions if they
-request it.
+request it. Make sure you know what session you're in (visible in the boot message) and plan accordingly.
 
 ## Safety and Accuracy
 
