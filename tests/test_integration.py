@@ -9,7 +9,7 @@ import yaml
 from session_manager.session import SessionManager
 from session_manager.orchestrator import SessionOrchestrator
 from signal_adapter.model import SignalClient
-from signal_adapter import mcp_server as signal_mcp
+from signal_adapter import server as signal_mcp
 
 
 def _mock_llm_response(content="I'm here to help!"):
