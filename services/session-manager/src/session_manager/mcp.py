@@ -8,9 +8,12 @@ import json
 import logging
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Awaitable, Callable
+from urllib.parse import urlparse
 
 import exifread
 import exifread.utils
+import filetype
 import jsonpath
 import jsonref
 from mcp import ClientSession
@@ -27,10 +30,13 @@ _BINARY_FINDER = jsonpath.compile(
     "$..[?(@.format == 'binary' or @.format == 'byte' or @.format == 'base64')]"
 )
 
-_POINTER_DESCRIPTION = (
-    f"Pointer to a stored binary (e.g. '{POINTER_PREFIX}5-photo.jpg'). "
-    "Do not pass raw bytes or base64."
+_BINARY_PARAM_DESCRIPTION = (
+    "Resource URI (e.g. 'pointer://5-photo.jpg', 'mxc://server/abc') or "
+    "raw base64 bytes. URIs are resolved to bytes by the platform before "
+    "the tool runs."
 )
+
+URIResolver = Callable[[str], Awaitable[bytes]]
 
 
 def mcp_tool_to_openai(tool) -> dict:
@@ -93,7 +99,7 @@ def inline_refs(schema: dict) -> dict:
 
 def rewrite_binary_params(schema: dict) -> list[BinaryParam]:
     """Find every binary-string node in the schema, rewrite each in place
-    (strip the binary `format`, add a pointer-usage description), and
+    (strip the binary `format`, add a URI-or-bytes usage description), and
     return a list of BinaryParams for dispatch-time resolution.
 
     Expects refs already resolved via inline_refs().
@@ -103,33 +109,32 @@ def rewrite_binary_params(schema: dict) -> list[BinaryParam]:
         patch = (
             jsonpath.JSONPatch()
             .replace(match.pointer().join("format"), "string")
-            .add(match.pointer().join("description"), _POINTER_DESCRIPTION)
+            .add(match.pointer().join("description"), _BINARY_PARAM_DESCRIPTION)
         )
         patch.apply(schema)
         params.append(BinaryParam(match.pointer()))
     return params
 
 
-def resolve_pointer_args(args: dict, params: list[BinaryParam], store: BinaryStore) -> dict:
+async def resolve_uri_args(
+    args: dict, params: list[BinaryParam], resolver: URIResolver,
+) -> dict:
     """For each BinaryParam, find matching positions in args and replace
-    any `pointer://...` strings with their base64-encoded bytes. Non-pointer
-    values pass through untouched. Expired pointers raise loudly."""
+    any URI-string value (anything with a `<scheme>://` prefix) with its
+    base64-encoded bytes by calling `resolver(uri)`. Non-URI values pass
+    through untouched (assumed to already be bytes/base64 from the caller)."""
     if not params:
         return args
     args = copy.deepcopy(args)
     for param in params:
         for match in param.args_matcher.finditer(args):
             val = match.value
-            if not isinstance(val, str) or not val.startswith(POINTER_PREFIX):
+            if not isinstance(val, str):
                 continue
-            pointer_id = val[len(POINTER_PREFIX):]
-            try:
-                content, _ = store.load(pointer_id)
-            except FileNotFoundError:
-                raise ValueError(
-                    f"Pointer {pointer_id!r} not found — it may have been "
-                    "garbage-collected. Ask for the binary to be re-produced."
-                )
+            scheme = urlparse(val).scheme
+            if not scheme:
+                continue
+            content = await resolver(val)
             encoded = base64.b64encode(content).decode()
             jsonpath.JSONPatch().replace(match.pointer(), encoded).apply(args)
     return args
@@ -225,12 +230,26 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             parts.append(_describe_binary(block.data, block.mimeType, store))
 
         elif block.type == "resource":
+            # Resource blocks come from MCP resource reads — the content is
+            # already URI-addressable via the original scheme (mxc://,
+            # pointer://, etc.). Don't re-cache as a new pointer; that would
+            # nudge the agent into round-tripping (read mxc:// → see
+            # pointer:// → read again). Just surface the content directly.
             resource = getattr(block, "resource", None)
+            uri = str(getattr(resource, "uri", "") or "")
             blob = getattr(resource, "blob", None)
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
             if blob is not None:
-                parts.append(_describe_binary(blob, mime, store))
+                # fastmcp resource templates have static mime_type, so handlers
+                # producing heterogeneous content (matrix attachments, etc.)
+                # come back with a generic placeholder. Re-detect from bytes
+                # so images surface correctly.
+                if mime in ("application/octet-stream", "text/plain", ""):
+                    raw = base64.b64decode(blob) if isinstance(blob, str) else blob
+                    kind = filetype.guess(raw)
+                    if kind:
+                        mime = kind.mime
                 if mime.startswith("image/"):
                     raw = base64.b64decode(blob) if isinstance(blob, str) else blob
                     exif = _exif_summary(raw)
@@ -240,6 +259,11 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                         "type": "input_image",
                         "image_url": f"data:{mime};base64,{blob}",
                     })
+                else:
+                    # Non-visual binary — just describe by URI + mime + size.
+                    size = len(blob) * 3 // 4 if isinstance(blob, str) else len(blob)
+                    parts.append({"type": "input_text",
+                                  "text": f"[{mime}, {size} bytes, uri={uri}]"})
             elif text is not None:
                 parts.append({"type": "input_text", "text": text})
             else:
@@ -314,22 +338,17 @@ class MCPConnection:
             self._error = e
             self._ready.set()
 
-    async def call_tool(
-        self, prefixed_name: str, arguments: str, store: BinaryStore | None = None
-    ) -> list:
+    async def call_tool(self, prefixed_name: str, arguments: str | dict) -> list:
         """Execute a tool call and return raw MCP content blocks.
 
-        If a BinaryStore is provided and this tool has binary params, any
-        pointer:// strings in arguments are resolved to base64 bytes first.
+        Arguments are passed through verbatim; URI resolution for binary
+        params is done by the orchestrator before calling this.
         """
         if self.session is None:
             raise RuntimeError(f"MCP server {self.name} not connected")
 
         original_name = self._original_names.get(prefixed_name, prefixed_name)
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
-        params = self.binary_params.get(prefixed_name, [])
-        if params and store is not None:
-            args = resolve_pointer_args(args, params, store)
         result = await self.session.call_tool(original_name, args)
         return result.content
 

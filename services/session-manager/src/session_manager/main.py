@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from session_manager import cache_mcp
+from session_manager import platform_mcp
 from session_manager.event import Event
 from session_manager.orchestrator import SessionOrchestrator
 
@@ -29,21 +29,25 @@ async def startup():
 
     session_dir = Path(config.get("session", {}).get("store", "./sessions"))
     port = int(os.environ.get("SESSION_MANAGER_PORT", "5000"))
-    cache_mcp_port = int(os.environ.get("CACHE_MCP_PORT", "5001"))
+    platform_mcp_port = int(os.environ.get("PLATFORM_MCP_PORT", "5001"))
 
     orchestrator = SessionOrchestrator(
         config=config,
         session_dir=session_dir,
     )
 
-    # Cache MCP server runs in-process and shares the orchestrator's
-    # BinaryStore. The orchestrator connects to it as just another MCP
-    # server (over loopback HTTP), which is how the read_binary tool
-    # reaches the LLM and how pointer:// resources show up to MCP clients.
-    cache_mcp.binary_store = orchestrator.binaries
+    # The platform's own MCP server runs in-process and exposes the
+    # binary cache as `pointer://` resources plus the resource bridge
+    # tools (resources_list/template_list/read). The orchestrator
+    # connects to it as just another MCP backend over loopback HTTP, so
+    # `pointer://` registers in the scheme map via the normal
+    # discovery path and the bridge tools surface with the standard
+    # aptool- prefix.
+    platform_mcp.binary_store = orchestrator.binaries
+    platform_mcp.orchestrator = orchestrator
     asyncio.create_task(
-        cache_mcp.mcp.run_async(transport="http", host="0.0.0.0", port=cache_mcp_port),
-        name="cache-mcp",
+        platform_mcp.mcp.run_async(transport="http", host="0.0.0.0", port=platform_mcp_port),
+        name="platform-mcp",
     )
     # Give the MCP server a moment to bind before the orchestrator tries
     # to connect to it.
@@ -51,7 +55,7 @@ async def startup():
 
     # Connect to MCP servers (retry until available)
     mcp_urls = dict(config.get("mcp_servers", {}) or {})
-    mcp_urls.setdefault("session", f"http://localhost:{cache_mcp_port}/mcp")
+    mcp_urls.setdefault("session", f"http://localhost:{platform_mcp_port}/mcp")
     max_retries = 30
     for attempt in range(max_retries):
         try:

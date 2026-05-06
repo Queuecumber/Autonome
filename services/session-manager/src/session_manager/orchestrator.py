@@ -1,70 +1,23 @@
 """Session manager: central orchestrator that receives events and drives LLM calls."""
 
 import asyncio
+import base64
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
 from session_manager.binaries import BinaryStore
 from session_manager.event import Event
-from session_manager.mcp import MCPConnection, mcp_content_to_openai
+from session_manager.mcp import MCPConnection, mcp_content_to_openai, resolve_uri_args
 from session_manager.session import SessionManager
 
 logger = logging.getLogger(__name__)
 
-
-# Harness-level tools that bridge MCP resource verbs to the LLM. These
-# can't be hosted by any single MCP server because they aggregate /
-# route across all connected ones.
-RESOURCES_LIST_TOOL_NAME = "aptool-resources_list"
-RESOURCES_TEMPLATE_LIST_TOOL_NAME = "aptool-resources_template_list"
-RESOURCES_READ_TOOL_NAME = "aptool-resources_read"
-
-RESOURCE_BRIDGE_TOOLS = [
-    {
-        "type": "function",
-        "name": RESOURCES_LIST_TOOL_NAME,
-        "description": (
-            "List MCP resources from all connected servers. Returns "
-            "[{server, uri, name, description, mimeType}, ...]. Use this "
-            "to discover what's currently available before reading."
-        ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "type": "function",
-        "name": RESOURCES_TEMPLATE_LIST_TOOL_NAME,
-        "description": (
-            "List MCP resource templates from all connected servers. "
-            "Templates are URI patterns like `pointer://{name}` that "
-            "describe families of resources you can address by filling "
-            "in the parameters."
-        ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "type": "function",
-        "name": RESOURCES_READ_TOOL_NAME,
-        "description": (
-            "Read a resource by URI from any connected MCP server. The "
-            "URI can be a static resource (from resources_list) or a "
-            "concrete instance of a template (e.g. `pointer://5-photo.jpg`). "
-            "Returns whatever content the resource provides — text, image, "
-            "or binary descriptor."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "uri": {"type": "string", "description": "Full resource URI."},
-            },
-            "required": ["uri"],
-        },
-    },
-]
 
 # TODO: make configurable, iterate on prompting
 SYSTEM_PROMPT = """\
@@ -157,20 +110,21 @@ are available to you at all times.
 In general, active events are things that require your attention and passive events are FYI. However,
 in both cases, *you can decide how or if you want to do something to handle the event* and you should do so in character.
 
-## Binaries and Pointers
+## Binaries and Resource URIs
 
-Some tools return or accept binary content — images, audio, documents. The bytes of these files are not eagerly
-inserted into context. Instead, when a tool returns binary content you'll see a `pointer://...` URI in the tool result.
-The actual bytes are stored on the platform. You must use the `view_binary` tool to load these pointers.
+Some tools return or accept binary content — images, audio, documents. The bytes
+themselves don't flow through context; instead, the platform exposes them as MCP
+resources addressed by URI.
 
-To pass a binary to another tool — for example, sharing an image you received on Matrix into
-your workspace as a file — just pass the pointer URI as the value of any binary parameter.
-The platform transparently resolves the pointer to bytes before the receiving tool runs.
-Don't pre-fetch the bytes through context yourself; that's wasteful and unnecessary.
+Tools will accept mcp resources as input for binary data, you can pass any resource URI
+to these tools.
 
-Since the file bytes are not proactively stored in context and won't be provided on later conversational rounds, you
-may need to re-view them. You can do this with the same `view_binary` tool and pointer URL without re-fetching the binary
-from the original tool (it is cached on the server). If the cache was cleared the `view_binary` tool will tell you that.
+If you have a resource URI and you want to view it, use the `resources_read` tool. Whenever possible,
+the binary data will be loaded into context (images for example). That binary data won't persist in
+session memory but the URI can be used in subsequent rounds to review it.
+
+Use `resources_list` and `resources_template_list` if you need to discover what's
+currently available across all connected servers.
 
 ## Reboot
 
@@ -309,13 +263,18 @@ class SessionOrchestrator:
         self._sessions: dict[str, _SessionState] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
-        self.openai_tools: list[dict] = list(RESOURCE_BRIDGE_TOOLS)
+        self.openai_tools: list[dict] = []
         self._tool_to_mcp: dict[str, MCPConnection] = {}
+
+        # scheme → MCPConnection. Populated from each server's
+        # resources/templates/list at connect time. Lets the orchestrator
+        # route a URI to the right server based on its scheme alone.
+        self._scheme_to_mcp: dict[str, MCPConnection] = {}
 
         self.max_tool_iterations = 20
 
     async def connect_mcp_servers(self, mcp_urls: dict[str, str]) -> None:
-        """Connect to all MCP servers and discover tools."""
+        """Connect to all MCP servers, discover tools and resource schemes."""
         for name, url in mcp_urls.items():
             conn = MCPConnection(name, url)
             try:
@@ -325,14 +284,67 @@ class SessionOrchestrator:
                     tool_name = tool["name"]
                     self.openai_tools.append(tool)
                     self._tool_to_mcp[tool_name] = conn
+                await self._register_schemes(conn)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException as e:
                 logger.error("Failed to connect to MCP server %s at %s: %r", name, url, e)
                 _log_exception_tree(e)
 
-        logger.info("Connected to %d MCP servers, %d tools total",
-                    len(self.mcp_connections), len(self.openai_tools))
+        logger.info("Connected to %d MCP servers, %d tools total, schemes: %s",
+                    len(self.mcp_connections), len(self.openai_tools),
+                    sorted(self._scheme_to_mcp.keys()))
+
+    async def _register_schemes(self, conn: MCPConnection) -> None:
+        """Register every URI scheme this server claims via resource templates.
+
+        Called after each server connects. The same scheme advertised by
+        multiple servers is last-write-wins — load order in
+        connect_mcp_servers determines the winner. Putting the in-process
+        cache server (which owns `pointer://`) last makes it the platform's
+        canonical owner.
+        """
+        try:
+            templates = await conn.list_resource_templates()
+        except Exception as e:
+            logger.debug("list_resource_templates failed for %s: %r", conn.name, e)
+            return
+        for t in templates:
+            template_uri = getattr(t, "uriTemplate", None) or ""
+            if "://" not in template_uri:
+                continue
+            scheme = template_uri.split("://", 1)[0].lower()
+            if not scheme:
+                continue
+            prior = self._scheme_to_mcp.get(scheme)
+            if prior is not None and prior is not conn:
+                logger.warning("Scheme %r: %s shadows %s", scheme, conn.name, prior.name)
+            self._scheme_to_mcp[scheme] = conn
+
+    async def resolve_uri(self, uri: str) -> bytes:
+        """Resolve any URI to raw bytes via the scheme map.
+
+        Routes by scheme to the MCP server that advertised a matching
+        resource template, calls its read_resource, and extracts bytes
+        from the returned ResourceContents (blob → b64 decode, text →
+        utf-8 encode).
+        """
+        scheme = urlparse(uri).scheme.lower()
+        if not scheme:
+            raise ValueError(f"URI has no scheme: {uri!r}")
+        conn = self._scheme_to_mcp.get(scheme)
+        if conn is None:
+            raise ValueError(f"No MCP server registered for scheme {scheme!r}: {uri!r}")
+
+        contents = await conn.read_resource(uri)
+        for c in contents:
+            blob = getattr(c, "blob", None)
+            if blob is not None:
+                return base64.b64decode(blob) if isinstance(blob, str) else blob
+            text = getattr(c, "text", None)
+            if text is not None:
+                return text.encode("utf-8")
+        raise ValueError(f"read_resource({uri!r}) returned no content")
 
     def _maybe_boot_event(self, session_id: str) -> Event | None:
         """Return a synthetic boot event the first time a session is seen
@@ -385,19 +397,19 @@ class SessionOrchestrator:
           - function_call_output: the output item with text content
           - image_items: user messages with image_url content for the model to see
         """
-        if name == RESOURCES_LIST_TOOL_NAME:
-            return await self._resources_list(call_id)
-        if name == RESOURCES_TEMPLATE_LIST_TOOL_NAME:
-            return await self._resources_template_list(call_id)
-        if name == RESOURCES_READ_TOOL_NAME:
-            return await self._resources_read(call_id, arguments)
-
         conn = self._tool_to_mcp.get(name)
 
         if conn is None:
             return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}, []
 
-        content_blocks = await conn.call_tool(name, arguments, store=self.binaries)
+        # Resolve URI-typed binary args via the scheme map before dispatch.
+        # Tools see bytes; the scheme registry handles which MCP serves what.
+        args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        params = conn.binary_params.get(name, [])
+        if params:
+            args = await resolve_uri_args(args, params, self.resolve_uri)
+
+        content_blocks = await conn.call_tool(name, args)
         logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),
                      [getattr(b, "type", type(b).__name__) for b in content_blocks])
         openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
@@ -412,85 +424,6 @@ class SessionOrchestrator:
         ]
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
-        return output, image_items
-
-    async def _resources_list(self, call_id: str) -> tuple[dict, list[dict]]:
-        """Aggregate resources/list across every connected MCP server."""
-        out: list[dict] = []
-        for conn in self.mcp_connections.values():
-            try:
-                resources = await conn.list_resources()
-            except Exception as e:
-                logger.debug("resources_list: %s failed: %r", conn.name, e)
-                continue
-            for r in resources:
-                out.append({
-                    "server": conn.name,
-                    "uri": str(getattr(r, "uri", "")),
-                    "name": getattr(r, "name", None),
-                    "description": getattr(r, "description", None),
-                    "mimeType": getattr(r, "mimeType", None),
-                })
-        return ({"type": "function_call_output", "call_id": call_id, "output": json.dumps(out)}, [])
-
-    async def _resources_template_list(self, call_id: str) -> tuple[dict, list[dict]]:
-        """Aggregate resources/templates/list across every connected server."""
-        out: list[dict] = []
-        for conn in self.mcp_connections.values():
-            try:
-                templates = await conn.list_resource_templates()
-            except Exception as e:
-                logger.debug("resources_template_list: %s failed: %r", conn.name, e)
-                continue
-            for t in templates:
-                out.append({
-                    "server": conn.name,
-                    "uriTemplate": getattr(t, "uriTemplate", None),
-                    "name": getattr(t, "name", None),
-                    "description": getattr(t, "description", None),
-                    "mimeType": getattr(t, "mimeType", None),
-                })
-        return ({"type": "function_call_output", "call_id": call_id, "output": json.dumps(out)}, [])
-
-    async def _resources_read(self, call_id: str, arguments: str) -> tuple[dict, list[dict]]:
-        """Read a resource by URI, trying each connected server until one
-        succeeds. Translates the MCP ResourceContents result through
-        mcp_content_to_openai so images surface as input_image, blobs
-        get pointer-text, and text comes through as text."""
-        try:
-            args = json.loads(arguments) if isinstance(arguments, str) else arguments
-            uri = args.get("uri", "")
-            if not uri:
-                raise ValueError("uri is required")
-        except Exception as e:
-            return ({"type": "function_call_output", "call_id": call_id, "output": f"Error: {e}"}, [])
-
-        last_error: Exception | None = None
-        contents: list = []
-        for conn in self.mcp_connections.values():
-            try:
-                contents = await conn.read_resource(uri)
-                break
-            except Exception as e:
-                last_error = e
-        else:
-            err = f"No server could read resource {uri!r}"
-            if last_error:
-                err += f" (last error: {last_error!r})"
-            return ({"type": "function_call_output", "call_id": call_id, "output": err}, [])
-
-        # Wrap each ResourceContents in an EmbeddedResource-shaped dict so
-        # mcp_content_to_openai's "resource" branch handles it uniformly.
-        wrapped = [type("_Wrap", (), {"type": "resource", "resource": c})() for c in contents]
-        openai_parts = mcp_content_to_openai(wrapped, store=self.binaries)
-
-        text_parts = [p["text"] for p in openai_parts if p.get("type") == "input_text"]
-        image_items = [
-            {"role": "user", "content": [p]}
-            for p in openai_parts if p.get("type") == "input_image"
-        ]
-        output = {"type": "function_call_output", "call_id": call_id,
-                  "output": "\n".join(text_parts) or f"[read {uri}]"}
         return output, image_items
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
