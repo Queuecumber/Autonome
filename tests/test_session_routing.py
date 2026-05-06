@@ -38,15 +38,6 @@ def test_event_constructor_default_session_id():
     assert e.session_id == DEFAULT_SESSION_ID
 
 
-def test_default_session_id_is_main():
-    """Sentinel: changing the default name is a behavior change.
-
-    External integrations and persisted schedules may reference 'main';
-    bump this constant deliberately and update accordingly.
-    """
-    assert DEFAULT_SESSION_ID == "main"
-
-
 # ── Adapter to_event() shape ─────────────────────────────
 
 

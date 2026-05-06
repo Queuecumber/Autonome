@@ -111,7 +111,7 @@ def schedule_cron(
 
     Persists across restarts. When the cron fires, an event is dispatched
     with `text=message` for the agent to act on (or ignore). Defaults to
-    landing in your current session — pass `session_id` only to target a
+    the platform's main session — pass `session_id` only to target a
     different one.
 
     Args:

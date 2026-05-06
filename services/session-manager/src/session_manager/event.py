@@ -2,9 +2,8 @@
 
 Adapters (signal, matrix, time, etc.) produce events that conform to this
 shape and POST them to the /event endpoint. Events without a session_id
-route to the default session — the agent has one unified history. A
-schedule or other source can target a different session by setting
-session_id explicitly.
+route to the default session — the agent has one unified history. An
+event can target a different session by setting session_id explicitly.
 """
 
 from dataclasses import dataclass, field
@@ -21,9 +20,8 @@ class Event:
     """An inbound event.
 
     Attributes:
-        session_id: Routing key. Empty/omitted means route to the default
-            session — the common case. A schedule (or other source) can
-            target a specific session by setting this explicitly.
+        session_id: Routing key. Empty/omitted routes to the default
+            session.
         source: Where the event came from ("matrix", "signal", "time", etc.).
             Metadata only, not used for routing.
         event_type: What kind of event this is ("message", "cron", "continuity",

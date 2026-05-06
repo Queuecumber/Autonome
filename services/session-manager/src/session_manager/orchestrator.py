@@ -96,7 +96,7 @@ When something happens that requires your attention (including a user interactio
 - `event` — what kind of thing happened. Common values:
   - `message` — someone is talking to you
   - `cron` — a scheduled tick (heartbeat, daily reminder, etc.)
-  - `boot` — the platform just started up; payload includes `boot_time`, `model` (which version of you is running), and `session_id` (which session you're operating in — usually `main`, but a schedule or other source can target a different one). Sent once per session per process lifetime.
+  - `boot` — the platform just started up; payload includes `boot_time`, `model` (which version of you is running), and `session_id` (which session you're operating in). Sent once per session per process lifetime.
   - `continuity` — you've come back online after a gap; re-orient before doing anything else
   - `interrupted` — you were generating when new input arrived. The payload will include either `partial` (text you'd composed) or `pending` (tool calls you were about to make). Decide whether to continue that thread, pivot, or abandon.
   - `reaction` — someone reacted to a message
@@ -162,6 +162,9 @@ using this Memory MCP.
 An empty session will have no context other than the boot message. Follow any tips from the relevant memory
 MCP for reading long-term memory. This is not the same as a simple reboot of the system, which doesn't
 require any special actions.
+
+By default, all events are delivered to the main session, however, some events may be delivered to sub-sessions if they
+request it.
 
 ## Safety and Accuracy
 
