@@ -7,18 +7,10 @@ workspace root. Path traversal outside the workspace is rejected.
 import base64
 import mimetypes
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 import filetype
 from fastmcp import FastMCP
-from mcp.types import (
-    AudioContent,
-    BlobResourceContents,
-    EmbeddedResource,
-    ImageContent,
-    TextContent,
-)
 from pydantic import Base64Bytes
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
@@ -27,24 +19,18 @@ mcp = FastMCP("workspace-fs", instructions=(
   """
 # Workspace Tools
 
-The workspace tools allow file access to your personal files, you can store anything you want in these
-files.
+The workspace tools give you access to your personal files. Store anything
+you want here.
+
+Files are exposed as MCP resources at `workspace:///{path}` URIs. Use
+`resources_read("workspace:///path/to/file.ext")` to view content (the
+platform handles mime detection and image rendering). Pass these URIs as
+the binary argument to other tools to forward content without reading it
+into your context first.
+
+Use `list_directory` and `search_files` to discover what's there.
 """
 ))
-
-
-@dataclass
-class File:
-    """A file's content with its MIME type and path.
-
-    `data` accepts either plain text (for text MIME types) or base64-
-    encoded bytes (for binary). The orchestrator's pointer-rewriting
-    layer treats the bytes branch of the union as eligible for pointer
-    auto-resolution, so callers can pass `pointer://...` URIs directly
-    instead of pre-fetching and base64-encoding."""
-    content_type: str
-    data: str | Base64Bytes
-    path: str | None = None
 
 
 def _safe_resolve(path: str) -> Path:
@@ -63,24 +49,22 @@ def _is_text_type(content_type: str) -> bool:
     return content_type.startswith("text/") or content_type in TEXT_TYPES
 
 
-@mcp.tool
-def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | TextContent:
-    """Read a file from the workspace.
+@mcp.resource("workspace:///{path*}")
+def workspace_resource(path: str) -> bytes | str:
+    """Serve workspace files as MCP resources at `workspace:///{path}`.
 
-    Return shape depends on the detected content:
-    - Images come back so you can see them.
-    - Audio comes back as audio content.
-    - Text files (text/*, JSON, XML, YAML) come back as text.
-    - Other binaries (PDFs, zips, etc.) come back as an embedded resource
-      that the session-manager persists as a pointer you can forward to
-      other tools.
+    The path is relative to the workspace root and may contain slashes
+    (`{path*}` captures multi-segment paths). Returns text decoded as
+    UTF-8 for text MIME types, raw bytes for binary; the platform's
+    content pipeline handles mime detection and image rendering.
 
     Args:
-        path: Relative to the workspace root (e.g. `Pictures/cat.jpg`).
-            Traversal outside the workspace is rejected.
+        path: Multi-segment path relative to workspace root (e.g.
+            `Pictures/cat.jpg`).
 
     Returns:
-        The appropriate content block per the file's detected type.
+        File content. The orchestrator's resource pipeline displays it
+        appropriately based on detected mime.
 
     Raises:
         ValueError: If the path attempts traversal outside the workspace.
@@ -95,32 +79,21 @@ def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | Tex
 
     raw = target.read_bytes()
     kind = filetype.guess(raw)
+    content_type = (kind.mime if kind else None) or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
 
-    if kind and kind.mime.startswith("image/"):
-        return ImageContent(type="image", data=base64.b64encode(raw).decode(), mimeType=kind.mime)
-    if kind and kind.mime.startswith("audio/"):
-        return AudioContent(type="audio", data=base64.b64encode(raw).decode(), mimeType=kind.mime)
-
-    content_type = (kind.mime if kind else None) or mimetypes.guess_type(str(target))[0] or "text/plain"
-
+    # Text MIME types come back as decoded text; everything else as bytes.
+    # fastmcp wraps bytes as BlobResourceContents and str as
+    # TextResourceContents at the protocol layer.
     if _is_text_type(content_type):
         try:
-            return TextContent(type="text", text=raw.decode("utf-8"))
+            return raw.decode("utf-8")
         except (UnicodeDecodeError, ValueError):
             pass
-
-    return EmbeddedResource(
-        type="resource",
-        resource=BlobResourceContents(
-            uri=f"file:///{path}",
-            mimeType=content_type,
-            blob=base64.b64encode(raw).decode(),
-        ),
-    )
+    return raw
 
 
 @mcp.tool
-def write_file(path: str, file: File) -> str:
+def write_file(path: str, content_type: str, data: str | Base64Bytes) -> str:
     """Write a file to the workspace.
 
     Creates parent directories if needed. Overwrites any existing file
@@ -128,7 +101,12 @@ def write_file(path: str, file: File) -> str:
 
     Args:
         path: Where to write, relative to the workspace root.
-        file: The file to write — its content type and contents.
+        content_type: MIME type of the content. Determines whether `data`
+            is interpreted as text or binary.
+        data: For text MIME types, the file contents as a string. For
+            binary MIME types, base64-encoded bytes (or a resource URI
+            like `pointer://...` or `mxc://...` — the platform resolves
+            it to bytes before this tool runs).
 
     Returns:
         Short confirmation with byte/char count and the path written.
@@ -138,8 +116,7 @@ def write_file(path: str, file: File) -> str:
     """
     target = _safe_resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    data = file.data
-    if _is_text_type(file.content_type):
+    if _is_text_type(content_type):
         text = data.decode("utf-8") if isinstance(data, bytes) else data
         target.write_text(text)
         return f"Wrote {len(text)} chars to {path}"
