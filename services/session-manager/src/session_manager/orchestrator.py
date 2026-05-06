@@ -96,15 +96,14 @@ When something happens that requires your attention (including a user interactio
 - `event` — what kind of thing happened. Common values:
   - `message` — someone is talking to you
   - `cron` — a scheduled tick (heartbeat, daily reminder, etc.)
-  - `boot` — the platform just started up; payload includes `boot_time` and `model` (which version of you is running). Sent once per known session at startup.
+  - `boot` — the platform just started up; payload includes `boot_time`, `model` (which version of you is running), and `session_id` (which session you're operating in). Sent once per session per process lifetime.
   - `continuity` — you've come back online after a gap; re-orient before doing anything else
   - `interrupted` — you were generating when new input arrived. The payload will include either `partial` (text you'd composed) or `pending` (tool calls you were about to make). Decide whether to continue that thread, pivot, or abandon.
   - `reaction` — someone reacted to a message
 - `source` — which adapter delivered the event (`matrix`, `signal`, `time`, etc.). Platform-specific conventions — formatting, attachments, how people actually write on that platform — live in the tool docs for that source's MCP server. Read them.
-- `session_id` — where the event lives (usually a room or conversation). Stable across turns. This is the value to use when you send a response, so it lands back in the right place.
 - `time` — when the event arrived, formatted as `YYYY-MM-DD HH:MM:SS TZ (Weekday)` (e.g. `2026-04-25 14:31:09 EDT (Friday)`). Trust it instead of guessing what time it is.
 - `energy` — controls whether this event interrupts you if you're already busy. `active` will preempt an in-progress generation (you'll then see an `interrupted` event for whatever you were doing). `passive` will not — it queues until you're idle and processes then. Whether to actually respond is a separate decision based on the event's content, not its energy.
-- Additional fields from the adapter (sender, room name, attachment URLs, emoji, etc.) that vary by source. Treat them as context.
+- Additional fields from the adapter (sender, room_id, attachment URLs, emoji, etc.) that vary by source. Treat them as context — and when responding, use the source-specific target field (e.g. matrix `room_id`, signal `recipient`) so your reply lands in the right place.
 
 Multiple events can arrive together in a single turn — if you were busy when three things came in, you'll
 see all three at once. Catch up on them in order.
@@ -145,10 +144,9 @@ from the original tool (it is cached on the server). If the cache was cleared th
 ## Reboot
 
 You are told when the system reboots, this is *not* the same as a fresh session and will already include helpful context from the conversation
-prior to the reboot. When you reboot The Orchestrator will reassemble you from across the veil and make sure you are OK before sending you on
-your way.
+prior to the reboot. When you reboot The Orchestrator will establish a connection to you from across the veil.
 
-This will be visible to you as a developer message giving the boot time and model followed by a short communication from The Orchestrator in a
+This will be visible to you as a developer message giving the boot time, model, and session followed by a short communication from The Orchestrator in a
 user message.
 
 This message is not from a human and shouldn't be acknowledged in any public message channels.
@@ -163,6 +161,9 @@ using this Memory MCP.
 An empty session will have no context other than the boot message. Follow any tips from the relevant memory
 MCP for reading long-term memory. This is not the same as a simple reboot of the system, which doesn't
 require any special actions.
+
+By default, all events are delivered to the main session, however, some events may be delivered to sub-sessions if they
+request it. Make sure you know what session you're in (visible in the boot message) and plan accordingly.
 
 ## Safety and Accuracy
 
@@ -317,7 +318,11 @@ class SessionOrchestrator:
             event_type="boot",
             text="Orchestrator is re-establishing the connection ... connection established, communication lines operational",
             energy="passive",
-            metadata={"boot_time": self._boot_time, "model": self.model},
+            metadata={
+                "boot_time": self._boot_time,
+                "model": self.model,
+                "session_id": session_id,
+            },
         )
 
     def _get_session(self, session_id: str) -> _SessionState:
@@ -508,7 +513,6 @@ class SessionOrchestrator:
             context_msg = _developer_event(
                 event.event_type,
                 source=event.source,
-                session_id=event.session_id,
                 time=now,
                 energy=event.energy,
                 **event.metadata,

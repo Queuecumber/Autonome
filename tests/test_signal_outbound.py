@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from signal_adapter.model import SignalClient, Message, Attachment, Reaction
-from signal_adapter import mcp_server as signal_mcp
+from signal_adapter import server as signal_mcp
 
 
 @pytest.fixture
