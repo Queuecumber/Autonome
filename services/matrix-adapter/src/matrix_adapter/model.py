@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import mistune
 from nio import (
@@ -37,6 +38,29 @@ logger = logging.getLogger(__name__)
 # Matrix's org.matrix.custom.html allowlist rejects <input>, so checklists
 # render as empty boxes. Users can fall back to emoji.
 _MARKDOWN = mistune.create_markdown(plugins=["strikethrough", "table", "url"])
+
+
+def _attach_query(uri: str, params: dict[str, str]) -> str:
+    """Append `params` as a query string to `uri`.
+
+    Used to inline encryption parameters (k, iv, hash) into mxc:// URIs
+    so encrypted attachments are self-resolving without out-of-band
+    state. The query is internal-protocol only — nio.download strips
+    the query before talking to the homeserver, and these URIs never
+    leave the agent platform.
+    """
+    if not params:
+        return uri
+    parts = urlsplit(uri)
+    return urlunsplit(parts._replace(query=urlencode(params)))
+
+
+def _split_query(uri: str) -> tuple[str, dict[str, str]]:
+    """Split a query-augmented URI into its base and parameters."""
+    parts = urlsplit(uri)
+    params = {k: v[0] for k, v in parse_qs(parts.query).items()} if parts.query else {}
+    base = urlunsplit(parts._replace(query=""))
+    return base, params
 
 
 @dataclass
@@ -165,7 +189,6 @@ class MatrixClient:
             store_path=store_path, config=config,
         )
         self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
-        self._encryption_info: dict[str, dict] = {}
         self._synced_rooms: set[str] = set()
 
         # Event type → handler dispatch table
@@ -352,19 +375,24 @@ class MatrixClient:
     def _extract_media(self, event) -> Attachment:
         """Build an Attachment from an inbound media event. MSC2530: body is
         the caption, filename lives in a top-level `filename` field. Legacy:
-        body is the filename, no explicit filename field."""
+        body is the filename, no explicit filename field.
+
+        For encrypted attachments, the decryption parameters (key, iv, hash)
+        are inlined into the URI query string as `?k=...&iv=...&hash=...` so
+        downstream consumers can resolve the URI without out-of-band state.
+        """
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
 
         file_info = content.get("file")
         if file_info:
-            url = file_info.get("url", "")
-            key_info = file_info.get("key", {})
-            self._encryption_info[url] = {
-                "key": key_info.get("k", ""),
+            base_url = file_info.get("url", "")
+            params = {
+                "k": (file_info.get("key", {}) or {}).get("k", ""),
                 "iv": file_info.get("iv", ""),
-                "hash": file_info.get("hashes", {}).get("sha256", ""),
+                "hash": (file_info.get("hashes", {}) or {}).get("sha256", ""),
             }
+            url = _attach_query(base_url, {k: v for k, v in params.items() if v})
         else:
             url = event.url or ""
 
@@ -426,13 +454,25 @@ class MatrixClient:
         return [Sender(id=uid, name=user.display_name) for uid, user in (room.users or {}).items()]
 
     async def download_attachment(self, mxc_url: str) -> tuple[bytes, str | None]:
-        resp = await self._client.download(mxc_url)
+        """Download (and decrypt, if applicable) a Matrix attachment.
+
+        Accepts either a bare `mxc://` URI or one with decryption params
+        in the query string (`?k=...&iv=...&hash=...`). The query inlines
+        encryption keys so attachments are self-resolving — no out-of-band
+        state needed.
+        """
+        bare_url, params = _split_query(mxc_url)
+        resp = await self._client.download(bare_url)
         data = resp.body
         content_type = getattr(resp, "content_type", None)
-        enc = self._encryption_info.pop(mxc_url, None)
-        if enc and enc["key"]:
+        if params.get("k"):
             from nio.crypto.attachments import decrypt_attachment
-            data = decrypt_attachment(data, enc["key"], enc["hash"], enc["iv"])
+            data = decrypt_attachment(
+                data,
+                params["k"],
+                params.get("hash", ""),
+                params.get("iv", ""),
+            )
         return data, content_type
 
     async def _upload(

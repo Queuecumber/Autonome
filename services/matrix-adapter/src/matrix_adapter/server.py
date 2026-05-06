@@ -1,14 +1,13 @@
 """Matrix adapter — MCP interface + inbound event forwarding."""
 
 import asyncio
-import base64
 import logging
 import os
+from urllib.parse import urlencode
 
 import filetype
 import httpx
 from fastmcp import FastMCP
-from mcp.types import ImageContent, TextContent
 from pydantic import Base64Bytes
 
 from matrix_adapter.model import MatrixClient, Message, Reaction, Sender
@@ -88,8 +87,10 @@ Note that, as usual, the PERSONALITY.md takes precedence over the general tips h
 
 ## Attachments
 
-When a message has attachments, the metadata includes attachment URLs. To view an attachment,
-call get_attachment with the mxc:// URL.
+When a message has attachments, the metadata includes `mxc://...` URIs. These are MCP
+resources — read them with the platform's `resources_read` tool to see the content,
+or pass them as the binary argument to any tool that accepts attachments (e.g.
+`workspace-fs.write_file`); the platform resolves them transparently.
 
 ## Groups
 
@@ -210,22 +211,19 @@ async def get_room_members(room_id: str) -> list[Sender]:
     return client.get_room_members(room_id)
 
 
-@mcp.tool
-async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment.
+@mcp.resource("mxc://{server}/{media_id}{?k,iv,hash}")
+async def mxc_resource(
+    server: str, media_id: str,
+    k: str = "", iv: str = "", hash: str = "",
+) -> bytes:
+    """Serve `mxc://...` URIs as MCP resources.
 
-    Args:
-        mxc_url: Matrix content URI (e.g. `mxc://server/abc123`) — taken
-            from the `attachments` field of an incoming event's metadata.
-
-    Returns:
-        Image content for images, text descriptor otherwise.
+    Returns raw (decrypted) bytes; fastmcp wraps as a BlobResourceContents.
     """
-    data, _ = await client.download_attachment(mxc_url)
-    kind = filetype.guess(data)
-    if kind and kind.mime.startswith("image/"):
-        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=kind.mime)
-    return TextContent(type="text", text=f"[attachment: {kind.mime if kind else 'unknown'}, {len(data)} bytes]")
+    query = urlencode({n: v for n, v in (("k", k), ("iv", iv), ("hash", hash)) if v})
+    full_uri = f"mxc://{server}/{media_id}" + (f"?{query}" if query else "")
+    data, _ = await client.download_attachment(full_uri)
+    return data
 
 
 @mcp.tool
