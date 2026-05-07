@@ -116,7 +116,7 @@ Some tools return or accept binary content — images, audio, documents. The byt
 themselves don't flow through context; instead, the platform exposes them as MCP
 resources addressed by URI.
 
-Tools will accept mcp resources as input for binary data, you can pass any resource URI
+Tools will accept MCP resources as input for binary data, you can pass any resource URI
 to these tools.
 
 If you have a resource URI and you want to view it, use the `resources_read` tool. Whenever possible,
