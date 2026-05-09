@@ -63,24 +63,22 @@ async def test_register_schemes_picks_scheme_from_template(orchestrator):
 
 
 @pytest.mark.asyncio
-async def test_register_schemes_skips_templates_without_scheme(orchestrator):
-    conn = _mock_conn("weird", ["just-a-string"])
-    await orchestrator._register_schemes(conn)
-    assert orchestrator._scheme_to_mcp == {}
-
-
-@pytest.mark.asyncio
-async def test_register_schemes_last_write_wins(orchestrator):
-    """If two servers claim the same scheme, the later registration wins.
-
-    Load order matters — putting the in-process platform server last lets
-    it own `pointer://` deterministically.
-    """
+async def test_register_schemes_collision_raises(orchestrator):
+    """Two MCP servers claiming the same scheme is a config error."""
     a = _mock_conn("a", ["pointer://{name}"])
     b = _mock_conn("b", ["pointer://{name}"])
     await orchestrator._register_schemes(a)
-    await orchestrator._register_schemes(b)
-    assert orchestrator._scheme_to_mcp["pointer"] is b
+    with pytest.raises(RuntimeError, match="claimed by both"):
+        await orchestrator._register_schemes(b)
+
+
+@pytest.mark.asyncio
+async def test_register_schemes_idempotent_for_same_conn(orchestrator):
+    """Re-registering the same conn for the same scheme is a no-op."""
+    a = _mock_conn("a", ["pointer://{name}"])
+    await orchestrator._register_schemes(a)
+    await orchestrator._register_schemes(a)
+    assert orchestrator._scheme_to_mcp["pointer"] is a
 
 
 @pytest.mark.asyncio
@@ -177,14 +175,16 @@ def test_resource_generic_mime_falls_back_to_filetype(tmp_path):
 
 def test_resource_non_image_describes_via_uri(tmp_path):
     """Non-visual binary resources: describe by uri + size, no caching."""
+    import json as _json
     store = BinaryStore(store_dir=tmp_path / "bins", retention_days=30)
     block = _resource_block("mxc://srv/doc", b"%PDF-1.4 ...", "application/pdf")
 
     parts = mcp_content_to_openai([block], store=store)
     text_part = next((p for p in parts if p.get("type") == "input_text"), None)
     assert text_part is not None
-    assert "uri=mxc://srv/doc" in text_part["text"]
-    assert "application/pdf" in text_part["text"]
+    payload = _json.loads(text_part["text"])
+    assert payload["uri"] == "mxc://srv/doc"
+    assert payload["mimeType"] == "application/pdf"
     assert not list(store.store_dir.iterdir())
 
 

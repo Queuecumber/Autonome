@@ -36,13 +36,6 @@ async def startup():
         session_dir=session_dir,
     )
 
-    # The platform's own MCP server runs in-process and exposes the
-    # binary cache as `pointer://` resources plus the resource bridge
-    # tools (resources_list/template_list/read). The orchestrator
-    # connects to it as just another MCP backend over loopback HTTP, so
-    # `pointer://` registers in the scheme map via the normal
-    # discovery path and the bridge tools surface with the standard
-    # aptool- prefix.
     platform_mcp.binary_store = orchestrator.binaries
     platform_mcp.orchestrator = orchestrator
     asyncio.create_task(

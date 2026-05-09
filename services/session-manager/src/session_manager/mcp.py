@@ -119,10 +119,9 @@ def rewrite_binary_params(schema: dict) -> list[BinaryParam]:
 async def resolve_uri_args(
     args: dict, params: list[BinaryParam], resolver: URIResolver,
 ) -> dict:
-    """For each BinaryParam, find matching positions in args and replace
-    any URI-string value (anything with a `<scheme>://` prefix) with its
-    base64-encoded bytes by calling `resolver(uri)`. Non-URI values pass
-    through untouched (assumed to already be bytes/base64 from the caller)."""
+    """Replace URI-shaped values in binary-typed argument positions with
+    the resolver's bytes (base64-encoded). Non-URI values pass through.
+    The resolver raises if the URI's scheme isn't registered."""
     if not params:
         return args
     args = copy.deepcopy(args)
@@ -230,21 +229,16 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             parts.append(_describe_binary(block.data, block.mimeType, store))
 
         elif block.type == "resource":
-            # Resource blocks come from MCP resource reads — the content is
-            # already URI-addressable via the original scheme (mxc://,
-            # pointer://, etc.). Don't re-cache as a new pointer; that would
-            # nudge the agent into round-tripping (read mxc:// → see
-            # pointer:// → read again). Just surface the content directly.
+            # Resource bytes are already URI-addressable; don't re-cache as a
+            # new pointer or the agent ends up round-tripping reads.
             resource = getattr(block, "resource", None)
             uri = str(getattr(resource, "uri", "") or "")
             blob = getattr(resource, "blob", None)
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
             if blob is not None:
-                # fastmcp resource templates have static mime_type, so handlers
-                # producing heterogeneous content (matrix attachments, etc.)
-                # come back with a generic placeholder. Re-detect from bytes
-                # so images surface correctly.
+                # fastmcp resource templates carry static mime, so handlers
+                # producing heterogeneous content come back generic; redetect.
                 if mime in ("application/octet-stream", "text/plain", ""):
                     raw = base64.b64decode(blob) if isinstance(blob, str) else blob
                     kind = filetype.guess(raw)
@@ -260,10 +254,10 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                         "image_url": f"data:{mime};base64,{blob}",
                     })
                 else:
-                    # Non-visual binary — just describe by URI + mime + size.
                     size = len(blob) * 3 // 4 if isinstance(blob, str) else len(blob)
-                    parts.append({"type": "input_text",
-                                  "text": f"[{mime}, {size} bytes, uri={uri}]"})
+                    parts.append({"type": "input_text", "text": json.dumps({
+                        "uri": uri, "mimeType": mime, "size": size,
+                    })})
             elif text is not None:
                 parts.append({"type": "input_text", "text": text})
             else:
@@ -339,11 +333,7 @@ class MCPConnection:
             self._ready.set()
 
     async def call_tool(self, prefixed_name: str, arguments: str | dict) -> list:
-        """Execute a tool call and return raw MCP content blocks.
-
-        Arguments are passed through verbatim; URI resolution for binary
-        params is done by the orchestrator before calling this.
-        """
+        """Execute a tool call and return raw MCP content blocks."""
         if self.session is None:
             raise RuntimeError(f"MCP server {self.name} not connected")
 

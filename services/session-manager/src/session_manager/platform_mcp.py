@@ -23,13 +23,25 @@ orchestrator: "SessionOrchestrator | None" = None
 
 mcp = FastMCP("session", instructions=(
     "Platform-internal resources and bridge tools. Use "
-    "`resources_read` to load any URI (pointer://, mxc://, etc.) into "
+    "`resources_read` to load any MCP resource (pointer://, mxc://, etc.) into "
     "context, or pass URIs as arguments to other tools that accept "
     "binary content (the platform resolves them transparently)."
 ))
 
 
 # ── pointer:// cache ─────────────────────────────────────
+
+
+def _require_orchestrator() -> "SessionOrchestrator":
+    if orchestrator is None:
+        raise RuntimeError("platform_mcp.orchestrator not initialized")
+    return orchestrator
+
+
+def _require_binary_store() -> BinaryStore:
+    if binary_store is None:
+        raise RuntimeError("platform_mcp.binary_store not initialized")
+    return binary_store
 
 
 @mcp.resource("pointer://{name}")
@@ -46,8 +58,7 @@ async def read_pointer(name: str) -> bytes:
         FileNotFoundError: If no content matches `name` (it may have been
             garbage-collected).
     """
-    assert binary_store is not None, "platform_mcp.binary_store not initialized"
-    content, _ = binary_store.load(name)
+    content, _ = _require_binary_store().load(name)
     return content
 
 
@@ -55,7 +66,7 @@ async def read_pointer(name: str) -> bytes:
 
 
 @mcp.tool
-async def resources_list() -> str:
+async def resources_list(scheme: str | None = None) -> str:
     """List concrete resources currently available across all MCP servers.
 
     Aggregates each connected server's `resources/list`. Use to discover
@@ -63,21 +74,23 @@ async def resources_list() -> str:
     addressable by template (e.g. `pointer://{name}`), use
     `resources_template_list` instead.
 
+    Args:
+        scheme: If set, only return resources whose URI uses this scheme
+            (e.g. `mxc`, `workspace`).
+
     Returns:
         A JSON array of `{server, uri, name, description, mimeType}` entries.
     """
-    assert orchestrator is not None, "platform_mcp.orchestrator not initialized"
+    orch = _require_orchestrator()
     out: list[dict[str, Any]] = []
-    for conn in orchestrator.mcp_connections.values():
-        try:
-            resources = await conn.list_resources()
-        except Exception as e:
-            logger.debug("resources_list: %s failed: %r", conn.name, e)
-            continue
-        for r in resources:
+    for conn in orch.mcp_connections.values():
+        for r in await conn.list_resources():
+            uri = str(getattr(r, "uri", ""))
+            if scheme and urlparse(uri).scheme.lower() != scheme.lower():
+                continue
             out.append({
                 "server": conn.name,
-                "uri": str(getattr(r, "uri", "")),
+                "uri": uri,
                 "name": getattr(r, "name", None),
                 "description": getattr(r, "description", None),
                 "mimeType": getattr(r, "mimeType", None),
@@ -97,15 +110,10 @@ async def resources_template_list() -> str:
         A JSON array of `{server, uriTemplate, name, description, mimeType}`
         entries.
     """
-    assert orchestrator is not None, "platform_mcp.orchestrator not initialized"
+    orch = _require_orchestrator()
     out: list[dict[str, Any]] = []
-    for conn in orchestrator.mcp_connections.values():
-        try:
-            templates = await conn.list_resource_templates()
-        except Exception as e:
-            logger.debug("resources_template_list: %s failed: %r", conn.name, e)
-            continue
-        for t in templates:
+    for conn in orch.mcp_connections.values():
+        for t in await conn.list_resource_templates():
             out.append({
                 "server": conn.name,
                 "uriTemplate": getattr(t, "uriTemplate", None),
@@ -138,11 +146,11 @@ async def resources_read(uri: str) -> list[EmbeddedResource]:
         ValueError: If the URI has no scheme, or no MCP server is
             registered for that scheme.
     """
-    assert orchestrator is not None, "platform_mcp.orchestrator not initialized"
+    orch = _require_orchestrator()
     scheme = urlparse(uri).scheme.lower()
     if not scheme:
         raise ValueError(f"URI has no scheme: {uri!r}")
-    conn = orchestrator._scheme_to_mcp.get(scheme)
+    conn = orch._scheme_to_mcp.get(scheme)
     if conn is None:
         raise ValueError(f"No MCP server registered for scheme {scheme!r}")
     contents = await conn.read_resource(uri)

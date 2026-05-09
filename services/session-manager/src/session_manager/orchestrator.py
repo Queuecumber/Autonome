@@ -296,29 +296,19 @@ class SessionOrchestrator:
                     sorted(self._scheme_to_mcp.keys()))
 
     async def _register_schemes(self, conn: MCPConnection) -> None:
-        """Register every URI scheme this server claims via resource templates.
+        """Register URI schemes this server owns via its resource templates.
 
-        Called after each server connects. The same scheme advertised by
-        multiple servers is last-write-wins — load order in
-        connect_mcp_servers determines the winner. Putting the in-process
-        cache server (which owns `pointer://`) last makes it the platform's
-        canonical owner.
+        Raises if two servers claim the same scheme — that's a config error,
+        not something to paper over.
         """
-        try:
-            templates = await conn.list_resource_templates()
-        except Exception as e:
-            logger.debug("list_resource_templates failed for %s: %r", conn.name, e)
-            return
+        templates = await conn.list_resource_templates()
         for t in templates:
-            template_uri = getattr(t, "uriTemplate", None) or ""
-            if "://" not in template_uri:
-                continue
-            scheme = template_uri.split("://", 1)[0].lower()
-            if not scheme:
-                continue
+            scheme = urlparse(t.uriTemplate).scheme.lower()
             prior = self._scheme_to_mcp.get(scheme)
             if prior is not None and prior is not conn:
-                logger.warning("Scheme %r: %s shadows %s", scheme, conn.name, prior.name)
+                raise RuntimeError(
+                    f"Scheme {scheme!r} claimed by both {prior.name!r} and {conn.name!r}"
+                )
             self._scheme_to_mcp[scheme] = conn
 
     async def resolve_uri(self, uri: str) -> bytes:
@@ -402,12 +392,14 @@ class SessionOrchestrator:
         if conn is None:
             return {"type": "function_call_output", "call_id": call_id, "output": f"Error: unknown tool '{name}'"}, []
 
-        # Resolve URI-typed binary args via the scheme map before dispatch.
-        # Tools see bytes; the scheme registry handles which MCP serves what.
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
         params = conn.binary_params.get(name, [])
         if params:
-            args = await resolve_uri_args(args, params, self.resolve_uri)
+            try:
+                args = await resolve_uri_args(args, params, self.resolve_uri)
+            except Exception as e:
+                return {"type": "function_call_output", "call_id": call_id,
+                        "output": f"Error resolving resource URI: {e}"}, []
 
         content_blocks = await conn.call_tool(name, args)
         logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),

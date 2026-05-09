@@ -375,24 +375,20 @@ class MatrixClient:
     def _extract_media(self, event) -> Attachment:
         """Build an Attachment from an inbound media event. MSC2530: body is
         the caption, filename lives in a top-level `filename` field. Legacy:
-        body is the filename, no explicit filename field.
-
-        For encrypted attachments, the decryption parameters (key, iv, hash)
-        are inlined into the URI query string as `?k=...&iv=...&hash=...` so
-        downstream consumers can resolve the URI without out-of-band state.
-        """
+        body is the filename, no explicit filename field."""
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
 
         file_info = content.get("file")
         if file_info:
-            base_url = file_info.get("url", "")
+            key = file_info.get("key") or {}
+            hashes = file_info.get("hashes") or {}
             params = {
-                "k": (file_info.get("key", {}) or {}).get("k", ""),
+                "k": key.get("k", ""),
                 "iv": file_info.get("iv", ""),
-                "hash": (file_info.get("hashes", {}) or {}).get("sha256", ""),
+                "hash": hashes.get("sha256", ""),
             }
-            url = _attach_query(base_url, {k: v for k, v in params.items() if v})
+            url = _attach_query(file_info.get("url", ""), {k: v for k, v in params.items() if v})
         else:
             url = event.url or ""
 
@@ -456,10 +452,8 @@ class MatrixClient:
     async def download_attachment(self, mxc_url: str) -> tuple[bytes, str | None]:
         """Download (and decrypt, if applicable) a Matrix attachment.
 
-        Accepts either a bare `mxc://` URI or one with decryption params
-        in the query string (`?k=...&iv=...&hash=...`). The query inlines
-        encryption keys so attachments are self-resolving — no out-of-band
-        state needed.
+        Accepts a bare `mxc://` URI; encrypted attachments carry their
+        decryption parameters in the query string (`?k=&iv=&hash=`).
         """
         bare_url, params = _split_query(mxc_url)
         resp = await self._client.download(bare_url)
