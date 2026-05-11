@@ -1,79 +1,123 @@
-"""Integration smoke test: verify the full event flow with mocked externals."""
+"""Smoke test for the orchestrator's event-handling pipeline.
 
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+Mocks the LLM (Responses API streaming) and verifies that an inbound
+event flows through to a final response and gets persisted to the
+session.
+"""
+
+from unittest.mock import MagicMock
 
 import pytest
-import yaml
 
-from session_manager.session import SessionManager
+from session_manager.event import Event
 from session_manager.orchestrator import SessionOrchestrator
-from signal_adapter.model import SignalClient
-from signal_adapter import server as signal_mcp
+from session_manager.session import SessionManager
 
 
-def _mock_llm_response(content="I'm here to help!"):
-    message = MagicMock()
-    message.content = content
-    message.tool_calls = []
-    message.model_dump = MagicMock(return_value={"role": "assistant", "content": content})
+def _stream_event(event_type: str, **fields) -> MagicMock:
+    """One event of the OpenAI Responses streaming protocol."""
+    e = MagicMock()
+    e.type = event_type
+    for k, v in fields.items():
+        setattr(e, k, v)
+    return e
 
-    choice = MagicMock()
-    choice.message = message
-    choice.finish_reason = "stop"
 
-    response = MagicMock()
-    response.choices = [choice]
-    return response
+def _mock_message_item(text: str) -> MagicMock:
+    item = MagicMock()
+    item.type = "message"
+    content = MagicMock()
+    content.text = text
+    item.content = [content]
+    return item
+
+
+def _mock_response(text: str) -> MagicMock:
+    resp = MagicMock()
+    resp.status = "completed"
+    resp.output = [_mock_message_item(text)]
+    resp.usage = MagicMock()
+    resp.usage.input_tokens = 100
+    resp.usage.output_tokens = 50
+    resp.usage.total_tokens = 150
+    resp.usage.output_tokens_details = MagicMock()
+    resp.usage.output_tokens_details.reasoning_tokens = 0
+    return resp
+
+
+def _stream(text: str):
+    """Async iterator simulating a non-tool response stream."""
+    response = _mock_response(text)
+
+    async def _gen():
+        yield _stream_event("response.created")
+        yield _stream_event("response.output_item.done", item=_mock_message_item(text))
+        yield _stream_event("response.completed", response=response)
+
+    return _gen()
+
+
+@pytest.fixture(autouse=True)
+def _api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
 
 @pytest.mark.asyncio
-async def test_full_event_flow(tmp_path, monkeypatch):
-    """End-to-end: config → orchestrator receives event → LLM called → session saved."""
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
-    config_data = {
-        "model": {"model": "claude-opus-4-6"},
-        "session": {"store": str(tmp_path / "sessions"), "max_history_tokens": 100000},
-    }
-
+async def test_event_flows_to_response_and_persists(tmp_path):
+    """End-to-end: build an event, hand it to the orchestrator, get a
+    response back, confirm it lands in the session file."""
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
+    binary_dir = tmp_path / "binaries"
 
-    orchestrator = SessionOrchestrator(config=config_data, session_dir=sessions_dir)
-    orchestrator.llm = MagicMock()
-    orchestrator.llm.chat = MagicMock()
-    orchestrator.llm.chat.completions = MagicMock()
-    orchestrator.llm.chat.completions.create = AsyncMock(return_value=_mock_llm_response())
-
-    event = {
-        "source": "signal",
-        "session_id": "+11111111111",
-        "text": "Hi there!",
-        "metadata": {"message_id": "ts_123", "sender": "+11111111111"},
+    config = {
+        "model": {"name": "test-model"},
+        "session": {"max_history_tokens": 100000},
+        "binaries": {"store": str(binary_dir), "retention_days": 30},
     }
 
-    result = await orchestrator.handle_event(event)
-    assert result == "I'm here to help!"
+    orch = SessionOrchestrator(config=config, session_dir=sessions_dir)
 
-    # Verify system prompt has base instructions
-    call_kwargs = orchestrator.llm.chat.completions.create.call_args.kwargs
-    system_msg = call_kwargs["messages"][0]
-    assert "MCP tools" in system_msg["content"]
+    async def fake_create(**kwargs):
+        return _stream("hello back")
+    orch.llm = MagicMock()
+    orch.llm.responses = MagicMock()
+    orch.llm.responses.create = fake_create
 
-    # Verify session persistence
-    session = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
-    history = session.load("signal", "+11111111111")
-    assert len(history) == 2
-    assert history[0]["content"] == "Hi there!"
-    assert history[1]["content"] == "I'm here to help!"
+    event = Event(source="matrix", text="hi", metadata={"room_id": "!r"})
+    result = await orch.handle_event(event)
+    assert result == "hello back"
 
-    # Verify signal MCP tools can be created
-    signal_client = SignalClient(signal_cli_url="http://localhost:8080", account="+10000000000")
-    signal_mcp.client = signal_client
-    signal_mcp.session_manager_url = "http://localhost:5000"
-    tools = await signal_mcp.mcp.list_tools()
-    tool_names = {t.name for t in tools}
-    assert "send_message" in tool_names
+    # Persisted to "main" by default.
+    mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
+    history = mgr.load("main")
+    contents = [m.get("content") for m in history if m.get("role") == "assistant"]
+    assert "hello back" in contents
 
-    assert signal_mcp.client.account == "+10000000000"
+
+@pytest.mark.asyncio
+async def test_explicit_session_id_routes(tmp_path):
+    """An event with an explicit session_id lands there, not in main."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    binary_dir = tmp_path / "binaries"
+
+    config = {
+        "model": {"name": "test-model"},
+        "session": {"max_history_tokens": 100000},
+        "binaries": {"store": str(binary_dir), "retention_days": 30},
+    }
+    orch = SessionOrchestrator(config=config, session_dir=sessions_dir)
+
+    async def fake_create(**kwargs):
+        return _stream("ack")
+    orch.llm = MagicMock()
+    orch.llm.responses = MagicMock()
+    orch.llm.responses.create = fake_create
+
+    event = Event(session_id="cron-target", source="time", text="tick")
+    await orch.handle_event(event)
+
+    mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
+    assert mgr.load("cron-target") != []
+    assert mgr.load("main") == []
