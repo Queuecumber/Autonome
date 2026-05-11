@@ -19,12 +19,14 @@ jobs:
 
       - name: Run tests with coverage
         run: |
+          set -o pipefail
           uv run pytest \
             --cov \
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-report=html \
-            --junit-xml=junit.xml
+            --junit-xml=junit.xml \
+            | tee pytest-coverage.txt
 
       - name: Coverage summary
         if: always()
@@ -33,9 +35,16 @@ jobs:
             echo "## Coverage"
             echo ""
             echo '```'
-            uv run coverage report
+            cat pytest-coverage.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: PR comment with coverage
+        if: github.event_name == 'pull_request'
+        uses: MishaKav/pytest-coverage-comment@main
+        with:
+          pytest-coverage-path: pytest-coverage.txt
+          junitxml-path: junit.xml
 
       - name: Upload coverage HTML
         if: always()
