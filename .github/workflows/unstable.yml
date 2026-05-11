@@ -1,0 +1,68 @@
+name: Build unstable
+
+# Rebuilds the `unstable` integration branch from master plus every open
+# PR labeled `unstable`. Stateless — each run computes unstable from
+# scratch given the current set of (master, open+labeled PRs).
+#
+# To opt a PR into `unstable`: add the `unstable` label. Remove the label
+# (or close/merge the PR) and the next run drops it.
+
+on:
+  push:
+    branches: [master]
+  pull_request_target:
+    types: [opened, synchronize, reopened, closed, labeled, unlabeled]
+  workflow_dispatch:
+
+# Serialize runs so concurrent triggers don't race on the force-push.
+concurrency:
+  group: unstable
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Rebuild unstable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Reset unstable to master.
+          git branch -f unstable master
+          git checkout unstable
+
+          # Walk open PRs labeled `unstable` and merge each on top.
+          mapfile -t branches < <(
+            gh pr list --state open --label unstable \
+              --json headRefName --jq '.[].headRefName'
+          )
+
+          if [ ${#branches[@]} -eq 0 ]; then
+            echo "No open PRs labeled \`unstable\`."
+          fi
+
+          for branch in "${branches[@]}"; do
+            echo "::group::Merging $branch"
+            git fetch origin "$branch":"refs/remotes/origin/$branch"
+            if git merge --no-ff "origin/$branch" -m "Merge $branch into unstable"; then
+              echo "$branch: ok"
+            else
+              echo "::warning::Conflict merging $branch — skipping"
+              git merge --abort
+            fi
+            echo "::endgroup::"
+          done
+
+          git push --force-with-lease origin unstable
