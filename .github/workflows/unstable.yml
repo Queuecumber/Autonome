@@ -32,11 +32,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Reset unstable to master.
           git branch -f unstable master
           git checkout unstable
 
-          # Walk open PRs labeled `unstable` and merge each on top.
           mapfile -t branches < <(
             gh pr list --state open --label unstable \
               --json headRefName --jq '.[].headRefName'
@@ -47,13 +45,13 @@ jobs:
           fi
 
           for branch in "${branches[@]}"; do
-            echo "::group::Merging $branch"
+            echo "::group::Replaying $branch"
             git fetch origin "$branch":"refs/remotes/origin/$branch"
-            if git merge --no-ff "origin/$branch" -m "Merge $branch into unstable"; then
+            if git cherry-pick "master..origin/$branch"; then
               echo "$branch: ok"
             else
-              echo "::warning::Conflict merging $branch — skipping"
-              git merge --abort
+              echo "::warning::Conflict cherry-picking $branch — skipping"
+              git cherry-pick --abort
             fi
             echo "::endgroup::"
           done
