@@ -1,12 +1,5 @@
 name: Build unstable
 
-# Rebuilds the `unstable` integration branch from master plus every open
-# PR labeled `unstable`. Stateless — each run computes unstable from
-# scratch given the current set of (master, open+labeled PRs).
-#
-# To opt a PR into `unstable`: add the `unstable` label. Remove the label
-# (or close/merge the PR) and the next run drops it.
-
 on:
   push:
     branches: [master]
