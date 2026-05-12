@@ -38,12 +38,14 @@ async def test_on_message_pushes_event(setup_signal):
     setup_signal._http.post.assert_called_once()
     event = setup_signal._http.post.call_args.kwargs["json"]
     assert event["source"] == "signal"
-    assert event["session_id"] == "+11111111111"
+    # Adapters no longer dictate session_id — events route to the default.
+    assert "session_id" not in event
     assert event["text"] == "Hello from Signal"
 
 
 @pytest.mark.asyncio
 async def test_on_message_reaction(setup_signal):
+    import json
     reaction = Reaction(
         sender="+11111111111",
         emoji="👍",
@@ -54,8 +56,13 @@ async def test_on_message_reaction(setup_signal):
     await setup_signal.on_message(reaction)
 
     event = setup_signal._http.post.call_args.kwargs["json"]
-    assert event["metadata"]["type"] == "reaction"
-    assert event["metadata"]["emoji"] == "👍"
+    # Reactions are tagged event_type="reaction"; the structured payload
+    # (type/emoji/target) is JSON-encoded into text.
+    assert event["event_type"] == "reaction"
+    payload = json.loads(event["text"])
+    assert payload["type"] == "reaction"
+    assert payload["emoji"] == "👍"
+    assert payload["target"] == "456"
 
 
 @pytest.mark.asyncio
