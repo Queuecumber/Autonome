@@ -13,7 +13,6 @@ from urllib.parse import urlparse
 
 import exifread
 import exifread.utils
-import filetype
 import jsonpath
 import jsonref
 from mcp import ClientSession
@@ -248,13 +247,6 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
             if blob is not None:
-                # Belt-and-suspenders for any handler that hasn't been migrated
-                # to ResourceResult yet — keep magic-byte detection as fallback.
-                if mime in ("application/octet-stream", "text/plain", ""):
-                    raw = base64.b64decode(blob) if isinstance(blob, str) else blob
-                    kind = filetype.guess(raw)
-                    if kind:
-                        mime = kind.mime
                 if mime.startswith("image/"):
                     raw = base64.b64decode(blob) if isinstance(blob, str) else blob
                     exif = _exif_summary(raw)

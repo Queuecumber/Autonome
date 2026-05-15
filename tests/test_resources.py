@@ -158,21 +158,6 @@ def test_resource_image_emits_input_image_no_pointer(tmp_path):
     assert not list(store.store_dir.iterdir())
 
 
-def test_resource_generic_mime_falls_back_to_filetype(tmp_path):
-    """When the resource declares a generic mime, mcp_content_to_openai
-    re-detects from the bytes so images surface correctly even when the
-    server-side template's mime_type is `application/octet-stream`.
-    """
-    store = BinaryStore(store_dir=tmp_path / "bins", retention_days=30)
-    png_magic = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
-    block = _resource_block("mxc://srv/abc", png_magic, "application/octet-stream")
-
-    parts = mcp_content_to_openai([block], store=store)
-    img = next((p for p in parts if p.get("type") == "input_image"), None)
-    assert img is not None
-    assert "image/png" in img["image_url"]
-
-
 def test_resource_non_image_describes_via_uri(tmp_path):
     """Non-visual binary resources: describe by uri + size, no caching."""
     import json as _json
