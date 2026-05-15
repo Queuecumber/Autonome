@@ -61,7 +61,7 @@ async def read_pointer(name: str) -> ResourceResult:
             garbage-collected).
     """
     content, mime = _require_binary_store().load(name)
-    return ResourceResult(ResourceContent(content, mime_type=mime or "application/octet-stream"))
+    return ResourceResult([ResourceContent(content, mime_type=mime or "application/octet-stream")])
 
 
 # ── Resource bridge tools ────────────────────────────────

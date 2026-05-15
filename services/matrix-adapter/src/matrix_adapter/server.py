@@ -227,7 +227,7 @@ async def mxc_resource(
     query = urlencode({n: v for n, v in (("k", k), ("iv", iv), ("hash", hash)) if v})
     full_uri = f"mxc://{server}/{media_id}" + (f"?{query}" if query else "")
     data, _ = await client.download_attachment(full_uri)
-    return ResourceResult(ResourceContent(data, mime_type=mime or "application/octet-stream"))
+    return ResourceResult([ResourceContent(data, mime_type=mime or "application/octet-stream")])
 
 
 @mcp.tool

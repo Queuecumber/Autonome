@@ -80,10 +80,10 @@ def workspace_resource(path: str) -> ResourceResult:
 
     if _is_text_type(content_type):
         try:
-            return ResourceResult(ResourceContent(raw.decode("utf-8"), mime_type=content_type))
+            return ResourceResult([ResourceContent(raw.decode("utf-8"), mime_type=content_type)])
         except (UnicodeDecodeError, ValueError):
             pass
-    return ResourceResult(ResourceContent(raw, mime_type=content_type))
+    return ResourceResult([ResourceContent(raw, mime_type=content_type)])
 
 
 @mcp.tool

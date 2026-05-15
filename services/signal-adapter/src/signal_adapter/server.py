@@ -142,7 +142,7 @@ async def signal_attachment_resource(attachment_id: str) -> ResourceResult:
     """
     att = await client.fetch_attachment(attachment_id)
     data = base64.b64decode(att.content_base64)
-    return ResourceResult(ResourceContent(data, mime_type=att.content_type or "application/octet-stream"))
+    return ResourceResult([ResourceContent(data, mime_type=att.content_type or "application/octet-stream")])
 
 
 @mcp.tool
