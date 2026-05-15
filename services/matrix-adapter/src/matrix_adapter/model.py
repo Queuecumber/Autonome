@@ -365,10 +365,7 @@ class MatrixClient:
             params["k"] = key.get("k", "")
             params["iv"] = file_info.get("iv", "")
             params["hash"] = hashes.get("sha256", "")
-            base = file_info.get("url", "")
-        else:
-            base = event.url
-        parts = urlsplit(base)
+        parts = urlsplit(event.url)
         url = urlunsplit(parts._replace(query=urlencode({k: v for k, v in params.items() if v})))
 
         top_filename = content.get("filename") or info.get("filename")

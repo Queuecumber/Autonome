@@ -363,7 +363,9 @@ def test_matrix_extract_media_inlines_mime_encrypted():
             "hashes": {"sha256": "HASH"},
         },
     }}
-    event.url = None
+    # nio's RoomEncryptedMedia sets event.url from content.file.url for both
+    # encrypted and unencrypted attachments — see nio/events/room_events.py.
+    event.url = "mxc://srv/enc"
     event.body = "img.png"
 
     client = MatrixClient.__new__(MatrixClient)
