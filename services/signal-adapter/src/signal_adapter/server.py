@@ -35,9 +35,7 @@ mcp = FastMCP("signal", instructions=(
     "When you receive a message, send a read_receipt to acknowledge it, then "
     "start the typing_indicator before composing your response. "
     "When a message has attachments, the metadata includes `signal:///attachment/{id}` "
-    "URIs. These are MCP resources — read them with the platform's `resources_read` "
-    "tool, or pass them as the binary argument to any tool that accepts attachments; "
-    "the platform resolves them transparently."
+    "URIs. These are MCP resources — read them with `resources_read` to see the content."
 ))
 
 
@@ -132,10 +130,6 @@ async def typing_indicator(recipient: str, stop: bool = False) -> None:
 @mcp.resource("signal:///attachment/{attachment_id}")
 async def signal_attachment_resource(attachment_id: str) -> ResourceResult:
     """Serve Signal attachments as MCP resources.
-
-    Returns a `ResourceResult` carrying the attachment bytes and signal-cli's
-    declared content_type. Falls back to `application/octet-stream` when
-    signal-cli didn't report one.
 
     Args:
         attachment_id: The attachment id from incoming event metadata.

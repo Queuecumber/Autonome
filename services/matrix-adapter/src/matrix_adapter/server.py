@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-from urllib.parse import urlencode
 
 import filetype
 import httpx
@@ -89,9 +88,7 @@ Note that, as usual, the PERSONALITY.md takes precedence over the general tips h
 ## Attachments
 
 When a message has attachments, the metadata includes `mxc://...` URIs. These are MCP
-resources — read them with the platform's `resources_read` tool to see the content,
-or pass them as the binary argument to any tool that accepts attachments (e.g.
-`workspace-fs.write_file`); the platform resolves them transparently.
+resources — read them with `resources_read` to see the content.
 
 ## Groups
 
@@ -217,16 +214,8 @@ async def mxc_resource(
     server: str, media_id: str,
     k: str = "", iv: str = "", hash: str = "", mime: str = "",
 ) -> ResourceResult:
-    """Serve `mxc://...` URIs as MCP resources.
-
-    The `mime` query param is the sender-declared mime from the original
-    event's `info.mimetype` — propagated here because Synapse normalizes
-    the served Content-Type away. We return a `ResourceResult` with the
-    correct per-call mime so consumers don't need to re-detect.
-    """
-    query = urlencode({n: v for n, v in (("k", k), ("iv", iv), ("hash", hash)) if v})
-    full_uri = f"mxc://{server}/{media_id}" + (f"?{query}" if query else "")
-    data, _ = await client.download_attachment(full_uri)
+    """Serve `mxc://...` URIs as MCP resources."""
+    data = await client.download_attachment(server, media_id, k=k, iv=iv, hash=hash)
     return ResourceResult([ResourceContent(data, mime_type=mime or "application/octet-stream")])
 
 

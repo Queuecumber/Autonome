@@ -25,8 +25,7 @@ orchestrator: "SessionOrchestrator | None" = None
 mcp = FastMCP("session", instructions=(
     "Platform-internal resources and bridge tools. Use "
     "`resources_read` to load any MCP resource (pointer://, mxc://, etc.) into "
-    "context, or pass URIs as arguments to other tools that accept "
-    "binary content (the platform resolves them transparently)."
+    "context."
 ))
 
 
@@ -128,12 +127,10 @@ async def resources_template_list() -> str:
 
 @mcp.tool
 async def resources_read(uri: str) -> list[EmbeddedResource]:
-    """Read a resource by URI and load its content into your input.
+    """Read a resource by URI and load its content into context.
 
-    Use when you actually need the bytes in context — e.g. viewing an
-    image, reading a document. When you only need to forward a binary to
-    another tool, that tool will accept the pointer URI directly so
-    no read is necessary.
+    Use when you actually need the bytes — e.g. viewing an image, reading
+    a document.
 
     Args:
         uri: Full resource URI (e.g. `pointer://5-photo.jpg`,
@@ -142,16 +139,13 @@ async def resources_read(uri: str) -> list[EmbeddedResource]:
 
     Returns:
         The resource's content. Images come back so you can see them,
-        text comes back as text, other binaries come back as descriptors.
+        text comes back as text.
 
     Raises:
-        ValueError: If the URI has no scheme, or no MCP server is
-            registered for that scheme.
+        ValueError: If no MCP server is registered for the URI's scheme.
     """
     orch = _require_orchestrator()
     scheme = urlparse(uri).scheme.lower()
-    if not scheme:
-        raise ValueError(f"URI has no scheme: {uri!r}")
     conn = orch._scheme_to_mcp.get(scheme)
     if conn is None:
         raise ValueError(f"No MCP server registered for scheme {scheme!r}")

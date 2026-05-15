@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import mistune
 from nio import (
@@ -31,6 +31,7 @@ from nio import (
     SyncResponse,
     ToDeviceError,
 )
+from nio.crypto.attachments import decrypt_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -38,29 +39,6 @@ logger = logging.getLogger(__name__)
 # Matrix's org.matrix.custom.html allowlist rejects <input>, so checklists
 # render as empty boxes. Users can fall back to emoji.
 _MARKDOWN = mistune.create_markdown(plugins=["strikethrough", "table", "url"])
-
-
-def _attach_query(uri: str, params: dict[str, str]) -> str:
-    """Append `params` as a query string to `uri`.
-
-    Used to inline encryption parameters (k, iv, hash) into mxc:// URIs
-    so encrypted attachments are self-resolving without out-of-band
-    state. The query is internal-protocol only — nio.download strips
-    the query before talking to the homeserver, and these URIs never
-    leave the agent platform.
-    """
-    if not params:
-        return uri
-    parts = urlsplit(uri)
-    return urlunsplit(parts._replace(query=urlencode(params)))
-
-
-def _split_query(uri: str) -> tuple[str, dict[str, str]]:
-    """Split a query-augmented URI into its base and parameters."""
-    parts = urlsplit(uri)
-    params = {k: v[0] for k, v in parse_qs(parts.query).items()} if parts.query else {}
-    base = urlunsplit(parts._replace(query=""))
-    return base, params
 
 
 @dataclass
@@ -378,22 +356,20 @@ class MatrixClient:
         body is the filename, no explicit filename field."""
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
-        mime = info.get("mimetype") or ""
 
+        params = {"mime": info.get("mimetype") or ""}
         file_info = content.get("file")
         if file_info:
             key = file_info.get("key") or {}
             hashes = file_info.get("hashes") or {}
-            params = {
-                "k": key.get("k", ""),
-                "iv": file_info.get("iv", ""),
-                "hash": hashes.get("sha256", ""),
-                "mime": mime,
-            }
-            url = _attach_query(file_info.get("url", ""), {k: v for k, v in params.items() if v})
+            params["k"] = key.get("k", "")
+            params["iv"] = file_info.get("iv", "")
+            params["hash"] = hashes.get("sha256", "")
+            base = file_info.get("url", "")
         else:
-            base_url = event.url or ""
-            url = _attach_query(base_url, {"mime": mime}) if mime else base_url
+            base = event.url or ""
+        parts = urlsplit(base)
+        url = urlunsplit(parts._replace(query=urlencode({k: v for k, v in params.items() if v})))
 
         top_filename = content.get("filename") or info.get("filename")
         if top_filename and top_filename != event.body:
@@ -452,25 +428,15 @@ class MatrixClient:
             return []
         return [Sender(id=uid, name=user.display_name) for uid, user in (room.users or {}).items()]
 
-    async def download_attachment(self, mxc_url: str) -> tuple[bytes, str | None]:
-        """Download (and decrypt, if applicable) a Matrix attachment.
-
-        Accepts a bare `mxc://` URI; encrypted attachments carry their
-        decryption parameters in the query string (`?k=&iv=&hash=`).
-        """
-        bare_url, params = _split_query(mxc_url)
-        resp = await self._client.download(bare_url)
-        data = resp.body
-        content_type = getattr(resp, "content_type", None)
-        if params.get("k"):
-            from nio.crypto.attachments import decrypt_attachment
-            data = decrypt_attachment(
-                data,
-                params["k"],
-                params.get("hash", ""),
-                params.get("iv", ""),
-            )
-        return data, content_type
+    async def download_attachment(
+        self, server: str, media_id: str, *,
+        k: str = "", iv: str = "", hash: str = "",
+    ) -> bytes:
+        """Download (and decrypt, if applicable) a Matrix attachment."""
+        resp = await self._client.download(f"mxc://{server}/{media_id}")
+        if k:
+            return decrypt_attachment(resp.body, k, hash, iv)
+        return resp.body
 
     async def _upload(
         self, data: bytes, content_type: str, filename: str, encrypt: bool = False

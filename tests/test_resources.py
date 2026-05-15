@@ -114,7 +114,7 @@ async def test_resolve_uri_unknown_scheme(orchestrator):
 
 @pytest.mark.asyncio
 async def test_resolve_uri_no_scheme(orchestrator):
-    with pytest.raises(ValueError, match="no scheme"):
+    with pytest.raises(ValueError, match="No MCP server registered"):
         await orchestrator.resolve_uri("just-a-name")
 
 
@@ -158,18 +158,13 @@ def test_resource_image_emits_input_image_no_pointer(tmp_path):
     assert not list(store.store_dir.iterdir())
 
 
-def test_resource_non_image_describes_via_uri(tmp_path):
-    """Non-visual binary resources: describe by uri + size, no caching."""
-    import json as _json
+def test_resource_opaque_binary_raises(tmp_path):
+    """A resource that's neither image nor text can't be inlined as model
+    context — raise so the agent knows to use a tool that handles the URI."""
     store = BinaryStore(store_dir=tmp_path / "bins", retention_days=30)
     block = _resource_block("mxc://srv/doc", b"%PDF-1.4 ...", "application/pdf")
-
-    parts = mcp_content_to_openai([block], store=store)
-    text_part = next((p for p in parts if p.get("type") == "input_text"), None)
-    assert text_part is not None
-    payload = _json.loads(text_part["text"])
-    assert payload["uri"] == "mxc://srv/doc"
-    assert payload["mimeType"] == "application/pdf"
+    with pytest.raises(ValueError, match="Cannot inline"):
+        mcp_content_to_openai([block], store=store)
     assert not list(store.store_dir.iterdir())
 
 
@@ -322,7 +317,7 @@ async def test_resources_read_rejects_uri_without_scheme():
     orch._scheme_to_mcp = {}
     platform_mcp.orchestrator = orch
     try:
-        with pytest.raises(ValueError, match="no scheme"):
+        with pytest.raises(ValueError, match="No MCP server registered"):
             await platform_mcp.resources_read("not-a-uri")
     finally:
         platform_mcp.orchestrator = None
@@ -341,34 +336,6 @@ async def test_resources_read_rejects_unknown_scheme():
 
 
 # ── matrix-adapter mxc URI ───────────────────────────────
-
-
-def test_matrix_attach_query_inlines_encryption_params():
-    """`_attach_query` builds an mxc URL with encryption params in the
-    query string so resources are self-contained."""
-    from matrix_adapter.model import _attach_query, _split_query
-    base = "mxc://server.com/abc123"
-    enriched = _attach_query(base, {"k": "KEY", "iv": "IV", "hash": "HASH"})
-    assert enriched.startswith("mxc://server.com/abc123?")
-    assert "k=KEY" in enriched
-    bare, params = _split_query(enriched)
-    assert bare == base
-    assert params == {"k": "KEY", "iv": "IV", "hash": "HASH"}
-
-
-def test_matrix_split_query_round_trip_with_special_chars():
-    """Round-trip preserves base64 chars (including `+`, `/`, `=`) which
-    get URL-encoded on the way out and decoded on the way in."""
-    from matrix_adapter.model import _attach_query, _split_query
-    params = {"k": "Ezi-RoXOM_HvEm", "iv": "y/UHn==", "hash": "abc+def/123=="}
-    enriched = _attach_query("mxc://srv/id", params)
-    _, parsed = _split_query(enriched)
-    assert parsed == params
-
-
-def test_matrix_attach_query_skips_empty_dict():
-    from matrix_adapter.model import _attach_query
-    assert _attach_query("mxc://srv/id", {}) == "mxc://srv/id"
 
 
 def test_matrix_extract_media_inlines_mime_unencrypted():
@@ -416,7 +383,7 @@ async def test_mxc_resource_returns_resourceresult_with_mime():
     the sender-declared mime from the URI query param."""
     from matrix_adapter import server as matrix_server
     matrix_server.client = MagicMock()
-    matrix_server.client.download_attachment = AsyncMock(return_value=(b"# notes", None))
+    matrix_server.client.download_attachment = AsyncMock(return_value=b"# notes")
 
     result = await matrix_server.mxc_resource(
         server="srv", media_id="abc", mime="text/markdown",
@@ -431,7 +398,7 @@ async def test_mxc_resource_defaults_mime_when_missing():
     """No `mime` in URI → fall back to octet-stream."""
     from matrix_adapter import server as matrix_server
     matrix_server.client = MagicMock()
-    matrix_server.client.download_attachment = AsyncMock(return_value=(b"...", None))
+    matrix_server.client.download_attachment = AsyncMock(return_value=b"...")
 
     result = await matrix_server.mxc_resource(server="srv", media_id="abc")
     assert result.contents[0].mime_type == "application/octet-stream"
@@ -463,8 +430,7 @@ async def test_signal_attachment_resource_returns_resourceresult_with_mime():
 
 
 def test_resource_text_blob_decodes_to_input_text():
-    """Text-mime blob resources decode UTF-8 and emit as input_text directly,
-    not as the {uri, mimeType, size} descriptor used for opaque binaries."""
+    """Text-mime blob resources decode UTF-8 and emit as input_text."""
     body = b"# Notes\n\nThe agent should be able to read this."
     block = _resource_block("workspace:///notes.md", body, "text/markdown")
     parts = mcp_content_to_openai([block])
@@ -472,13 +438,9 @@ def test_resource_text_blob_decodes_to_input_text():
     assert any("# Notes" in t for t in decoded)
 
 
-def test_resource_text_blob_invalid_utf8_falls_back_to_descriptor():
-    """If MIME claims text but bytes aren't valid UTF-8, emit the descriptor
-    rather than corrupting the input."""
-    import json as _json
+def test_resource_text_blob_invalid_utf8_raises():
+    """If MIME claims text but bytes aren't valid UTF-8, the producer is
+    lying; surface that as an error rather than silently corrupting."""
     block = _resource_block("workspace:///bad.txt", b"\xff\xfe\xfd not utf-8", "text/plain")
-    parts = mcp_content_to_openai([block])
-    text_part = next((p for p in parts if p.get("type") == "input_text"), None)
-    assert text_part is not None
-    payload = _json.loads(text_part["text"])
-    assert payload["uri"] == "workspace:///bad.txt"
+    with pytest.raises(UnicodeDecodeError):
+        mcp_content_to_openai([block])

@@ -5,7 +5,6 @@ list_directory, search_files tools. Path traversal outside the workspace
 is rejected.
 """
 
-import base64
 import mimetypes
 import os
 from pathlib import Path
@@ -42,14 +41,6 @@ def _safe_resolve(path: str) -> Path:
     return target
 
 
-TEXT_TYPES = {"application/json", "application/xml", "application/yaml", "application/x-yaml"}
-
-
-def _is_text_type(content_type: str) -> bool:
-    """Check if a MIME type represents text content."""
-    return content_type.startswith("text/") or content_type in TEXT_TYPES
-
-
 @mcp.resource("workspace:///{path*}")
 def workspace_resource(path: str) -> ResourceResult:
     """Serve workspace files as MCP resources at `workspace:///{path}`.
@@ -59,9 +50,7 @@ def workspace_resource(path: str) -> ResourceResult:
             `Pictures/cat.jpg`).
 
     Returns:
-        A `ResourceResult` with the detected mime. Text-shaped content is
-        decoded to a string so it lands as `TextResourceContents`; everything
-        else stays as bytes.
+        A `ResourceResult` with the detected mime.
 
     Raises:
         ValueError: If the path attempts traversal outside the workspace.
@@ -77,17 +66,11 @@ def workspace_resource(path: str) -> ResourceResult:
     raw = target.read_bytes()
     kind = filetype.guess(raw)
     content_type = (kind.mime if kind else None) or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-
-    if _is_text_type(content_type):
-        try:
-            return ResourceResult([ResourceContent(raw.decode("utf-8"), mime_type=content_type)])
-        except (UnicodeDecodeError, ValueError):
-            pass
     return ResourceResult([ResourceContent(raw, mime_type=content_type)])
 
 
 @mcp.tool
-def write_file(path: str, content_type: str, data: str | Base64Bytes) -> str:
+def write_file(path: str, data: str | Base64Bytes) -> str:
     """Write a file to the workspace.
 
     Creates parent directories if needed. Overwrites any existing file
@@ -95,24 +78,17 @@ def write_file(path: str, content_type: str, data: str | Base64Bytes) -> str:
 
     Args:
         path: Where to write, relative to the workspace root.
-        content_type: MIME type of the content. Determines whether `data`
-            is interpreted as text or binary.
-        data: Text contents for text MIME types, base64-encoded bytes
-            for binary.
+        data: Text contents, or base64-encoded bytes for binary.
 
     Returns:
-        Short confirmation with byte/char count and the path written.
+        Short confirmation with byte count and the path written.
 
     Raises:
         ValueError: If the path attempts traversal outside the workspace.
     """
     target = _safe_resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if _is_text_type(content_type):
-        text = data.decode("utf-8") if isinstance(data, bytes) else data
-        target.write_text(text)
-        return f"Wrote {len(text)} chars to {path}"
-    raw = data if isinstance(data, bytes) else base64.b64decode(data)
+    raw = data.encode("utf-8") if isinstance(data, str) else data
     target.write_bytes(raw)
     return f"Wrote {len(raw)} bytes to {path}"
 

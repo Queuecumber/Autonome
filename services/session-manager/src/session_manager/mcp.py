@@ -40,8 +40,7 @@ _BINARY_FINDER = jsonpath.compile(
 
 _BINARY_PARAM_DESCRIPTION = (
     "Resource URI (e.g. 'pointer://5-photo.jpg', 'mxc://server/abc') or "
-    "raw base64 bytes. URIs are resolved to bytes by the platform before "
-    "the tool runs."
+    "raw base64 bytes."
 )
 
 URIResolver = Callable[[str], Awaitable[bytes]]
@@ -237,18 +236,13 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             parts.append(_describe_binary(block.data, block.mimeType, store))
 
         elif block.type == "resource":
-            # Resource bytes are already URI-addressable; don't re-cache as a
-            # new pointer or the agent ends up round-tripping reads. Mime
-            # arrives properly typed because resource handlers return
-            # ResourceResult with per-call mime.
             resource = getattr(block, "resource", None)
-            uri = str(getattr(resource, "uri", "") or "")
             blob = getattr(resource, "blob", None)
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
             if blob is not None:
                 if mime.startswith("image/"):
-                    raw = base64.b64decode(blob) if isinstance(blob, str) else blob
+                    raw = base64.b64decode(blob)
                     exif = _exif_summary(raw)
                     if exif:
                         parts.append({"type": "input_text", "text": json.dumps(exif)})
@@ -257,20 +251,10 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                         "image_url": f"data:{mime};base64,{blob}",
                     })
                 elif _is_text_type(mime):
-                    raw = base64.b64decode(blob) if isinstance(blob, str) else blob
-                    try:
-                        parts.append({"type": "input_text", "text": raw.decode("utf-8")})
-                    except UnicodeDecodeError:
-                        # MIME claimed text but bytes aren't valid UTF-8 — fall
-                        # back to descriptor rather than corrupt the input.
-                        parts.append({"type": "input_text", "text": json.dumps({
-                            "uri": uri, "mimeType": mime, "size": len(raw),
-                        })})
+                    raw = base64.b64decode(blob)
+                    parts.append({"type": "input_text", "text": raw.decode("utf-8")})
                 else:
-                    size = len(blob) * 3 // 4 if isinstance(blob, str) else len(blob)
-                    parts.append({"type": "input_text", "text": json.dumps({
-                        "uri": uri, "mimeType": mime, "size": size,
-                    })})
+                    raise ValueError(f"Cannot inline resource of type {mime!r}; pass the URI to a tool that handles it instead")
             elif text is not None:
                 parts.append({"type": "input_text", "text": text})
             else:

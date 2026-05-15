@@ -266,9 +266,6 @@ class SessionOrchestrator:
         self.openai_tools: list[dict] = []
         self._tool_to_mcp: dict[str, MCPConnection] = {}
 
-        # scheme → MCPConnection. Populated from each server's
-        # resources/templates/list at connect time. Lets the orchestrator
-        # route a URI to the right server based on its scheme alone.
         self._scheme_to_mcp: dict[str, MCPConnection] = {}
 
         self.max_tool_iterations = 20
@@ -298,11 +295,9 @@ class SessionOrchestrator:
     async def _register_schemes(self, conn: MCPConnection) -> None:
         """Register URI schemes this server owns via its resource templates.
 
-        Raises if two servers claim the same scheme — that's a config error,
-        not something to paper over.
+        Raises if two servers claim the same scheme.
         """
-        templates = await conn.list_resource_templates()
-        for t in templates:
+        for t in await conn.list_resource_templates():
             scheme = urlparse(t.uriTemplate).scheme.lower()
             prior = self._scheme_to_mcp.get(scheme)
             if prior is not None and prior is not conn:
@@ -312,16 +307,8 @@ class SessionOrchestrator:
             self._scheme_to_mcp[scheme] = conn
 
     async def resolve_uri(self, uri: str) -> bytes:
-        """Resolve any URI to raw bytes via the scheme map.
-
-        Routes by scheme to the MCP server that advertised a matching
-        resource template, calls its read_resource, and extracts bytes
-        from the returned ResourceContents (blob → b64 decode, text →
-        utf-8 encode).
-        """
+        """Resolve any URI to raw bytes via the scheme map."""
         scheme = urlparse(uri).scheme.lower()
-        if not scheme:
-            raise ValueError(f"URI has no scheme: {uri!r}")
         conn = self._scheme_to_mcp.get(scheme)
         if conn is None:
             raise ValueError(f"No MCP server registered for scheme {scheme!r}: {uri!r}")
@@ -330,7 +317,7 @@ class SessionOrchestrator:
         for c in contents:
             blob = getattr(c, "blob", None)
             if blob is not None:
-                return base64.b64decode(blob) if isinstance(blob, str) else blob
+                return base64.b64decode(blob)
             text = getattr(c, "text", None)
             if text is not None:
                 return text.encode("utf-8")

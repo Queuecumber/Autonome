@@ -1,8 +1,7 @@
 """Tests for workspace filesystem MCP server.
 
 Reads are exposed as resources at `workspace:///{path}`. Writes go through
-the flat `write_file(path, content_type, data)` tool. Discovery via
-`list_directory` and `search_files`.
+`write_file(path, data)`. Discovery via `list_directory` and `search_files`.
 """
 
 import pytest
@@ -23,17 +22,16 @@ def workspace_server(tmp_workspace, monkeypatch):
 
 def test_read_text_file(workspace_server, tmp_workspace):
     result = workspace_server.workspace_resource("SOUL.md")
-    # Text files come back as decoded utf-8 inside a ResourceResult.
     content = result.contents[0]
-    assert isinstance(content.content, str)
-    assert "I am a test agent" in content.content
+    assert isinstance(content.content, bytes)
+    assert b"I am a test agent" in content.content
     assert content.mime_type.startswith("text/")
 
 
 def test_read_nested_text_file(workspace_server, tmp_workspace):
     (tmp_workspace / "memory" / "2026-05-06.md").write_text("# Today\n")
     result = workspace_server.workspace_resource("memory/2026-05-06.md")
-    assert "Today" in result.contents[0].content
+    assert b"Today" in result.contents[0].content
 
 
 def test_read_binary_file(workspace_server, tmp_workspace):
@@ -66,40 +64,30 @@ def test_read_path_traversal(workspace_server):
 
 
 def test_write_text(workspace_server, tmp_workspace):
-    result = workspace_server.write_file(
-        "test.txt", content_type="text/plain", data="hello world",
-    )
-    assert "11 chars" in result
+    result = workspace_server.write_file("test.txt", data="hello world")
+    assert "11 bytes" in result
     assert (tmp_workspace / "test.txt").read_text() == "hello world"
 
 
-def test_write_binary_from_base64(workspace_server, tmp_workspace):
-    import base64
+def test_write_binary_from_bytes(workspace_server, tmp_workspace):
     raw = b"\x89PNG\r\n\x1a\n"
-    data = base64.b64encode(raw).decode()
-    workspace_server.write_file(
-        "icon.png", content_type="image/png", data=data,
-    )
+    workspace_server.write_file("icon.png", data=raw)
     assert (tmp_workspace / "icon.png").read_bytes() == raw
 
 
 def test_write_creates_parents(workspace_server, tmp_workspace):
-    workspace_server.write_file(
-        "deep/nested/test.txt", content_type="text/plain", data="nested",
-    )
+    workspace_server.write_file("deep/nested/test.txt", data="nested")
     assert (tmp_workspace / "deep" / "nested" / "test.txt").read_text() == "nested"
 
 
 def test_write_traversal(workspace_server):
     with pytest.raises(ValueError, match="traversal"):
-        workspace_server.write_file(
-            "../../evil.txt", content_type="text/plain", data="bad",
-        )
+        workspace_server.write_file("../../evil.txt", data="bad")
 
 
 def test_write_overwrites(workspace_server, tmp_workspace):
-    workspace_server.write_file("note.txt", content_type="text/plain", data="first")
-    workspace_server.write_file("note.txt", content_type="text/plain", data="second")
+    workspace_server.write_file("note.txt", data="first")
+    workspace_server.write_file("note.txt", data="second")
     assert (tmp_workspace / "note.txt").read_text() == "second"
 
 
