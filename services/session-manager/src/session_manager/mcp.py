@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import exifread
 import exifread.utils
@@ -24,6 +24,15 @@ from session_manager.binaries import BinaryStore
 logger = logging.getLogger(__name__)
 
 POINTER_PREFIX = "pointer://"
+
+# Mirrors workspace_fs/server.py's _is_text_type — kept duplicated to avoid
+# coupling MCP servers to each other. If this list grows, sync both copies.
+_TEXT_TYPES = {"application/json", "application/xml", "application/yaml", "application/x-yaml"}
+
+
+def _is_text_type(mime: str) -> bool:
+    return mime.startswith("text/") or mime in _TEXT_TYPES
+
 
 # Select every schema node whose format marks it as binary content.
 _BINARY_FINDER = jsonpath.compile(
@@ -236,9 +245,16 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             blob = getattr(resource, "blob", None)
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
+            # Sender-declared mime in the URI query (e.g. mxc://...?mime=text/markdown)
+            # is authoritative — fastmcp templates can only carry a static mime
+            # so without this we'd always see the template default.
+            if uri:
+                uri_mime = parse_qs(urlparse(uri).query).get("mime", [None])[0]
+                if uri_mime:
+                    mime = uri_mime
             if blob is not None:
-                # fastmcp resource templates carry static mime, so handlers
-                # producing heterogeneous content come back generic; redetect.
+                # If we still have a generic mime (no URI hint, no template
+                # hint), fall back to magic-byte detection on the bytes.
                 if mime in ("application/octet-stream", "text/plain", ""):
                     raw = base64.b64decode(blob) if isinstance(blob, str) else blob
                     kind = filetype.guess(raw)
@@ -253,6 +269,16 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                         "type": "input_image",
                         "image_url": f"data:{mime};base64,{blob}",
                     })
+                elif _is_text_type(mime):
+                    raw = base64.b64decode(blob) if isinstance(blob, str) else blob
+                    try:
+                        parts.append({"type": "input_text", "text": raw.decode("utf-8")})
+                    except UnicodeDecodeError:
+                        # MIME claimed text but bytes aren't valid UTF-8 — fall
+                        # back to descriptor rather than corrupt the input.
+                        parts.append({"type": "input_text", "text": json.dumps({
+                            "uri": uri, "mimeType": mime, "size": len(raw),
+                        })})
                 else:
                     size = len(blob) * 3 // 4 if isinstance(blob, str) else len(blob)
                     parts.append({"type": "input_text", "text": json.dumps({

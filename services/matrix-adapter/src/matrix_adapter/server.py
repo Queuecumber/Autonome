@@ -211,14 +211,16 @@ async def get_room_members(room_id: str) -> list[Sender]:
     return client.get_room_members(room_id)
 
 
-@mcp.resource("mxc://{server}/{media_id}{?k,iv,hash}")
+@mcp.resource("mxc://{server}/{media_id}{?k,iv,hash,mime}")
 async def mxc_resource(
     server: str, media_id: str,
-    k: str = "", iv: str = "", hash: str = "",
+    k: str = "", iv: str = "", hash: str = "", mime: str = "",
 ) -> bytes:
     """Serve `mxc://...` URIs as MCP resources.
 
     Returns raw (decrypted) bytes; fastmcp wraps as a BlobResourceContents.
+    The `mime` query param is sender-declared and surfaced to the model
+    downstream — ignored for the download itself.
     """
     query = urlencode({n: v for n, v in (("k", k), ("iv", iv), ("hash", hash)) if v})
     full_uri = f"mxc://{server}/{media_id}" + (f"?{query}" if query else "")

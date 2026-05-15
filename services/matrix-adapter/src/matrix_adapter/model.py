@@ -378,6 +378,7 @@ class MatrixClient:
         body is the filename, no explicit filename field."""
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
+        mime = info.get("mimetype") or ""
 
         file_info = content.get("file")
         if file_info:
@@ -387,10 +388,12 @@ class MatrixClient:
                 "k": key.get("k", ""),
                 "iv": file_info.get("iv", ""),
                 "hash": hashes.get("sha256", ""),
+                "mime": mime,
             }
             url = _attach_query(file_info.get("url", ""), {k: v for k, v in params.items() if v})
         else:
-            url = event.url or ""
+            base_url = event.url or ""
+            url = _attach_query(base_url, {"mime": mime}) if mime else base_url
 
         top_filename = content.get("filename") or info.get("filename")
         if top_filename and top_filename != event.body:
