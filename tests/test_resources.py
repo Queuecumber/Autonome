@@ -193,6 +193,153 @@ async def test_platform_mcp_pointer_serves_bytes(tmp_path):
         platform_mcp.binary_store = None
 
 
+def test_platform_mcp_requires_orchestrator_when_unset():
+    """Bridge tools fail fast with a clear error if main.py forgot to wire
+    them up."""
+    platform_mcp.orchestrator = None
+    with pytest.raises(RuntimeError, match="orchestrator not initialized"):
+        platform_mcp._require_orchestrator()
+
+
+def test_platform_mcp_requires_binary_store_when_unset():
+    platform_mcp.binary_store = None
+    with pytest.raises(RuntimeError, match="binary_store not initialized"):
+        platform_mcp._require_binary_store()
+
+
+# ── platform_mcp bridge tools ────────────────────────────
+
+
+def _mock_resource(uri: str, name: str = "n", mime: str | None = None) -> MagicMock:
+    r = MagicMock()
+    r.uri = uri
+    r.name = name
+    r.description = None
+    r.mimeType = mime
+    return r
+
+
+@pytest.mark.asyncio
+async def test_resources_list_aggregates_across_connections():
+    """resources_list flattens resources from every connected MCP server."""
+    import json as _json
+
+    matrix_conn = MagicMock()
+    matrix_conn.name = "matrix"
+    matrix_conn.list_resources = AsyncMock(return_value=[
+        _mock_resource("mxc://srv/a", mime="image/png"),
+    ])
+    workspace_conn = MagicMock()
+    workspace_conn.name = "workspace-fs"
+    workspace_conn.list_resources = AsyncMock(return_value=[
+        _mock_resource("workspace:///b.md", mime="text/markdown"),
+    ])
+    orch = MagicMock()
+    orch.mcp_connections = {"matrix": matrix_conn, "workspace-fs": workspace_conn}
+
+    platform_mcp.orchestrator = orch
+    try:
+        out = _json.loads(await platform_mcp.resources_list())
+    finally:
+        platform_mcp.orchestrator = None
+
+    uris = {entry["uri"] for entry in out}
+    assert uris == {"mxc://srv/a", "workspace:///b.md"}
+
+
+@pytest.mark.asyncio
+async def test_resources_list_filters_by_scheme():
+    matrix_conn = MagicMock()
+    matrix_conn.name = "matrix"
+    matrix_conn.list_resources = AsyncMock(return_value=[
+        _mock_resource("mxc://srv/a"),
+        _mock_resource("workspace:///stray.txt"),
+    ])
+    orch = MagicMock()
+    orch.mcp_connections = {"matrix": matrix_conn}
+
+    platform_mcp.orchestrator = orch
+    try:
+        import json as _json
+        out = _json.loads(await platform_mcp.resources_list(scheme="mxc"))
+    finally:
+        platform_mcp.orchestrator = None
+
+    assert [e["uri"] for e in out] == ["mxc://srv/a"]
+
+
+@pytest.mark.asyncio
+async def test_resources_template_list_aggregates_templates():
+    import json as _json
+
+    conn = MagicMock()
+    conn.name = "matrix"
+    tmpl = MagicMock()
+    tmpl.uriTemplate = "mxc://{server}/{media_id}{?k,iv,hash}"
+    tmpl.name = "mxc"
+    tmpl.description = None
+    tmpl.mimeType = None
+    conn.list_resource_templates = AsyncMock(return_value=[tmpl])
+    orch = MagicMock()
+    orch.mcp_connections = {"matrix": conn}
+
+    platform_mcp.orchestrator = orch
+    try:
+        out = _json.loads(await platform_mcp.resources_template_list())
+    finally:
+        platform_mcp.orchestrator = None
+
+    assert out[0]["uriTemplate"] == "mxc://{server}/{media_id}{?k,iv,hash}"
+    assert out[0]["server"] == "matrix"
+
+
+@pytest.mark.asyncio
+async def test_resources_read_dispatches_by_scheme():
+    """resources_read uses the orchestrator's scheme map to pick the right
+    connection, then wraps each returned ResourceContents in an
+    EmbeddedResource."""
+    from mcp.types import TextResourceContents
+    contents = [TextResourceContents(uri="mxc://srv/abc", text="hi", mimeType="text/plain")]
+    conn = MagicMock()
+    conn.read_resource = AsyncMock(return_value=contents)
+    orch = MagicMock()
+    orch._scheme_to_mcp = {"mxc": conn}
+
+    platform_mcp.orchestrator = orch
+    try:
+        result = await platform_mcp.resources_read("mxc://srv/abc")
+    finally:
+        platform_mcp.orchestrator = None
+
+    conn.read_resource.assert_awaited_once_with("mxc://srv/abc")
+    assert len(result) == 1
+    assert result[0].type == "resource"
+
+
+@pytest.mark.asyncio
+async def test_resources_read_rejects_uri_without_scheme():
+    orch = MagicMock()
+    orch._scheme_to_mcp = {}
+    platform_mcp.orchestrator = orch
+    try:
+        with pytest.raises(ValueError, match="no scheme"):
+            await platform_mcp.resources_read("not-a-uri")
+    finally:
+        platform_mcp.orchestrator = None
+
+
+@pytest.mark.asyncio
+async def test_resources_read_rejects_unknown_scheme():
+    orch = MagicMock()
+    orch._scheme_to_mcp = {}
+    platform_mcp.orchestrator = orch
+    try:
+        with pytest.raises(ValueError, match="No MCP server registered"):
+            await platform_mcp.resources_read("unknown://thing")
+    finally:
+        platform_mcp.orchestrator = None
+
+
 # ── matrix-adapter mxc URI ───────────────────────────────
 
 
