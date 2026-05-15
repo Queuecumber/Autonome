@@ -1,7 +1,8 @@
 """Orchestrator-internal MCP server."""
 
 import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from fastmcp import FastMCP
@@ -20,6 +21,24 @@ POINTER_PREFIX = "pointer://"
 # Set by main.py before the server starts.
 binary_store: BinaryStore | None = None
 orchestrator: "SessionOrchestrator | None" = None
+
+
+@dataclass
+class ResourceEntry:
+    server: str
+    uri: str
+    name: str | None = None
+    description: str | None = None
+    mimeType: str | None = None
+
+
+@dataclass
+class ResourceTemplateEntry:
+    server: str
+    uriTemplate: str
+    name: str | None = None
+    description: str | None = None
+    mimeType: str | None = None
 
 mcp = FastMCP("session", instructions=(
     "Platform-internal resources and bridge tools. Use "
@@ -66,7 +85,7 @@ async def read_pointer(name: str) -> ResourceResult:
 
 
 @mcp.tool
-async def resources_list(scheme: str | None = None) -> list[dict[str, Any]]:
+async def resources_list(scheme: str | None = None) -> list[ResourceEntry]:
     """List concrete resources currently available across all MCP servers.
 
     Aggregates each connected server's `resources/list`. Use to discover
@@ -79,28 +98,27 @@ async def resources_list(scheme: str | None = None) -> list[dict[str, Any]]:
             (e.g. `mxc`, `workspace`).
 
     Returns:
-        One entry per resource with `server`, `uri`, `name`, `description`,
-        `mimeType`.
+        One `ResourceEntry` per resource.
     """
     orch = _require_orchestrator()
-    out: list[dict[str, Any]] = []
+    out: list[ResourceEntry] = []
     for conn in orch.mcp_connections.values():
         for r in await conn.list_resources():
             uri = str(getattr(r, "uri", ""))
             if scheme and urlparse(uri).scheme.lower() != scheme.lower():
                 continue
-            out.append({
-                "server": conn.name,
-                "uri": uri,
-                "name": getattr(r, "name", None),
-                "description": getattr(r, "description", None),
-                "mimeType": getattr(r, "mimeType", None),
-            })
+            out.append(ResourceEntry(
+                server=conn.name,
+                uri=uri,
+                name=getattr(r, "name", None),
+                description=getattr(r, "description", None),
+                mimeType=getattr(r, "mimeType", None),
+            ))
     return out
 
 
 @mcp.tool
-async def resources_template_list() -> list[dict[str, Any]]:
+async def resources_template_list() -> list[ResourceTemplateEntry]:
     """List resource URI templates exposed across all MCP servers.
 
     Templates describe families of addressable resources (e.g.
@@ -108,20 +126,19 @@ async def resources_template_list() -> list[dict[str, Any]]:
     schemes are available and how to construct concrete URIs for them.
 
     Returns:
-        One entry per template with `server`, `uriTemplate`, `name`,
-        `description`, `mimeType`.
+        One `ResourceTemplateEntry` per template.
     """
     orch = _require_orchestrator()
-    out: list[dict[str, Any]] = []
+    out: list[ResourceTemplateEntry] = []
     for conn in orch.mcp_connections.values():
         for t in await conn.list_resource_templates():
-            out.append({
-                "server": conn.name,
-                "uriTemplate": getattr(t, "uriTemplate", None),
-                "name": getattr(t, "name", None),
-                "description": getattr(t, "description", None),
-                "mimeType": getattr(t, "mimeType", None),
-            })
+            out.append(ResourceTemplateEntry(
+                server=conn.name,
+                uriTemplate=getattr(t, "uriTemplate", ""),
+                name=getattr(t, "name", None),
+                description=getattr(t, "description", None),
+                mimeType=getattr(t, "mimeType", None),
+            ))
     return out
 
 

@@ -236,7 +236,7 @@ async def test_resources_list_aggregates_across_connections():
     finally:
         platform_mcp.orchestrator = None
 
-    uris = {entry["uri"] for entry in out}
+    uris = {entry.uri for entry in out}
     assert uris == {"mxc://srv/a", "workspace:///b.md"}
 
 
@@ -257,7 +257,7 @@ async def test_resources_list_filters_by_scheme():
     finally:
         platform_mcp.orchestrator = None
 
-    assert [e["uri"] for e in out] == ["mxc://srv/a"]
+    assert [e.uri for e in out] == ["mxc://srv/a"]
 
 
 @pytest.mark.asyncio
@@ -279,8 +279,8 @@ async def test_resources_template_list_aggregates_templates():
     finally:
         platform_mcp.orchestrator = None
 
-    assert out[0]["uriTemplate"] == "mxc://{server}/{media_id}{?k,iv,hash}"
-    assert out[0]["server"] == "matrix"
+    assert out[0].uriTemplate == "mxc://{server}/{media_id}{?k,iv,hash}"
+    assert out[0].server == "matrix"
 
 
 @pytest.mark.asyncio
