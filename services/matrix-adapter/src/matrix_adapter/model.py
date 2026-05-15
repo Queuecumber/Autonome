@@ -357,7 +357,7 @@ class MatrixClient:
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
 
-        params = {"mime": info.get("mimetype") or ""}
+        params = {"mime": info.get("mimetype", "application/octet-stream")}
         file_info = content.get("file")
         if file_info:
             key = file_info.get("key") or {}
@@ -367,7 +367,7 @@ class MatrixClient:
             params["hash"] = hashes.get("sha256", "")
             base = file_info.get("url", "")
         else:
-            base = event.url or ""
+            base = event.url
         parts = urlsplit(base)
         url = urlunsplit(parts._replace(query=urlencode({k: v for k, v in params.items() if v})))
 

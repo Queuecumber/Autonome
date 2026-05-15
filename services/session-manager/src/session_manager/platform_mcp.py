@@ -1,6 +1,5 @@
 """Orchestrator-internal MCP server."""
 
-import json
 import logging
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -67,7 +66,7 @@ async def read_pointer(name: str) -> ResourceResult:
 
 
 @mcp.tool
-async def resources_list(scheme: str | None = None) -> str:
+async def resources_list(scheme: str | None = None) -> list[dict[str, Any]]:
     """List concrete resources currently available across all MCP servers.
 
     Aggregates each connected server's `resources/list`. Use to discover
@@ -80,7 +79,8 @@ async def resources_list(scheme: str | None = None) -> str:
             (e.g. `mxc`, `workspace`).
 
     Returns:
-        A JSON array of `{server, uri, name, description, mimeType}` entries.
+        One entry per resource with `server`, `uri`, `name`, `description`,
+        `mimeType`.
     """
     orch = _require_orchestrator()
     out: list[dict[str, Any]] = []
@@ -96,11 +96,11 @@ async def resources_list(scheme: str | None = None) -> str:
                 "description": getattr(r, "description", None),
                 "mimeType": getattr(r, "mimeType", None),
             })
-    return json.dumps(out)
+    return out
 
 
 @mcp.tool
-async def resources_template_list() -> str:
+async def resources_template_list() -> list[dict[str, Any]]:
     """List resource URI templates exposed across all MCP servers.
 
     Templates describe families of addressable resources (e.g.
@@ -108,8 +108,8 @@ async def resources_template_list() -> str:
     schemes are available and how to construct concrete URIs for them.
 
     Returns:
-        A JSON array of `{server, uriTemplate, name, description, mimeType}`
-        entries.
+        One entry per template with `server`, `uriTemplate`, `name`,
+        `description`, `mimeType`.
     """
     orch = _require_orchestrator()
     out: list[dict[str, Any]] = []
@@ -122,7 +122,7 @@ async def resources_template_list() -> str:
                 "description": getattr(t, "description", None),
                 "mimeType": getattr(t, "mimeType", None),
             })
-    return json.dumps(out)
+    return out
 
 
 @mcp.tool

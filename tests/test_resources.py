@@ -217,8 +217,6 @@ def _mock_resource(uri: str, name: str = "n", mime: str | None = None) -> MagicM
 @pytest.mark.asyncio
 async def test_resources_list_aggregates_across_connections():
     """resources_list flattens resources from every connected MCP server."""
-    import json as _json
-
     matrix_conn = MagicMock()
     matrix_conn.name = "matrix"
     matrix_conn.list_resources = AsyncMock(return_value=[
@@ -234,7 +232,7 @@ async def test_resources_list_aggregates_across_connections():
 
     platform_mcp.orchestrator = orch
     try:
-        out = _json.loads(await platform_mcp.resources_list())
+        out = await platform_mcp.resources_list()
     finally:
         platform_mcp.orchestrator = None
 
@@ -255,8 +253,7 @@ async def test_resources_list_filters_by_scheme():
 
     platform_mcp.orchestrator = orch
     try:
-        import json as _json
-        out = _json.loads(await platform_mcp.resources_list(scheme="mxc"))
+        out = await platform_mcp.resources_list(scheme="mxc")
     finally:
         platform_mcp.orchestrator = None
 
@@ -265,8 +262,6 @@ async def test_resources_list_filters_by_scheme():
 
 @pytest.mark.asyncio
 async def test_resources_template_list_aggregates_templates():
-    import json as _json
-
     conn = MagicMock()
     conn.name = "matrix"
     tmpl = MagicMock()
@@ -280,7 +275,7 @@ async def test_resources_template_list_aggregates_templates():
 
     platform_mcp.orchestrator = orch
     try:
-        out = _json.loads(await platform_mcp.resources_template_list())
+        out = await platform_mcp.resources_template_list()
     finally:
         platform_mcp.orchestrator = None
 
