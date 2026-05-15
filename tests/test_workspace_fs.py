@@ -23,24 +23,27 @@ def workspace_server(tmp_workspace, monkeypatch):
 
 def test_read_text_file(workspace_server, tmp_workspace):
     result = workspace_server.workspace_resource("SOUL.md")
-    # Text files come back as decoded utf-8.
-    assert isinstance(result, str)
-    assert "I am a test agent" in result
+    # Text files come back as decoded utf-8 inside a ResourceResult.
+    content = result.contents[0]
+    assert isinstance(content.content, str)
+    assert "I am a test agent" in content.content
+    assert content.mime_type.startswith("text/")
 
 
 def test_read_nested_text_file(workspace_server, tmp_workspace):
     (tmp_workspace / "memory" / "2026-05-06.md").write_text("# Today\n")
     result = workspace_server.workspace_resource("memory/2026-05-06.md")
-    assert "Today" in result
+    assert "Today" in result.contents[0].content
 
 
 def test_read_binary_file(workspace_server, tmp_workspace):
     png_magic = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
     (tmp_workspace / "icon.png").write_bytes(png_magic)
     result = workspace_server.workspace_resource("icon.png")
-    # Non-text returns raw bytes; fastmcp wraps as BlobResourceContents.
-    assert isinstance(result, bytes)
-    assert result.startswith(b"\x89PNG")
+    content = result.contents[0]
+    assert isinstance(content.content, bytes)
+    assert content.content.startswith(b"\x89PNG")
+    assert content.mime_type == "image/png"
 
 
 def test_read_file_not_found(workspace_server):

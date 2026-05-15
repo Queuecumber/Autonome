@@ -14,6 +14,7 @@ import os
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.resources import ResourceContent, ResourceResult
 from pydantic import Base64Bytes
 
 from signal_adapter.model import SignalClient, Message, Reaction
@@ -129,19 +130,19 @@ async def typing_indicator(recipient: str, stop: bool = False) -> None:
 
 
 @mcp.resource("signal:///attachment/{attachment_id}")
-async def signal_attachment_resource(attachment_id: str) -> bytes:
+async def signal_attachment_resource(attachment_id: str) -> ResourceResult:
     """Serve Signal attachments as MCP resources.
+
+    Returns a `ResourceResult` carrying the attachment bytes and signal-cli's
+    declared content_type. Falls back to `application/octet-stream` when
+    signal-cli didn't report one.
 
     Args:
         attachment_id: The attachment id from incoming event metadata.
-
-    Returns:
-        Raw bytes; fastmcp wraps as a BlobResourceContents and the platform
-        re-detects the mime from content (since signal-cli's content_type
-        is sometimes generic).
     """
     att = await client.fetch_attachment(attachment_id)
-    return base64.b64decode(att.content_base64)
+    data = base64.b64decode(att.content_base64)
+    return ResourceResult(ResourceContent(data, mime_type=att.content_type or "application/octet-stream"))
 
 
 @mcp.tool

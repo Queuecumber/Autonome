@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from fastmcp import FastMCP
+from fastmcp.resources import ResourceContent, ResourceResult
 from mcp.types import EmbeddedResource
 
 from session_manager.binaries import BinaryStore
@@ -45,21 +46,22 @@ def _require_binary_store() -> BinaryStore:
 
 
 @mcp.resource("pointer://{name}")
-async def read_pointer(name: str) -> bytes:
+async def read_pointer(name: str) -> ResourceResult:
     """Read a binary by pointer name from the platform's content cache.
 
     Args:
         name: The pointer's name component (everything after `pointer://`).
 
     Returns:
-        Raw bytes. The content type is inferred from the bytes by fastmcp.
+        A `ResourceResult` with the stored mime, recovered by the BinaryStore
+        at load time.
 
     Raises:
         FileNotFoundError: If no content matches `name` (it may have been
             garbage-collected).
     """
-    content, _ = _require_binary_store().load(name)
-    return content
+    content, mime = _require_binary_store().load(name)
+    return ResourceResult(ResourceContent(content, mime_type=mime or "application/octet-stream"))
 
 
 # ── Resource bridge tools ────────────────────────────────

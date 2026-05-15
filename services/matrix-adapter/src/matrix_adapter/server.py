@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 import filetype
 import httpx
 from fastmcp import FastMCP
+from fastmcp.resources import ResourceContent, ResourceResult
 from pydantic import Base64Bytes
 
 from matrix_adapter.model import MatrixClient, Message, Reaction, Sender
@@ -215,17 +216,18 @@ async def get_room_members(room_id: str) -> list[Sender]:
 async def mxc_resource(
     server: str, media_id: str,
     k: str = "", iv: str = "", hash: str = "", mime: str = "",
-) -> bytes:
+) -> ResourceResult:
     """Serve `mxc://...` URIs as MCP resources.
 
-    Returns raw (decrypted) bytes; fastmcp wraps as a BlobResourceContents.
-    The `mime` query param is sender-declared and surfaced to the model
-    downstream — ignored for the download itself.
+    The `mime` query param is the sender-declared mime from the original
+    event's `info.mimetype` — propagated here because Synapse normalizes
+    the served Content-Type away. We return a `ResourceResult` with the
+    correct per-call mime so consumers don't need to re-detect.
     """
     query = urlencode({n: v for n, v in (("k", k), ("iv", iv), ("hash", hash)) if v})
     full_uri = f"mxc://{server}/{media_id}" + (f"?{query}" if query else "")
     data, _ = await client.download_attachment(full_uri)
-    return data
+    return ResourceResult(ResourceContent(data, mime_type=mime or "application/octet-stream"))
 
 
 @mcp.tool

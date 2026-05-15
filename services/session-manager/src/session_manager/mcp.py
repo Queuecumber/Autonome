@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Awaitable, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import exifread
 import exifread.utils
@@ -239,22 +239,17 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
 
         elif block.type == "resource":
             # Resource bytes are already URI-addressable; don't re-cache as a
-            # new pointer or the agent ends up round-tripping reads.
+            # new pointer or the agent ends up round-tripping reads. Mime
+            # arrives properly typed because resource handlers return
+            # ResourceResult with per-call mime.
             resource = getattr(block, "resource", None)
             uri = str(getattr(resource, "uri", "") or "")
             blob = getattr(resource, "blob", None)
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
-            # Sender-declared mime in the URI query (e.g. mxc://...?mime=text/markdown)
-            # is authoritative — fastmcp templates can only carry a static mime
-            # so without this we'd always see the template default.
-            if uri:
-                uri_mime = parse_qs(urlparse(uri).query).get("mime", [None])[0]
-                if uri_mime:
-                    mime = uri_mime
             if blob is not None:
-                # If we still have a generic mime (no URI hint, no template
-                # hint), fall back to magic-byte detection on the bytes.
+                # Belt-and-suspenders for any handler that hasn't been migrated
+                # to ResourceResult yet — keep magic-byte detection as fallback.
                 if mime in ("application/octet-stream", "text/plain", ""):
                     raw = base64.b64decode(blob) if isinstance(blob, str) else blob
                     kind = filetype.guess(raw)

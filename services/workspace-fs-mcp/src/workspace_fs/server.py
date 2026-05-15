@@ -12,6 +12,7 @@ from pathlib import Path
 
 import filetype
 from fastmcp import FastMCP
+from fastmcp.resources import ResourceContent, ResourceResult
 from pydantic import Base64Bytes
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
@@ -50,7 +51,7 @@ def _is_text_type(content_type: str) -> bool:
 
 
 @mcp.resource("workspace:///{path*}")
-def workspace_resource(path: str) -> bytes | str:
+def workspace_resource(path: str) -> ResourceResult:
     """Serve workspace files as MCP resources at `workspace:///{path}`.
 
     Args:
@@ -58,7 +59,9 @@ def workspace_resource(path: str) -> bytes | str:
             `Pictures/cat.jpg`).
 
     Returns:
-        Decoded text for text MIME types, raw bytes otherwise.
+        A `ResourceResult` with the detected mime. Text-shaped content is
+        decoded to a string so it lands as `TextResourceContents`; everything
+        else stays as bytes.
 
     Raises:
         ValueError: If the path attempts traversal outside the workspace.
@@ -77,10 +80,10 @@ def workspace_resource(path: str) -> bytes | str:
 
     if _is_text_type(content_type):
         try:
-            return raw.decode("utf-8")
+            return ResourceResult(ResourceContent(raw.decode("utf-8"), mime_type=content_type))
         except (UnicodeDecodeError, ValueError):
             pass
-    return raw
+    return ResourceResult(ResourceContent(raw, mime_type=content_type))
 
 
 @mcp.tool

@@ -194,14 +194,16 @@ def test_resource_non_image_describes_via_uri(tmp_path):
 @pytest.mark.asyncio
 async def test_platform_mcp_pointer_serves_bytes(tmp_path):
     """The platform's in-process FastMCP exposes the binary cache as
-    `pointer://` resources. read_pointer returns whatever the BinaryStore
-    has for that name."""
+    `pointer://` resources. read_pointer returns a ResourceResult with the
+    bytes and the stored mime."""
     store = BinaryStore(store_dir=tmp_path / "bins", retention_days=30)
     pointer = store.save(b"cached bytes", "text/plain", filename="x.txt")
     platform_mcp.binary_store = store
     try:
         result = await platform_mcp.read_pointer(pointer)
-        assert result == b"cached bytes"
+        content = result.contents[0]
+        assert content.content == b"cached bytes"
+        assert content.mime_type
     finally:
         platform_mcp.binary_store = None
 
