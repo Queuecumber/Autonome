@@ -25,17 +25,11 @@ orchestrator: "SessionOrchestrator | None" = None
 
 @dataclass
 class ResourceEntry:
+    """Either a concrete resource (`uri` is a full URI like `pointer://abc`)
+    or a template (`uri` is an RFC 6570 template like `pointer://{name}`).
+    Which kind depends on the listing tool that produced it."""
     server: str
     uri: str
-    name: str | None = None
-    description: str | None = None
-    mimeType: str | None = None
-
-
-@dataclass
-class ResourceTemplateEntry:
-    server: str
-    uriTemplate: str
     name: str | None = None
     description: str | None = None
     mimeType: str | None = None
@@ -118,7 +112,7 @@ async def resources_list(scheme: str | None = None) -> list[ResourceEntry]:
 
 
 @mcp.tool
-async def resources_template_list() -> list[ResourceTemplateEntry]:
+async def resources_template_list() -> list[ResourceEntry]:
     """List resource URI templates exposed across all MCP servers.
 
     Templates describe families of addressable resources (e.g.
@@ -126,15 +120,16 @@ async def resources_template_list() -> list[ResourceTemplateEntry]:
     schemes are available and how to construct concrete URIs for them.
 
     Returns:
-        One `ResourceTemplateEntry` per template.
+        One `ResourceEntry` per template; `uri` holds the RFC 6570 template
+        string.
     """
     orch = _require_orchestrator()
-    out: list[ResourceTemplateEntry] = []
+    out: list[ResourceEntry] = []
     for conn in orch.mcp_connections.values():
         for t in await conn.list_resource_templates():
-            out.append(ResourceTemplateEntry(
+            out.append(ResourceEntry(
                 server=conn.name,
-                uriTemplate=getattr(t, "uriTemplate", ""),
+                uri=getattr(t, "uriTemplate", ""),
                 name=getattr(t, "name", None),
                 description=getattr(t, "description", None),
                 mimeType=getattr(t, "mimeType", None),

@@ -279,7 +279,7 @@ async def test_resources_template_list_aggregates_templates():
     finally:
         platform_mcp.orchestrator = None
 
-    assert out[0].uriTemplate == "mxc://{server}/{media_id}{?k,iv,hash}"
+    assert out[0].uri == "mxc://{server}/{media_id}{?k,iv,hash}"
     assert out[0].server == "matrix"
 
 
