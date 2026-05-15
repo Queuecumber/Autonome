@@ -222,3 +222,116 @@ def test_matrix_split_query_round_trip_with_special_chars():
 def test_matrix_attach_query_skips_empty_dict():
     from matrix_adapter.model import _attach_query
     assert _attach_query("mxc://srv/id", {}) == "mxc://srv/id"
+
+
+def test_matrix_extract_media_inlines_mime_unencrypted():
+    """_extract_media adds the sender-declared mime to plain mxc URLs so the
+    resource handler downstream can return it via ResourceResult."""
+    from matrix_adapter.model import MatrixClient
+
+    event = MagicMock()
+    event.source = {"content": {"info": {"mimetype": "text/markdown"}}}
+    event.url = "mxc://srv/abc"
+    event.body = "doc.md"
+
+    client = MatrixClient.__new__(MatrixClient)
+    att = client._extract_media(event)
+    assert "mime=text%2Fmarkdown" in att.url
+    assert att.content_type == "text/markdown"
+
+
+def test_matrix_extract_media_inlines_mime_encrypted():
+    """Same inlining for encrypted attachments, alongside k/iv/hash."""
+    from matrix_adapter.model import MatrixClient
+
+    event = MagicMock()
+    event.source = {"content": {
+        "info": {"mimetype": "image/png"},
+        "file": {
+            "url": "mxc://srv/enc",
+            "key": {"k": "KEY"},
+            "iv": "IV",
+            "hashes": {"sha256": "HASH"},
+        },
+    }}
+    event.url = None
+    event.body = "img.png"
+
+    client = MatrixClient.__new__(MatrixClient)
+    att = client._extract_media(event)
+    assert "mime=image%2Fpng" in att.url
+    assert "k=KEY" in att.url
+
+
+@pytest.mark.asyncio
+async def test_mxc_resource_returns_resourceresult_with_mime():
+    """matrix-adapter wraps downloaded bytes in a ResourceResult carrying
+    the sender-declared mime from the URI query param."""
+    from matrix_adapter import server as matrix_server
+    matrix_server.client = MagicMock()
+    matrix_server.client.download_attachment = AsyncMock(return_value=(b"# notes", None))
+
+    result = await matrix_server.mxc_resource(
+        server="srv", media_id="abc", mime="text/markdown",
+    )
+    content = result.contents[0]
+    assert content.content == b"# notes"
+    assert content.mime_type == "text/markdown"
+
+
+@pytest.mark.asyncio
+async def test_mxc_resource_defaults_mime_when_missing():
+    """No `mime` in URI → fall back to octet-stream."""
+    from matrix_adapter import server as matrix_server
+    matrix_server.client = MagicMock()
+    matrix_server.client.download_attachment = AsyncMock(return_value=(b"...", None))
+
+    result = await matrix_server.mxc_resource(server="srv", media_id="abc")
+    assert result.contents[0].mime_type == "application/octet-stream"
+
+
+# ── signal-adapter signal:// resource ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_signal_attachment_resource_returns_resourceresult_with_mime():
+    """signal-adapter returns ResourceResult with signal-cli's content_type."""
+    from signal_adapter import server as signal_server
+    from signal_adapter.model import Attachment
+
+    att = Attachment(
+        id="x", content_type="image/jpeg",
+        content_base64=base64.b64encode(b"jpeg bytes").decode(),
+    )
+    signal_server.client = MagicMock()
+    signal_server.client.fetch_attachment = AsyncMock(return_value=att)
+
+    result = await signal_server.signal_attachment_resource("x")
+    content = result.contents[0]
+    assert content.content == b"jpeg bytes"
+    assert content.mime_type == "image/jpeg"
+
+
+# ── mcp_content_to_openai text-mime branch ───────────────
+
+
+def test_resource_text_blob_decodes_to_input_text():
+    """Text-mime blob resources decode UTF-8 and emit as input_text directly,
+    not as the {uri, mimeType, size} descriptor used for opaque binaries."""
+    body = b"# Notes\n\nThe agent should be able to read this."
+    block = _resource_block("workspace:///notes.md", body, "text/markdown")
+    parts = mcp_content_to_openai([block])
+    decoded = [p["text"] for p in parts if p.get("type") == "input_text"]
+    assert any("# Notes" in t for t in decoded)
+
+
+def test_resource_text_blob_invalid_utf8_falls_back_to_descriptor():
+    """If MIME claims text but bytes aren't valid UTF-8, emit the descriptor
+    rather than corrupting the input."""
+    import json as _json
+    block = _resource_block("workspace:///bad.txt", b"\xff\xfe\xfd not utf-8", "text/plain")
+    parts = mcp_content_to_openai([block])
+    text_part = next((p for p in parts if p.get("type") == "input_text"), None)
+    assert text_part is not None
+    payload = _json.loads(text_part["text"])
+    assert payload["uri"] == "workspace:///bad.txt"
