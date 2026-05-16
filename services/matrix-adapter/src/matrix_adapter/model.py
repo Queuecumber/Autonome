@@ -4,8 +4,9 @@ import io
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import mistune
@@ -21,17 +22,23 @@ from nio import (
     LoginResponse,
     MatrixRoom,
     MegolmEvent,
+    ProfileGetResponse,
     ReactionEvent,
     RoomEncryptedFile,
     RoomEncryptedImage,
+    RoomGetStateEventResponse,
     RoomMessageFile,
     RoomMessageImage,
     RoomMessageText,
+    RoomPutStateResponse,
+    RoomRedactResponse,
     RoomSendResponse,
     SyncResponse,
     ToDeviceError,
+    UnknownEvent,
 )
 from nio.crypto.attachments import decrypt_attachment
+from nio.events.room_events import RedactionEvent
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +48,48 @@ logger = logging.getLogger(__name__)
 _MARKDOWN = mistune.create_markdown(plugins=["strikethrough", "table", "url"])
 
 
+def _format_ts(ts_ms: int | None) -> str | None:
+    """Render a Matrix server timestamp (ms epoch) in the platform's
+    default local-time format, matching what time-mcp and the orchestrator
+    show the agent elsewhere."""
+    if ts_ms is None:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
+
+
+def _sender_dict(s: "Sender") -> dict:
+    return {"id": s.id, "name": s.name, "avatar": s.avatar_url}
+
+
+def _room_dict(r: "Room") -> dict:
+    return {
+        "id": r.id,
+        "name": r.name,
+        "encrypted": r.encrypted,
+        "member_count": r.member_count,
+        "pinned_event_ids": list(r.pinned_event_ids),
+    }
+
+
+
 @dataclass
 class Sender:
     id: str
     name: str | None = None
+    avatar_url: str | None = None
 
     def __post_init__(self):
         if not self.name:
             self.name = self.id
+
+
+@dataclass
+class UserProfile:
+    user_id: str
+    display_name: str | None = None
+    avatar_url: str | None = None
+    trust_status: Literal["verified", "partial", "unverified", "blacklisted", "unknown"] = "unknown"
+    power_level: int | None = None
 
 
 @dataclass
@@ -58,19 +99,21 @@ class Room:
     canonical_alias: str | None = None
     encrypted: bool = False
     member_count: int = 0
+    pinned_event_ids: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
         return self.display_name or self.canonical_alias or self.id
 
     @classmethod
-    def from_nio(cls, room: MatrixRoom) -> "Room":
+    def from_nio(cls, room: MatrixRoom, pinned_event_ids: list[str] | None = None) -> "Room":
         return cls(
             id=room.room_id,
             display_name=room.display_name,
             canonical_alias=room.canonical_alias,
             encrypted=room.encrypted,
             member_count=len(room.users or {}),
+            pinned_event_ids=list(pinned_event_ids or []),
         )
 
 
@@ -84,22 +127,46 @@ class Attachment:
 
 
 @dataclass
+class MessageRelation:
+    related_event_id: str
+    relation_type: Literal["m.thread", "m.replace", "m.in_reply_to"]
+
+
+def _parse_relation(relates_to: dict) -> MessageRelation | None:
+    """Extract a MessageRelation from an event's `m.relates_to` content.
+
+    Threads and edits put `event_id` at the top of `m.relates_to` alongside
+    `rel_type`. Replies use a different shape: `m.in_reply_to.event_id` with
+    no top-level `rel_type`.
+    """
+    rel_type = relates_to.get("rel_type")
+    if rel_type in ("m.thread", "m.replace") and relates_to.get("event_id"):
+        return MessageRelation(related_event_id=relates_to["event_id"], relation_type=rel_type)
+    reply_id = relates_to.get("m.in_reply_to", {}).get("event_id")
+    if reply_id:
+        return MessageRelation(related_event_id=reply_id, relation_type="m.in_reply_to")
+    return None
+
+
+@dataclass
 class Message:
     sender: Sender
     room: Room
     event_id: str
     text: str | None = None
     attachments: list[Attachment] = field(default_factory=list)
+    relation: MessageRelation | None = None
+    sent_at: str | None = None
+    verified: bool = False
+
 
     def to_event(self, source: str = "matrix") -> dict:
         metadata: dict = {
             "message_id": self.event_id,
-            "sender": self.sender.id,
-            "sender_name": self.sender.name,
-            "room_id": self.room.id,
-            "room_name": self.room.name,
-            "encrypted": self.room.encrypted,
-            "member_count": self.room.member_count,
+            "sender": _sender_dict(self.sender),
+            "room": _room_dict(self.room),
+            "sent_at": self.sent_at,
+            "verified": self.verified,
         }
         if self.attachments:
             metadata["attachments"] = [
@@ -111,6 +178,11 @@ class Message:
                 }
                 for att in self.attachments
             ]
+        if self.relation:
+            metadata["relation"] = {
+                "related_event_id": self.relation.related_event_id,
+                "relation_type": self.relation.relation_type,
+            }
         return {
             "source": source,
             "text": self.text or "",
@@ -125,22 +197,74 @@ class Reaction:
     event_id: str
     emoji: str
     target_event_id: str
+    sent_at: str | None = None
+    verified: bool = False
 
     def to_event(self, source: str = "matrix") -> dict:
         return {
             "source": source,
             "event_type": "reaction",
-            "text": json.dumps({"type": "reaction", "emoji": self.emoji, "target": self.target_event_id}),
+            "energy": "passive",
+            "text": json.dumps({"type": "reaction", "emoji": self.emoji, "target_event_id": self.target_event_id}),
             "metadata": {
                 "message_id": self.event_id,
-                "sender": self.sender.id,
-                "sender_name": self.sender.name,
-                "room_id": self.room.id,
-                "room_name": self.room.name,
-                "encrypted": self.room.encrypted,
+                "sender": _sender_dict(self.sender),
+                "room": _room_dict(self.room),
+                "sent_at": self.sent_at,
+                "verified": self.verified,
             },
         }
 
+@dataclass
+class Redaction:
+  sender: Sender
+  room: Room
+  target_event_id: str
+  reason: str | None
+  sent_at: str | None = None
+  verified: bool = False
+
+  def to_event(self, source: str = "matrix") -> dict:
+    return {
+        "source": source,
+        "event_type": "redaction",
+        "energy": "passive",
+        "text": json.dumps({"type": "redaction", "target_event_id": self.target_event_id, "reason": self.reason}),
+        "metadata": {
+            "sender": _sender_dict(self.sender),
+            "room": _room_dict(self.room),
+            "sent_at": self.sent_at,
+            "verified": self.verified,
+        },
+    }
+
+
+@dataclass
+class Pin:
+    sender: Sender
+    room: Room
+    target_event_id: str
+    pinned: bool
+    sent_at: str | None = None
+    verified: bool = False
+
+    def to_event(self, source: str = "matrix") -> dict:
+        kind = "pin" if self.pinned else "unpin"
+        return {
+            "source": source,
+            "event_type": kind,
+            "energy": "passive",
+            "text": json.dumps({
+                "type": kind,
+                "target_event_id": self.target_event_id,
+            }),
+            "metadata": {
+                "sender": _sender_dict(self.sender),
+                "room": _room_dict(self.room),
+                "sent_at": self.sent_at,
+                "verified": self.verified,
+            },
+        }
 
 class MatrixClient:
     """Unified client for Matrix — reading and writing."""
@@ -166,8 +290,9 @@ class MatrixClient:
             homeserver, user_id, device_id=device_id,
             store_path=store_path, config=config,
         )
-        self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
+        self._on_message: Callable[[Message | Reaction | Redaction | Pin], Awaitable[None]] | None = None
         self._synced_rooms: set[str] = set()
+        self._known_pins: dict[str, list[str]] = {}
 
         # Event type → handler dispatch table
         self._handlers: dict[type, Callable] = {
@@ -177,6 +302,8 @@ class MatrixClient:
             RoomMessageFile: self._on_media,
             RoomEncryptedFile: self._on_media,
             ReactionEvent: self._on_reaction,
+            RedactionEvent: self._on_redaction,
+            UnknownEvent: self._on_unknown,
         }
 
     # ── Auth ─────────────────────────────────────────────────
@@ -209,18 +336,15 @@ class MatrixClient:
                     "access_token": resp.access_token,
                 }))
 
-        await self._client.sync(timeout=10000)
-
-        for room_id in list(self._client.invited_rooms.keys()):
-            logger.info("Accepting pending invite to %s", room_id)
-            await self._client.join(room_id)
-
-        self._trust_all_devices()
-        logger.info("Ready: %d rooms", len(self._client.rooms))
+        # Don't sync here. The first sync (and any backlog from offline time)
+        # has to happen *after* listen() registers event callbacks — otherwise
+        # nio advances the sync token over those events without firing the
+        # handlers, and the backlog is lost. _handle_invite and _handle_sync
+        # cover the invite-accept and device-trust work via callbacks.
 
     # ── Listening ────────────────────────────────────────────
 
-    async def listen(self, on_message: Callable[[Message | Reaction], Awaitable[None]]) -> None:
+    async def listen(self, on_message: Callable[[Message | Reaction | Redaction | Pin], Awaitable[None]]) -> None:
         self._on_message = on_message
 
         self._client.add_response_callback(self._handle_sync, SyncResponse)
@@ -231,6 +355,8 @@ class MatrixClient:
         self._client.add_event_callback(self._handle_event, RoomMessageFile)
         self._client.add_event_callback(self._handle_event, RoomEncryptedFile)
         self._client.add_event_callback(self._handle_event, ReactionEvent)
+        self._client.add_event_callback(self._handle_event, RedactionEvent)
+        self._client.add_event_callback(self._handle_event, UnknownEvent)
         self._client.add_event_callback(self._handle_megolm, MegolmEvent)
         self._client.add_to_device_callback(self._handle_verification_start, KeyVerificationStart)
         self._client.add_to_device_callback(self._handle_verification_key, KeyVerificationKey)
@@ -248,58 +374,140 @@ class MatrixClient:
     # ── Generic event dispatch ───────────────────────────────
 
     async def _handle_event(self, room: MatrixRoom, event) -> None:
-        if not self._should_process(room, event.sender):
+        if self.allowed_rooms and room.room_id not in self.allowed_rooms:
+            return
+        # State events (currently UnknownEvent) need tracking regardless of
+        # sender so we keep _known_pins in sync with our own writes too.
+        # Timeline events from self are dropped — no point notifying ourselves.
+        if not isinstance(event, UnknownEvent) and event.sender == self.user_id:
             return
         handler = self._handlers.get(type(event))
         if handler:
             await handler(room, event)
 
-    def _should_process(self, room: MatrixRoom, sender: str) -> bool:
-        if sender == self.user_id:
-            return False
-        if self.allowed_rooms and room.room_id not in self.allowed_rooms:
-            return False
-        return True
-
     # ── Per-type handlers ────────────────────────────────────
 
-    async def _on_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
-        msg = Message(
-            sender=Sender(id=event.sender, name=room.user_name(event.sender)),
-            room=Room.from_nio(room),
+    def _room_model(self, room: MatrixRoom) -> Room:
+        return Room.from_nio(room, pinned_event_ids=self._known_pins.get(room.room_id, []))
+
+    def _sender(self, room: MatrixRoom, user_id: str) -> Sender:
+        return Sender(
+            id=user_id,
+            name=room.user_name(user_id),
+            avatar_url=room.avatar_url(user_id),
+        )
+
+    def _build_text(self, room: MatrixRoom, event: RoomMessageText) -> Message:
+        return Message(
+            sender=self._sender(room, event.sender),
+            room=self._room_model(room),
             event_id=event.event_id,
             text=event.body,
+            relation=_parse_relation(event.source.get("content", {}).get("m.relates_to", {})),
+            sent_at=_format_ts(event.server_timestamp),
+            verified=event.verified,
         )
+
+    def _build_media(self, room: MatrixRoom, event) -> Message:
+        attachment = self._extract_media(event)
+        return Message(
+            sender=self._sender(room, event.sender),
+            room=self._room_model(room),
+            event_id=event.event_id,
+            text=attachment.caption,
+            attachments=[attachment],
+            sent_at=_format_ts(event.server_timestamp),
+            verified=event.verified,
+        )
+
+    def _build_reaction(self, room: MatrixRoom, event: ReactionEvent) -> Reaction:
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        return Reaction(
+            sender=self._sender(room, event.sender),
+            room=self._room_model(room),
+            event_id=event.event_id,
+            emoji=relates_to.get("key", ""),
+            target_event_id=relates_to.get("event_id", ""),
+            sent_at=_format_ts(event.server_timestamp),
+            verified=event.verified,
+        )
+
+    def _build_redaction(self, room: MatrixRoom, event: RedactionEvent) -> Redaction:
+        return Redaction(
+            sender=self._sender(room, event.sender),
+            room=self._room_model(room),
+            target_event_id=event.redacts,
+            reason=event.reason,
+            sent_at=_format_ts(event.server_timestamp),
+            verified=event.verified,
+        )
+
+    async def _on_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
+        msg = self._build_text(room, event)
         logger.info("Received text in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
     async def _on_media(self, room: MatrixRoom, event) -> None:
-        attachment = self._extract_media(event)
-        msg = Message(
-            sender=Sender(id=event.sender, name=room.user_name(event.sender)),
-            room=Room.from_nio(room),
-            event_id=event.event_id,
-            text=attachment.caption,
-            attachments=[attachment],
-        )
+        msg = self._build_media(room, event)
         logger.info("Received media in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
     async def _on_reaction(self, room: MatrixRoom, event: ReactionEvent) -> None:
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        reaction = Reaction(
-            sender=Sender(id=event.sender, name=room.user_name(event.sender)),
-            room=Room.from_nio(room),
-            event_id=event.event_id,
-            emoji=relates_to.get("key", ""),
-            target_event_id=relates_to.get("event_id", ""),
-        )
+        reaction = self._build_reaction(room, event)
         logger.info("Received reaction in %s from %s: %s",
                     reaction.room.name, reaction.sender.name, reaction.emoji)
         if self._on_message:
             await self._on_message(reaction)
+
+    async def _on_redaction(self, room: MatrixRoom, event: RedactionEvent) -> None:
+        redaction = self._build_redaction(room, event)
+        logger.info("Received redaction of %s in %s from %s (%s)",
+                    redaction.target_event_id, redaction.room.name, redaction.sender.name, redaction.reason)
+        if self._on_message:
+            await self._on_message(redaction)
+
+    async def _on_unknown(self, room: MatrixRoom, event: UnknownEvent) -> None:
+        if event.type == "m.room.pinned_events":
+            await self._on_pinned_events(room, event)
+
+    async def _on_pinned_events(self, room: MatrixRoom, event: UnknownEvent) -> None:
+        # The pinned_events state event always carries the full current list,
+        # so we diff against the previously-seen set to recover add/remove.
+        # Suppress emit during the initial sync replay (room not yet in
+        # _synced_rooms — _handle_sync fills that *after* the first sync's
+        # events have been processed), so we don't flood with pin events
+        # for everything pinned before we started.
+        new_pins = event.source.get("content", {}).get("pinned", []) or []
+        old_set = set(self._known_pins.get(room.room_id, []))
+        new_set = set(new_pins)
+        self._known_pins[room.room_id] = new_pins
+        if room.room_id not in self._synced_rooms:
+            logger.info("pinned_events for %s during initial sync — seeding %d ids", room.room_id, len(new_pins))
+            return
+        logger.info("pinned_events for %s: old=%d new=%d sender=%s", room.room_id, len(old_set), len(new_set), event.sender)
+        if event.sender == self.user_id:
+            # We made the change ourselves — track state, skip emit.
+            return
+        added = new_set - old_set
+        removed = old_set - new_set
+        if not (added or removed):
+            return
+        sender = self._sender(room, event.sender)
+        room_model = self._room_model(room)
+        sent_at = _format_ts(getattr(event, "server_timestamp", None))
+        verified = getattr(event, "verified", False)
+        for event_id in added:
+            pin = Pin(sender=sender, room=room_model, target_event_id=event_id, pinned=True, sent_at=sent_at, verified=verified)
+            logger.info("Pin in %s by %s: %s", room_model.name, sender.name, event_id)
+            if self._on_message:
+                await self._on_message(pin)
+        for event_id in removed:
+            pin = Pin(sender=sender, room=room_model, target_event_id=event_id, pinned=False, sent_at=sent_at, verified=verified)
+            logger.info("Unpin in %s by %s: %s", room_model.name, sender.name, event_id)
+            if self._on_message:
+                await self._on_message(pin)
 
     # ── Sync / verification / invite callbacks ───────────────
 
@@ -394,22 +602,88 @@ class MatrixClient:
             raise RuntimeError(f"Matrix room_send failed: {resp}")
         return resp
 
-    async def send_message(self, room_id: str, text: str) -> str:
+    async def send_message(
+        self,
+        room_id: str,
+        text: str,
+        relation: MessageRelation | None = None,
+    ) -> str:
         html = _MARKDOWN(text).strip()
+        body, formatted = text, html
+        extra: dict = {}
+        if relation:
+            rid = relation.related_event_id
+            match relation.relation_type:
+                case "m.replace":
+                    extra["m.new_content"] = {
+                        "msgtype": "m.text",
+                        "body": text,
+                        "format": "org.matrix.custom.html",
+                        "formatted_body": html,
+                    }
+                    body, formatted = f"* {text}", f"* {html}"
+                    extra["m.relates_to"] = {"rel_type": "m.replace", "event_id": rid}
+                case "m.in_reply_to":
+                    extra["m.relates_to"] = {"m.in_reply_to": {"event_id": rid}}
+                case "m.thread":
+                    extra["m.relates_to"] = {"rel_type": "m.thread", "event_id": rid}
+                case _:
+                    raise ValueError(f"Unsupported relation_type: {relation.relation_type!r}")
         content: dict = {
             "msgtype": "m.text",
-            "body": text,
+            "body": body,
             "format": "org.matrix.custom.html",
-            "formatted_body": html,
+            "formatted_body": formatted,
+            **extra,
         }
         resp = await self._room_send(room_id, "m.room.message", content)
         return resp.event_id
+
+    async def redact_message(self, room_id: str, event_id: str, reason: str | None = None) -> None:
+        resp = await self._client.room_redact(room_id, event_id, reason=reason)
+        if not isinstance(resp, RoomRedactResponse):
+            raise RuntimeError(f"Matrix room_redact failed: {resp}")
 
     async def send_reaction(self, room_id: str, event_id: str, emoji: str) -> None:
         await self._room_send(
             room_id, "m.reaction",
             {"m.relates_to": {"rel_type": "m.annotation", "event_id": event_id, "key": emoji}},
         )
+
+    async def pin_message(self, room_id: str, event_id: str) -> None:
+        await self._update_pinned(room_id, add=event_id)
+
+    async def unpin_message(self, room_id: str, event_id: str) -> None:
+        await self._update_pinned(room_id, remove=event_id)
+
+    async def _update_pinned(
+        self, room_id: str, add: str | None = None, remove: str | None = None
+    ) -> None:
+        # Fetch authoritative state before writing — `_known_pins` may be stale
+        # if a concurrent client edited the list since our last sync.
+        current = await self._get_pinned_events(room_id)
+        new_list = list(current)
+        if add and add not in new_list:
+            new_list.append(add)
+        if remove and remove in new_list:
+            new_list = [e for e in new_list if e != remove]
+        if new_list == current:
+            return
+        resp = await self._client.room_put_state(
+            room_id, "m.room.pinned_events", {"pinned": new_list},
+        )
+        if not isinstance(resp, RoomPutStateResponse):
+            raise RuntimeError(f"Matrix room_put_state(pinned_events) failed: {resp}")
+        # Optimistically update local cache so a slow sync doesn't make the next
+        # write race against stale state.
+        self._known_pins[room_id] = new_list
+
+    async def _get_pinned_events(self, room_id: str) -> list[str]:
+        resp = await self._client.room_get_state_event(room_id, "m.room.pinned_events", "")
+        if not isinstance(resp, RoomGetStateEventResponse):
+            # Room has no pinned_events state event yet — treat as empty.
+            return []
+        return list(resp.content.get("pinned", []) or [])
 
     async def send_typing(self, room_id: str, typing: bool = True, timeout: int = 10000) -> None:
         await self._client.room_typing(room_id, typing, timeout=timeout)
@@ -434,6 +708,62 @@ class MatrixClient:
         if k:
             return decrypt_attachment(resp.body, k, hash, iv)
         return resp.body
+
+    async def get_user_profile(self, user_id: str, room_id: str | None = None) -> UserProfile:
+        """Fetch display name, avatar, device-trust status, and (if a
+        room_id is given) the user's power level in that room."""
+        resp = await self._client.profile_get(user_id)
+        if not isinstance(resp, ProfileGetResponse):
+            raise RuntimeError(f"Matrix profile_get({user_id}) failed: {resp}")
+
+        power_level: int | None = None
+        if room_id:
+            room = self._client.rooms.get(room_id)
+            if room is not None and room.power_levels is not None:
+                power_level = room.power_levels.get_user_level(user_id)
+
+        return UserProfile(
+            user_id=user_id,
+            display_name=resp.displayname,
+            avatar_url=resp.avatar_url,
+            trust_status=self._compute_trust_status(user_id),
+            power_level=power_level,
+        )
+
+    def _compute_trust_status(self, user_id: str) -> str:
+        devices = list(self._client.device_store.active_user_devices(user_id))
+        if not devices:
+            return "unknown"
+        if any(d.blacklisted for d in devices):
+            return "blacklisted"
+        if all(d.verified for d in devices):
+            return "verified"
+        if any(d.verified for d in devices):
+            return "partial"
+        return "unverified"
+
+    async def get_message(self, room_id: str, event_id: str) -> Message:
+        """Fetch a message by id and return it as a Message dataclass.
+
+        Raises if the event isn't a message we can render — encrypted
+        messages we lack the key for, reactions, redactions, state events."""
+        resp = await self._client.room_get_event(room_id, event_id)
+        event = getattr(resp, "event", None)
+        if event is None:
+            raise RuntimeError(f"Matrix room_get_event({event_id}) failed: {resp}")
+
+        if isinstance(event, MegolmEvent):
+            raise RuntimeError(f"Message {event_id} is encrypted and cannot be decrypted")
+
+        room = self._client.rooms.get(room_id)
+        if room is None:
+            raise RuntimeError(f"Room {room_id} not in client state")
+
+        if isinstance(event, RoomMessageText):
+            return self._build_text(room, event)
+        if isinstance(event, (RoomMessageImage, RoomMessageFile, RoomEncryptedImage, RoomEncryptedFile)):
+            return self._build_media(room, event)
+        raise RuntimeError(f"Event {event_id} is not a message (type={type(event).__name__})")
 
     async def _upload(
         self, data: bytes, content_type: str, filename: str, encrypt: bool = False
