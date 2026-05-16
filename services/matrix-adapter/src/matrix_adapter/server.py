@@ -1,14 +1,13 @@
 """Matrix adapter — MCP interface + inbound event forwarding."""
 
 import asyncio
-import base64
 import logging
 import os
 
 import filetype
 import httpx
 from fastmcp import FastMCP
-from mcp.types import ImageContent, TextContent
+from fastmcp.resources import ResourceContent, ResourceResult
 from pydantic import Base64Bytes
 
 from matrix_adapter.model import MatrixClient, Message, Reaction, Sender
@@ -88,8 +87,8 @@ Note that, as usual, the PERSONALITY.md takes precedence over the general tips h
 
 ## Attachments
 
-When a message has attachments, the metadata includes attachment URLs. To view an attachment,
-call get_attachment with the mxc:// URL.
+When a message has attachments, the metadata includes `mxc://...` URIs. These are MCP
+resources — read them with `resources_read` to see the content.
 
 ## Groups
 
@@ -210,22 +209,14 @@ async def get_room_members(room_id: str) -> list[Sender]:
     return client.get_room_members(room_id)
 
 
-@mcp.tool
-async def get_attachment(mxc_url: str) -> ImageContent | TextContent:
-    """Fetch a Matrix attachment.
-
-    Args:
-        mxc_url: Matrix content URI (e.g. `mxc://server/abc123`) — taken
-            from the `attachments` field of an incoming event's metadata.
-
-    Returns:
-        Image content for images, text descriptor otherwise.
-    """
-    data, _ = await client.download_attachment(mxc_url)
-    kind = filetype.guess(data)
-    if kind and kind.mime.startswith("image/"):
-        return ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType=kind.mime)
-    return TextContent(type="text", text=f"[attachment: {kind.mime if kind else 'unknown'}, {len(data)} bytes]")
+@mcp.resource("mxc://{server}/{media_id}{?k,iv,hash,mime}")
+async def mxc_resource(
+    server: str, media_id: str,
+    k: str = "", iv: str = "", hash: str = "", mime: str = "",
+) -> ResourceResult:
+    """Serve `mxc://...` URIs as MCP resources."""
+    data = await client.download_attachment(server, media_id, k=k, iv=iv, hash=hash)
+    return ResourceResult([ResourceContent(data, mime_type=mime or "application/octet-stream")])
 
 
 @mcp.tool

@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import mistune
 from nio import (
@@ -30,6 +31,7 @@ from nio import (
     SyncResponse,
     ToDeviceError,
 )
+from nio.crypto.attachments import decrypt_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +167,6 @@ class MatrixClient:
             store_path=store_path, config=config,
         )
         self._on_message: Callable[[Message | Reaction], Awaitable[None]] | None = None
-        self._encryption_info: dict[str, dict] = {}
         self._synced_rooms: set[str] = set()
 
         # Event type → handler dispatch table
@@ -356,17 +357,16 @@ class MatrixClient:
         content = getattr(event, "source", {}).get("content", {})
         info = content.get("info", {})
 
+        params = {"mime": info.get("mimetype", "application/octet-stream")}
         file_info = content.get("file")
         if file_info:
-            url = file_info.get("url", "")
-            key_info = file_info.get("key", {})
-            self._encryption_info[url] = {
-                "key": key_info.get("k", ""),
-                "iv": file_info.get("iv", ""),
-                "hash": file_info.get("hashes", {}).get("sha256", ""),
-            }
-        else:
-            url = event.url or ""
+            key = file_info.get("key") or {}
+            hashes = file_info.get("hashes") or {}
+            params["k"] = key.get("k", "")
+            params["iv"] = file_info.get("iv", "")
+            params["hash"] = hashes.get("sha256", "")
+        parts = urlsplit(event.url)
+        url = urlunsplit(parts._replace(query=urlencode({k: v for k, v in params.items() if v})))
 
         top_filename = content.get("filename") or info.get("filename")
         if top_filename and top_filename != event.body:
@@ -425,15 +425,15 @@ class MatrixClient:
             return []
         return [Sender(id=uid, name=user.display_name) for uid, user in (room.users or {}).items()]
 
-    async def download_attachment(self, mxc_url: str) -> tuple[bytes, str | None]:
-        resp = await self._client.download(mxc_url)
-        data = resp.body
-        content_type = getattr(resp, "content_type", None)
-        enc = self._encryption_info.pop(mxc_url, None)
-        if enc and enc["key"]:
-            from nio.crypto.attachments import decrypt_attachment
-            data = decrypt_attachment(data, enc["key"], enc["hash"], enc["iv"])
-        return data, content_type
+    async def download_attachment(
+        self, server: str, media_id: str, *,
+        k: str = "", iv: str = "", hash: str = "",
+    ) -> bytes:
+        """Download (and decrypt, if applicable) a Matrix attachment."""
+        resp = await self._client.download(f"mxc://{server}/{media_id}")
+        if k:
+            return decrypt_attachment(resp.body, k, hash, iv)
+        return resp.body
 
     async def _upload(
         self, data: bytes, content_type: str, filename: str, encrypt: bool = False

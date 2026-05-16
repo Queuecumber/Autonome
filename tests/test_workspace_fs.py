@@ -1,7 +1,8 @@
-"""Tests for workspace filesystem MCP server."""
+"""Tests for workspace filesystem MCP server.
 
-import os
-from pathlib import Path
+Reads are exposed as resources at `workspace:///{path}`. Writes go through
+`write_file(path, data)`. Discovery via `list_directory` and `search_files`.
+"""
 
 import pytest
 
@@ -16,39 +17,81 @@ def workspace_server(tmp_workspace, monkeypatch):
     return mod
 
 
-def test_read_file(workspace_server, tmp_workspace):
-    result = workspace_server.read_file("SOUL.md")
-    # Text files now come back as a TextContent block, not a File dataclass.
-    assert "I am a test agent" in result.text
-    assert result.type == "text"
+# ── workspace:/// resource (reads) ───────────────────────
+
+
+def test_read_text_file(workspace_server, tmp_workspace):
+    result = workspace_server.workspace_resource("SOUL.md")
+    content = result.contents[0]
+    assert isinstance(content.content, bytes)
+    assert b"I am a test agent" in content.content
+    assert content.mime_type.startswith("text/")
+
+
+def test_read_nested_text_file(workspace_server, tmp_workspace):
+    (tmp_workspace / "memory" / "2026-05-06.md").write_text("# Today\n")
+    result = workspace_server.workspace_resource("memory/2026-05-06.md")
+    assert b"Today" in result.contents[0].content
+
+
+def test_read_binary_file(workspace_server, tmp_workspace):
+    png_magic = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    (tmp_workspace / "icon.png").write_bytes(png_magic)
+    result = workspace_server.workspace_resource("icon.png")
+    content = result.contents[0]
+    assert isinstance(content.content, bytes)
+    assert content.content.startswith(b"\x89PNG")
+    assert content.mime_type == "image/png"
 
 
 def test_read_file_not_found(workspace_server):
     with pytest.raises(FileNotFoundError):
-        workspace_server.read_file("nonexistent.md")
+        workspace_server.workspace_resource("nonexistent.md")
 
 
-def test_read_file_traversal(workspace_server):
+def test_read_directory_raises(workspace_server, tmp_workspace):
+    (tmp_workspace / "subdir").mkdir()
+    with pytest.raises(IsADirectoryError):
+        workspace_server.workspace_resource("subdir")
+
+
+def test_read_path_traversal(workspace_server):
     with pytest.raises(ValueError, match="traversal"):
-        workspace_server.read_file("../../etc/passwd")
+        workspace_server.workspace_resource("../../etc/passwd")
 
 
-def test_write_file(workspace_server, tmp_workspace):
-    from workspace_fs.server import File
-    result = workspace_server.write_file("test.txt", File(content_type="text/plain", data="hello world"))
-    assert "11 chars" in result
+# ── write_file (flat) ────────────────────────────────────
+
+
+def test_write_text(workspace_server, tmp_workspace):
+    result = workspace_server.write_file("test.txt", data="hello world")
+    assert "11 bytes" in result
     assert (tmp_workspace / "test.txt").read_text() == "hello world"
 
 
-def test_write_file_creates_parents(workspace_server, tmp_workspace):
-    from workspace_fs.server import File
-    workspace_server.write_file("subdir/deep/test.txt", File(content_type="text/plain", data="nested"))
-    assert (tmp_workspace / "subdir" / "deep" / "test.txt").read_text() == "nested"
+def test_write_binary_from_bytes(workspace_server, tmp_workspace):
+    raw = b"\x89PNG\r\n\x1a\n"
+    workspace_server.write_file("icon.png", data=raw)
+    assert (tmp_workspace / "icon.png").read_bytes() == raw
 
 
-def test_write_file_traversal(workspace_server):
+def test_write_creates_parents(workspace_server, tmp_workspace):
+    workspace_server.write_file("deep/nested/test.txt", data="nested")
+    assert (tmp_workspace / "deep" / "nested" / "test.txt").read_text() == "nested"
+
+
+def test_write_traversal(workspace_server):
     with pytest.raises(ValueError, match="traversal"):
-        workspace_server.write_file("../../evil.txt", "bad")
+        workspace_server.write_file("../../evil.txt", data="bad")
+
+
+def test_write_overwrites(workspace_server, tmp_workspace):
+    workspace_server.write_file("note.txt", data="first")
+    workspace_server.write_file("note.txt", data="second")
+    assert (tmp_workspace / "note.txt").read_text() == "second"
+
+
+# ── list_directory ───────────────────────────────────────
 
 
 def test_list_directory(workspace_server):
@@ -63,6 +106,9 @@ def test_list_directory_subdir(workspace_server, tmp_workspace):
     assert any("2026-03-18.md" in item for item in result)
 
 
+# ── search_files ─────────────────────────────────────────
+
+
 def test_search_files(workspace_server):
     result = workspace_server.search_files("*.md")
     assert any("SOUL.md" in item for item in result)
@@ -71,7 +117,7 @@ def test_search_files(workspace_server):
 
 def test_search_files_recursive(workspace_server, tmp_workspace):
     (tmp_workspace / "memory" / "daily.md").write_text("# Daily\n")
-    result = workspace_server.search_files("*.md")
+    result = workspace_server.search_files("**/*.md")
     assert any("daily.md" in item for item in result)
 
 

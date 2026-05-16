@@ -14,7 +14,7 @@ import os
 
 import httpx
 from fastmcp import FastMCP
-from mcp.types import ImageContent, TextContent
+from fastmcp.resources import ResourceContent, ResourceResult
 from pydantic import Base64Bytes
 
 from signal_adapter.model import SignalClient, Message, Reaction
@@ -34,8 +34,8 @@ mcp = FastMCP("signal", instructions=(
     "from the event metadata. "
     "When you receive a message, send a read_receipt to acknowledge it, then "
     "start the typing_indicator before composing your response. "
-    "When a message has attachments, the metadata includes attachment IDs. "
-    "To view an attachment, call get_attachment with the attachment ID."
+    "When a message has attachments, the metadata includes `signal:///attachment/{id}` "
+    "URIs. These are MCP resources — read them with `resources_read` to see the content."
 ))
 
 
@@ -127,20 +127,16 @@ async def typing_indicator(recipient: str, stop: bool = False) -> None:
     await client.set_typing(recipient, stop=stop)
 
 
-@mcp.tool
-async def get_attachment(attachment_id: str) -> ImageContent | TextContent:
-    """Fetch a Signal attachment.
+@mcp.resource("signal:///attachment/{attachment_id}")
+async def signal_attachment_resource(attachment_id: str) -> ResourceResult:
+    """Serve Signal attachments as MCP resources.
 
     Args:
         attachment_id: The attachment id from incoming event metadata.
-
-    Returns:
-        Image content for images, text descriptor otherwise.
     """
     att = await client.fetch_attachment(attachment_id)
-    if att.content_type and att.content_type.startswith("image/"):
-        return ImageContent(type="image", data=att.content_base64, mimeType=att.content_type)
-    return TextContent(type="text", text=f"[attachment: {att.content_type}, id={att.id}]")
+    data = base64.b64decode(att.content_base64)
+    return ResourceResult([ResourceContent(data, mime_type=att.content_type or "application/octet-stream")])
 
 
 @mcp.tool

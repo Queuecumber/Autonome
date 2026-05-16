@@ -45,7 +45,11 @@ class Message:
         }
         if self.attachments:
             metadata["attachments"] = [
-                {"id": att.id, "content_type": att.content_type, "filename": att.filename}
+                {
+                    "url": f"signal:///attachment/{att.id}",
+                    "content_type": att.content_type,
+                    "filename": att.filename,
+                }
                 for att in self.attachments
             ]
         return {

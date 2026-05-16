@@ -5,8 +5,9 @@ Covers:
   shared-object identity across ref-reuse sites).
 - rewrite_binary_params: jsonpath-based discovery, in-place schema rewrite
   (format → "string", description added), and BinaryParam emission.
-- resolve_pointer_args: pointer:// → base64 substitution at the positions
-  BinaryParam identifies. Non-pointers pass through. Expired raises.
+- resolve_uri_args: URI → base64 substitution at the positions BinaryParam
+  identifies, dispatching by scheme through an async resolver. Non-URI
+  values pass through. Resolver errors propagate.
 - BinaryStore: save/load round-trip, filename preservation, collision
   suffix, GC retention.
 """
@@ -14,6 +15,7 @@ Covers:
 import base64
 import os
 import time
+from urllib.parse import urlparse
 
 import pytest
 
@@ -22,13 +24,36 @@ from session_manager.mcp import (
     POINTER_PREFIX,
     BinaryParam,
     inline_refs,
-    resolve_pointer_args,
+    resolve_uri_args,
     rewrite_binary_params,
 )
 
 
 def _ptr(pointer: str) -> str:
     return f"{POINTER_PREFIX}{pointer}"
+
+
+def _make_resolver(store: BinaryStore):
+    """Build an async URI resolver that handles pointer:// from a BinaryStore.
+
+    Mirrors the orchestrator's runtime resolver shape — takes a URI, returns
+    bytes — but only knows the pointer scheme. Tests that exercise other
+    schemes can wrap this to add them.
+    """
+    async def resolve(uri: str) -> bytes:
+        scheme = urlparse(uri).scheme
+        if scheme != "pointer":
+            raise ValueError(f"unknown scheme {scheme!r} in {uri!r}")
+        pointer_id = uri[len(POINTER_PREFIX):]
+        try:
+            content, _ = store.load(pointer_id)
+        except FileNotFoundError:
+            raise ValueError(
+                f"Pointer {pointer_id!r} not found — it may have been "
+                "garbage-collected."
+            )
+        return content
+    return resolve
 
 
 HELLO_B64 = base64.b64encode(b"hello world").decode()
@@ -63,7 +88,7 @@ def test_single_binary_field_all_formats(fmt):
     # Schema rewritten in place.
     node = schema["properties"]["data"]
     assert node["format"] == "string"
-    assert "Pointer" in node["description"]
+    assert "Resource URI" in node["description"]
 
 
 def test_multiple_binary_fields_top_level():
@@ -400,56 +425,63 @@ def _save_hello(store: BinaryStore, filename: str = "hello.txt") -> str:
     return _ptr(pointer_id)
 
 
-def _setup(schema: dict, args: dict, store: BinaryStore) -> tuple[dict, dict]:
+async def _setup(schema: dict, args: dict, store: BinaryStore) -> tuple[dict, dict]:
     """Run the full pipeline: inline → rewrite → resolve."""
     resolved_schema = inline_refs(schema)
     params = rewrite_binary_params(resolved_schema)
-    resolved_args = resolve_pointer_args(args, params, store)
+    resolved_args = await resolve_uri_args(args, params, _make_resolver(store))
     return resolved_schema, resolved_args
 
 
-def test_resolve_simple_string_pointer(store):
+async def test_resolve_simple_string_pointer(store):
     pointer = _save_hello(store)
     schema = {"type": "object", "properties": {"data": {"type": "string", "format": "binary"}}}
-    _, out = _setup(schema, {"data": pointer}, store)
+    _, out = await _setup(schema, {"data": pointer}, store)
     assert out == {"data": HELLO_B64}
 
 
-def test_resolve_passes_through_unprefixed_values(store):
+async def test_resolve_passes_through_unprefixed_values(store):
     _save_hello(store, filename="hello.txt")
     schema = {"type": "object", "properties": {"data": {"type": "string", "format": "binary"}}}
-    _, out = _setup(schema, {"data": "hello.txt"}, store)  # no prefix
+    _, out = await _setup(schema, {"data": "hello.txt"}, store)  # no scheme
     assert out == {"data": "hello.txt"}
 
 
-def test_resolve_does_not_mutate_input(store):
+async def test_resolve_does_not_mutate_input(store):
     pointer = _save_hello(store)
     schema = {"type": "object", "properties": {"data": {"type": "string", "format": "binary"}}}
     args = {"data": pointer}
     snapshot = {"data": pointer}
-    _setup(schema, args, store)
+    await _setup(schema, args, store)
     assert args == snapshot
 
 
-def test_resolve_expired_pointer_raises(store):
+async def test_resolve_expired_pointer_raises(store):
     schema = {"type": "object", "properties": {"data": {"type": "string", "format": "binary"}}}
     args = {"data": _ptr("gone.txt")}
     with pytest.raises(ValueError, match="not found"):
-        _setup(schema, args, store)
+        await _setup(schema, args, store)
 
 
-def test_resolve_none_in_optional_passes_through(store):
+async def test_resolve_unknown_scheme_raises(store):
+    schema = {"type": "object", "properties": {"data": {"type": "string", "format": "binary"}}}
+    args = {"data": "mxc://server/abc"}
+    with pytest.raises(ValueError, match="unknown scheme"):
+        await _setup(schema, args, store)
+
+
+async def test_resolve_none_in_optional_passes_through(store):
     schema = {
         "type": "object",
         "properties": {
             "avatar": {"anyOf": [{"type": "string", "format": "binary"}, {"type": "null"}]},
         },
     }
-    _, out = _setup(schema, {"avatar": None}, store)
+    _, out = await _setup(schema, {"avatar": None}, store)
     assert out == {"avatar": None}
 
 
-def test_resolve_list_of_pointers(store):
+async def test_resolve_list_of_pointers(store):
     p1 = _save_hello(store, "a.txt")
     p2 = _save_hello(store, "b.txt")
     schema = {
@@ -458,11 +490,11 @@ def test_resolve_list_of_pointers(store):
             "blobs": {"type": "array", "items": {"type": "string", "format": "binary"}},
         },
     }
-    _, out = _setup(schema, {"blobs": [p1, p2]}, store)
+    _, out = await _setup(schema, {"blobs": [p1, p2]}, store)
     assert out == {"blobs": [HELLO_B64, HELLO_B64]}
 
 
-def test_resolve_nested_deep_pointer(store):
+async def test_resolve_nested_deep_pointer(store):
     pointer = _save_hello(store)
     schema = {
         "properties": {
@@ -481,11 +513,11 @@ def test_resolve_nested_deep_pointer(store):
             },
         },
     }
-    _, out = _setup(schema, {"input": {"a": {"b": {"c": pointer}}}}, store)
+    _, out = await _setup(schema, {"input": {"a": {"b": {"c": pointer}}}}, store)
     assert out["input"]["a"]["b"]["c"] == HELLO_B64
 
 
-def test_resolve_array_of_objects(store):
+async def test_resolve_array_of_objects(store):
     pointer = _save_hello(store)
     schema = {
         "type": "object",
@@ -502,7 +534,7 @@ def test_resolve_array_of_objects(store):
             },
         },
     }
-    _, out = _setup(
+    _, out = await _setup(
         schema,
         {"files": [{"name": "x", "data": pointer}, {"name": "y", "data": pointer}]},
         store,
@@ -512,7 +544,7 @@ def test_resolve_array_of_objects(store):
     assert out["files"][0]["name"] == "x"
 
 
-def test_resolve_dict_of_bytes(store):
+async def test_resolve_dict_of_bytes(store):
     p1 = _save_hello(store, "a.txt")
     p2 = _save_hello(store, "b.txt")
     schema = {
@@ -524,11 +556,11 @@ def test_resolve_dict_of_bytes(store):
             },
         },
     }
-    _, out = _setup(schema, {"files": {"alpha": p1, "beta": p2}}, store)
+    _, out = await _setup(schema, {"files": {"alpha": p1, "beta": p2}}, store)
     assert out == {"files": {"alpha": HELLO_B64, "beta": HELLO_B64}}
 
 
-def test_resolve_tuple_with_mixed_binaries(store):
+async def test_resolve_tuple_with_mixed_binaries(store):
     p1 = _save_hello(store, "a.txt")
     p2 = _save_hello(store, "b.txt")
     schema = {
@@ -545,11 +577,11 @@ def test_resolve_tuple_with_mixed_binaries(store):
             },
         },
     }
-    _, out = _setup(schema, {"tuple": [42, p1, "literal", p2]}, store)
+    _, out = await _setup(schema, {"tuple": [42, p1, "literal", p2]}, store)
     assert out["tuple"] == [42, HELLO_B64, "literal", HELLO_B64]
 
 
-def test_resolve_array_of_arrays(store):
+async def test_resolve_array_of_arrays(store):
     p1 = _save_hello(store, "a.txt")
     p2 = _save_hello(store, "b.txt")
     p3 = _save_hello(store, "c.txt")
@@ -562,11 +594,11 @@ def test_resolve_array_of_arrays(store):
             },
         },
     }
-    _, out = _setup(schema, {"grid": [[p1, p2], [p3], []]}, store)
+    _, out = await _setup(schema, {"grid": [[p1, p2], [p3], []]}, store)
     assert out == {"grid": [[HELLO_B64, HELLO_B64], [HELLO_B64], []]}
 
 
-def test_resolve_ignores_unrelated_fields(store):
+async def test_resolve_ignores_unrelated_fields(store):
     _save_hello(store)
     schema = {
         "type": "object",
@@ -576,7 +608,7 @@ def test_resolve_ignores_unrelated_fields(store):
         },
     }
     # `description` has a pointer-looking value, but its schema is not binary.
-    _, out = _setup(
+    _, out = await _setup(
         schema,
         {"data": _save_hello(store), "description": _ptr("hello.txt")},
         store,
@@ -584,7 +616,7 @@ def test_resolve_ignores_unrelated_fields(store):
     assert out["description"] == _ptr("hello.txt")  # passed through unchanged
 
 
-def test_resolve_ref_chain_heavy_reuse(store):
+async def test_resolve_ref_chain_heavy_reuse(store):
     """The nasty case: Inner referenced via multiple wrappers, plus
     direct dict-of-bytes, tuple, and array-of-array."""
     p = _save_hello(store)
@@ -621,7 +653,7 @@ def test_resolve_ref_chain_heavy_reuse(store):
         },
         "dict_of_bytes": {"x": p, "y": p},
     }
-    _, out = _setup(schema, args, store)
+    _, out = await _setup(schema, args, store)
     assert out["middle"]["inner"]["blob"] == HELLO_B64
     assert out["middle"]["inner"]["name"] == "a"
     assert out["middle"]["inner_list"][0]["blob"] == HELLO_B64

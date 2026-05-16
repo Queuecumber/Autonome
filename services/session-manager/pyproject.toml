@@ -13,6 +13,7 @@ dependencies = [
     "jsonref>=1.1",
     "python-jsonpath>=1.3",
     "exifread>=3.0",
+    "fastmcp>=2.0",
 ]
 
 [build-system]

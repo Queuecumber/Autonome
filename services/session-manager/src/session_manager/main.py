@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from session_manager import platform_mcp
 from session_manager.event import Event
 from session_manager.orchestrator import SessionOrchestrator
 
@@ -28,14 +29,26 @@ async def startup():
 
     session_dir = Path(config.get("session", {}).get("store", "./sessions"))
     port = int(os.environ.get("SESSION_MANAGER_PORT", "5000"))
+    platform_mcp_port = int(os.environ.get("PLATFORM_MCP_PORT", "5001"))
 
     orchestrator = SessionOrchestrator(
         config=config,
         session_dir=session_dir,
     )
 
+    platform_mcp.binary_store = orchestrator.binaries
+    platform_mcp.orchestrator = orchestrator
+    asyncio.create_task(
+        platform_mcp.mcp.run_async(transport="http", host="0.0.0.0", port=platform_mcp_port),
+        name="platform-mcp",
+    )
+    # Give the MCP server a moment to bind before the orchestrator tries
+    # to connect to it.
+    await asyncio.sleep(0.5)
+
     # Connect to MCP servers (retry until available)
-    mcp_urls = config.get("mcp_servers", {})
+    mcp_urls = dict(config.get("mcp_servers", {}) or {})
+    mcp_urls.setdefault("session", f"http://localhost:{platform_mcp_port}/mcp")
     max_retries = 30
     for attempt in range(max_retries):
         try:

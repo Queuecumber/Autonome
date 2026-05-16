@@ -1,24 +1,18 @@
 """Workspace filesystem MCP server.
 
-Exposes read_file, write_file, list_directory, search_files scoped to a
-workspace root. Path traversal outside the workspace is rejected.
+Exposes a `workspace:///{path}` resource for reads, plus write_file,
+list_directory, search_files tools. Path traversal outside the workspace
+is rejected.
 """
 
-import base64
 import mimetypes
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 import filetype
 from fastmcp import FastMCP
-from mcp.types import (
-    AudioContent,
-    BlobResourceContents,
-    EmbeddedResource,
-    ImageContent,
-    TextContent,
-)
+from fastmcp.resources import ResourceContent, ResourceResult
+from pydantic import Base64Bytes
 
 WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
@@ -26,18 +20,17 @@ mcp = FastMCP("workspace-fs", instructions=(
   """
 # Workspace Tools
 
-The workspace tools allow file access to your personal files, you can store anything you want in these
-files.
+The workspace tools give you access to your personal files. Store anything
+you want here.
+
+Files are exposed as MCP resources at `workspace:///{path}` URIs. Use
+`resources_read("workspace:///path/to/file.ext")` to view content. Pass these URIs as
+binary arguments to other tools to forward content without reading it
+into your context first.
+
+Use `list_directory` and `search_files` to discover what's there.
 """
 ))
-
-
-@dataclass
-class File:
-    """A file's content with its MIME type and path."""
-    content_type: str
-    data: str
-    path: str | None = None
 
 
 def _safe_resolve(path: str) -> Path:
@@ -48,32 +41,16 @@ def _safe_resolve(path: str) -> Path:
     return target
 
 
-TEXT_TYPES = {"application/json", "application/xml", "application/yaml", "application/x-yaml"}
-
-
-def _is_text_type(content_type: str) -> bool:
-    """Check if a MIME type represents text content."""
-    return content_type.startswith("text/") or content_type in TEXT_TYPES
-
-
-@mcp.tool
-def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | TextContent:
-    """Read a file from the workspace.
-
-    Return shape depends on the detected content:
-    - Images come back so you can see them.
-    - Audio comes back as audio content.
-    - Text files (text/*, JSON, XML, YAML) come back as text.
-    - Other binaries (PDFs, zips, etc.) come back as an embedded resource
-      that the session-manager persists as a pointer you can forward to
-      other tools.
+@mcp.resource("workspace:///{path*}")
+def workspace_resource(path: str) -> ResourceResult:
+    """Serve workspace files as MCP resources at `workspace:///{path}`.
 
     Args:
-        path: Relative to the workspace root (e.g. `Pictures/cat.jpg`).
-            Traversal outside the workspace is rejected.
+        path: Multi-segment path relative to workspace root (e.g.
+            `Pictures/cat.jpg`).
 
     Returns:
-        The appropriate content block per the file's detected type.
+        A `ResourceResult` with the detected mime.
 
     Raises:
         ValueError: If the path attempts traversal outside the workspace.
@@ -88,32 +65,12 @@ def read_file(path: str) -> ImageContent | AudioContent | EmbeddedResource | Tex
 
     raw = target.read_bytes()
     kind = filetype.guess(raw)
-
-    if kind and kind.mime.startswith("image/"):
-        return ImageContent(type="image", data=base64.b64encode(raw).decode(), mimeType=kind.mime)
-    if kind and kind.mime.startswith("audio/"):
-        return AudioContent(type="audio", data=base64.b64encode(raw).decode(), mimeType=kind.mime)
-
-    content_type = (kind.mime if kind else None) or mimetypes.guess_type(str(target))[0] or "text/plain"
-
-    if _is_text_type(content_type):
-        try:
-            return TextContent(type="text", text=raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            pass
-
-    return EmbeddedResource(
-        type="resource",
-        resource=BlobResourceContents(
-            uri=f"file:///{path}",
-            mimeType=content_type,
-            blob=base64.b64encode(raw).decode(),
-        ),
-    )
+    content_type = (kind.mime if kind else None) or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return ResourceResult([ResourceContent(raw, mime_type=content_type)])
 
 
 @mcp.tool
-def write_file(path: str, file: File) -> str:
+def write_file(path: str, data: str | Base64Bytes) -> str:
     """Write a file to the workspace.
 
     Creates parent directories if needed. Overwrites any existing file
@@ -121,23 +78,19 @@ def write_file(path: str, file: File) -> str:
 
     Args:
         path: Where to write, relative to the workspace root.
-        file: The file to write — its content type and contents.
+        data: Text contents, or base64-encoded bytes for binary.
 
     Returns:
-        Short confirmation with byte/char count and the path written.
+        Short confirmation with byte count and the path written.
 
     Raises:
         ValueError: If the path attempts traversal outside the workspace.
     """
     target = _safe_resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if _is_text_type(file.content_type):
-        target.write_text(file.data)
-        return f"Wrote {len(file.data)} chars to {path}"
-    else:
-        raw = base64.b64decode(file.data)
-        target.write_bytes(raw)
-        return f"Wrote {len(raw)} bytes to {path}"
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    target.write_bytes(raw)
+    return f"Wrote {len(raw)} bytes to {path}"
 
 
 @mcp.tool

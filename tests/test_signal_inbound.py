@@ -80,4 +80,4 @@ async def test_on_message_attachment(setup_signal):
     assert event["text"] == "Check this"
     assert len(event["metadata"]["attachments"]) == 1
     assert event["metadata"]["attachments"][0]["filename"] == "doc.pdf"
-    assert event["metadata"]["attachments"][0]["id"] == "abc"
+    assert event["metadata"]["attachments"][0]["url"] == "signal:///attachment/abc"

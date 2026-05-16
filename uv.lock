@@ -289,6 +289,7 @@ version = "0.1.0"
 source = { editable = "services/session-manager" }
 dependencies = [
     { name = "exifread" },
+    { name = "fastmcp" },
     { name = "filetype" },
     { name = "httpx" },
     { name = "jsonref" },
@@ -303,6 +304,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "exifread", specifier = ">=3.0" },
+    { name = "fastmcp", specifier = ">=2.0" },
     { name = "filetype", specifier = ">=1.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonref", specifier = ">=1.1" },
