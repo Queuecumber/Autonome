@@ -292,8 +292,7 @@ async def react(room_id: str, event_id: str, emoji: str) -> None:
 async def pin_message(room_id: str, event_id: str) -> None:
     """Pin a message in a Matrix room.
 
-    Adds `event_id` to the room's pinned-messages list. No-op if already pinned.
-    Requires sufficient power level in the room.
+    Adds `event_id` to the room's pinned-messages list.
 
     Args:
         room_id: The Matrix room.
@@ -310,8 +309,7 @@ async def pin_message(room_id: str, event_id: str) -> None:
 async def unpin_message(room_id: str, event_id: str) -> None:
     """Unpin a message in a Matrix room.
 
-    Removes `event_id` from the room's pinned-messages list. No-op if not
-    currently pinned. Requires sufficient power level in the room.
+    Removes `event_id` from the room's pinned-messages list.
 
     Args:
         room_id: The Matrix room.
@@ -355,9 +353,6 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
 @mcp.tool
 async def get_message(room_id: str, event_id: str) -> Message:
     """Fetch a Matrix message by id.
-
-    Use this to dereference event ids you see in `pinned_event_ids`, in
-    pin/unpin notifications, or in `related_event_id` on a reply/thread/edit.
 
     Args:
         room_id: The Matrix room the message lives in.

@@ -34,16 +34,16 @@ def test_format_ts_renders_local_time():
     assert "1969" in out or "1970" in out  # local-zone dependent
 
 
-def test_sender_dict_shape():
-    from matrix_adapter.model import Sender, _sender_dict
+def test_sender_to_dict_shape():
+    from matrix_adapter.model import Sender
     s = Sender(id="@a:b", name="Alice", avatar_url="mxc://srv/x")
-    assert _sender_dict(s) == {"id": "@a:b", "name": "Alice", "avatar": "mxc://srv/x"}
+    assert s.to_dict() == {"id": "@a:b", "name": "Alice", "avatar": "mxc://srv/x"}
 
 
-def test_room_dict_shape():
-    from matrix_adapter.model import Room, _room_dict
+def test_room_to_dict_shape():
+    from matrix_adapter.model import Room
     r = Room(id="!r:s", display_name="Chat", encrypted=True, member_count=3, pinned_event_ids=["$p"])
-    out = _room_dict(r)
+    out = r.to_dict()
     assert out["id"] == "!r:s"
     assert out["name"] == "Chat"
     assert out["encrypted"] is True
@@ -51,31 +51,65 @@ def test_room_dict_shape():
     assert out["pinned_event_ids"] == ["$p"]
 
 
-def test_parse_relation_thread():
-    from matrix_adapter.model import _parse_relation
-    rel = _parse_relation({"rel_type": "m.thread", "event_id": "$root"})
+def test_message_relation_from_relates_to_thread():
+    from matrix_adapter.model import MessageRelation
+    rel = MessageRelation.from_relates_to({"rel_type": "m.thread", "event_id": "$root"})
     assert rel is not None
     assert rel.relation_type == "m.thread"
     assert rel.related_event_id == "$root"
 
 
-def test_parse_relation_replace():
-    from matrix_adapter.model import _parse_relation
-    rel = _parse_relation({"rel_type": "m.replace", "event_id": "$orig"})
+def test_message_relation_from_relates_to_replace():
+    from matrix_adapter.model import MessageRelation
+    rel = MessageRelation.from_relates_to({"rel_type": "m.replace", "event_id": "$orig"})
     assert rel.relation_type == "m.replace"
 
 
-def test_parse_relation_in_reply_to():
-    from matrix_adapter.model import _parse_relation
-    rel = _parse_relation({"m.in_reply_to": {"event_id": "$prev"}})
+def test_message_relation_from_relates_to_in_reply_to():
+    from matrix_adapter.model import MessageRelation
+    rel = MessageRelation.from_relates_to({"m.in_reply_to": {"event_id": "$prev"}})
     assert rel is not None
     assert rel.relation_type == "m.in_reply_to"
     assert rel.related_event_id == "$prev"
 
 
-def test_parse_relation_none():
-    from matrix_adapter.model import _parse_relation
-    assert _parse_relation({}) is None
+def test_message_relation_from_relates_to_none():
+    from matrix_adapter.model import MessageRelation
+    assert MessageRelation.from_relates_to({}) is None
+
+
+def test_message_relation_apply_thread():
+    from matrix_adapter.model import MessageRelation
+    rel = MessageRelation(related_event_id="$r", relation_type="m.thread")
+    body, html, extra = rel.apply("hi", "<p>hi</p>")
+    assert body == "hi"
+    assert extra["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$r"}
+
+
+def test_message_relation_apply_in_reply_to():
+    from matrix_adapter.model import MessageRelation
+    rel = MessageRelation(related_event_id="$r", relation_type="m.in_reply_to")
+    _, _, extra = rel.apply("hi", "<p>hi</p>")
+    assert extra["m.relates_to"] == {"m.in_reply_to": {"event_id": "$r"}}
+
+
+def test_message_relation_apply_replace_prefixes_body():
+    from matrix_adapter.model import MessageRelation
+    rel = MessageRelation(related_event_id="$r", relation_type="m.replace")
+    body, html, extra = rel.apply("hi", "<p>hi</p>")
+    assert body == "* hi"
+    assert html == "* <p>hi</p>"
+    assert extra["m.new_content"]["body"] == "hi"
+    assert extra["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$r"}
+
+
+def test_message_relation_apply_unknown_raises():
+    from matrix_adapter.model import MessageRelation
+    rel = MessageRelation.__new__(MessageRelation)
+    rel.related_event_id = "$r"
+    rel.relation_type = "bogus"
+    with pytest.raises(ValueError, match="Unsupported"):
+        rel.apply("hi", "<p>hi</p>")
 
 
 def test_room_name_falls_back():
@@ -194,10 +228,10 @@ def _mock_nio_room(room_id: str = "!r:s"):
     return room
 
 
-def test_build_text_populates_all_fields():
-    client = _new_client()
+def test_message_from_nio_text():
+    from matrix_adapter.model import Message, RoomMessageText
     room = _mock_nio_room()
-    event = MagicMock()
+    event = MagicMock(spec=RoomMessageText)
     event.sender = "@alice:srv"
     event.event_id = "$e"
     event.body = "hi"
@@ -205,7 +239,7 @@ def test_build_text_populates_all_fields():
     event.server_timestamp = 1715000000000
     event.verified = True
 
-    msg = client._build_text(room, event)
+    msg = Message.from_nio(room, event)
     assert msg.sender.id == "@alice:srv"
     assert msg.sender.name == "Alice"
     assert msg.text == "hi"
@@ -214,8 +248,8 @@ def test_build_text_populates_all_fields():
     assert msg.sent_at is not None
 
 
-def test_build_reaction():
-    client = _new_client()
+def test_reaction_from_nio():
+    from matrix_adapter.model import Reaction
     room = _mock_nio_room()
     event = MagicMock()
     event.sender = "@alice:srv"
@@ -224,13 +258,13 @@ def test_build_reaction():
     event.server_timestamp = 0
     event.verified = False
 
-    r = client._build_reaction(room, event)
+    r = Reaction.from_nio(room, event)
     assert r.emoji == "👍"
     assert r.target_event_id == "$t"
 
 
-def test_build_redaction():
-    client = _new_client()
+def test_redaction_from_nio():
+    from matrix_adapter.model import Redaction
     room = _mock_nio_room()
     event = MagicMock()
     event.sender = "@alice:srv"
@@ -239,15 +273,15 @@ def test_build_redaction():
     event.server_timestamp = 0
     event.verified = False
 
-    r = client._build_redaction(room, event)
+    r = Redaction.from_nio(room, event)
     assert r.target_event_id == "$t"
     assert r.reason == "oops"
 
 
-def test_build_media_unencrypted_inlines_mime():
-    client = _new_client()
+def test_message_from_nio_media_inlines_mime():
+    from matrix_adapter.model import Message, RoomMessageImage
     room = _mock_nio_room()
-    event = MagicMock()
+    event = MagicMock(spec=RoomMessageImage)
     event.sender = "@alice:srv"
     event.event_id = "$e"
     event.url = "mxc://srv/abc"
@@ -256,13 +290,13 @@ def test_build_media_unencrypted_inlines_mime():
     event.server_timestamp = 0
     event.verified = False
 
-    msg = client._build_media(room, event)
+    msg = Message.from_nio(room, event)
     assert len(msg.attachments) == 1
     assert "mime=image%2Fpng" in msg.attachments[0].url
 
 
-def test_extract_media_encrypted_inlines_keys():
-    client = _new_client()
+def test_attachment_from_nio_event_encrypted_inlines_keys():
+    from matrix_adapter.model import Attachment
     event = MagicMock()
     event.url = "mxc://srv/enc"
     event.body = "f.bin"
@@ -275,7 +309,7 @@ def test_extract_media_encrypted_inlines_keys():
             "hashes": {"sha256": "HASH"},
         },
     }}
-    att = client._extract_media(event)
+    att = Attachment.from_nio_event(event)
     assert "k=KEY" in att.url
     assert "iv=IV" in att.url
     assert "hash=HASH" in att.url
@@ -409,10 +443,11 @@ async def test_on_pinned_events_self_sender_tracks_no_emit():
 
 @pytest.mark.asyncio
 async def test_on_text_dispatches_to_on_message():
+    from matrix_adapter.model import RoomMessageText
     client = _new_client()
     client._on_message = AsyncMock()
     room = _mock_nio_room()
-    event = MagicMock()
+    event = MagicMock(spec=RoomMessageText)
     event.sender = "@alice:srv"
     event.event_id = "$e"
     event.body = "hi"
@@ -985,26 +1020,26 @@ async def test_get_message_unknown_room_raises():
         await client.get_message("!r:s", "$e")
 
 
-def test_extract_media_top_filename_differs_from_body():
+def test_attachment_from_nio_event_top_filename_differs_from_body():
     """When MSC2530 filename is set and differs from body, body is the caption."""
-    client = _new_client()
+    from matrix_adapter.model import Attachment
     event = MagicMock()
     event.url = "mxc://srv/x"
     event.body = "look at this"
     event.source = {"content": {"info": {"mimetype": "image/png"}, "filename": "photo.png"}}
-    att = client._extract_media(event)
+    att = Attachment.from_nio_event(event)
     assert att.filename == "photo.png"
     assert att.caption == "look at this"
 
 
-def test_extract_media_top_filename_same_as_body():
+def test_attachment_from_nio_event_top_filename_same_as_body():
     """When top filename equals body, treat as legacy (no caption)."""
-    client = _new_client()
+    from matrix_adapter.model import Attachment
     event = MagicMock()
     event.url = "mxc://srv/x"
     event.body = "photo.png"
     event.source = {"content": {"info": {"mimetype": "image/png", "filename": "photo.png"}}}
-    att = client._extract_media(event)
+    att = Attachment.from_nio_event(event)
     assert att.filename == "photo.png"
     assert att.caption is None
 
@@ -1027,11 +1062,13 @@ async def test_on_pinned_events_noop_when_set_unchanged():
 async def test_send_message_unsupported_relation_raises():
     from matrix_adapter.model import MessageRelation
     client = _new_client()
+    client._client = MagicMock()
+    client._client.room_send = AsyncMock()
     # Build a relation with a bad type by going around the literal-typing check.
     rel = MessageRelation.__new__(MessageRelation)
     rel.related_event_id = "$r"
     rel.relation_type = "bogus"
-    with pytest.raises(ValueError, match="Unsupported relation"):
+    with pytest.raises(ValueError, match="Unsupported"):
         await client.send_message("!r:s", "hi", relation=rel)
 
 

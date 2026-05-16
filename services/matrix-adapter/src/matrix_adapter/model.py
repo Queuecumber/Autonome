@@ -57,21 +57,6 @@ def _format_ts(ts_ms: int | None) -> str | None:
     return datetime.fromtimestamp(ts_ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
 
 
-def _sender_dict(s: "Sender") -> dict:
-    return {"id": s.id, "name": s.name, "avatar": s.avatar_url}
-
-
-def _room_dict(r: "Room") -> dict:
-    return {
-        "id": r.id,
-        "name": r.name,
-        "encrypted": r.encrypted,
-        "member_count": r.member_count,
-        "pinned_event_ids": list(r.pinned_event_ids),
-    }
-
-
-
 @dataclass
 class Sender:
     id: str
@@ -81,6 +66,17 @@ class Sender:
     def __post_init__(self):
         if not self.name:
             self.name = self.id
+
+    @classmethod
+    def from_nio(cls, room: MatrixRoom, user_id: str) -> "Sender":
+        return cls(
+            id=user_id,
+            name=room.user_name(user_id),
+            avatar_url=room.avatar_url(user_id),
+        )
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name, "avatar": self.avatar_url}
 
 
 @dataclass
@@ -116,6 +112,15 @@ class Room:
             pinned_event_ids=list(pinned_event_ids or []),
         )
 
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "encrypted": self.encrypted,
+            "member_count": self.member_count,
+            "pinned_event_ids": list(self.pinned_event_ids),
+        }
+
 
 @dataclass
 class Attachment:
@@ -125,27 +130,88 @@ class Attachment:
     size: int | None = None
     caption: str | None = None
 
+    @classmethod
+    def from_nio_event(cls, event) -> "Attachment":
+        """Build from a nio media event. MSC2530: body is the caption,
+        filename lives in a top-level `filename` field. Legacy: body is the
+        filename, no explicit filename field."""
+        content = getattr(event, "source", {}).get("content", {})
+        info = content.get("info", {})
+
+        params = {"mime": info.get("mimetype", "application/octet-stream")}
+        file_info = content.get("file")
+        if file_info:
+            key = file_info.get("key") or {}
+            hashes = file_info.get("hashes") or {}
+            params["k"] = key.get("k", "")
+            params["iv"] = file_info.get("iv", "")
+            params["hash"] = hashes.get("sha256", "")
+        parts = urlsplit(event.url)
+        url = urlunsplit(parts._replace(query=urlencode({k: v for k, v in params.items() if v})))
+
+        top_filename = content.get("filename") or info.get("filename")
+        if top_filename and top_filename != event.body:
+            filename = top_filename
+            caption = event.body
+        else:
+            filename = top_filename or event.body
+            caption = None
+
+        return cls(
+            url=url,
+            content_type=info.get("mimetype"),
+            filename=filename,
+            size=info.get("size"),
+            caption=caption,
+        )
+
 
 @dataclass
 class MessageRelation:
     related_event_id: str
     relation_type: Literal["m.thread", "m.replace", "m.in_reply_to"]
 
+    @classmethod
+    def from_relates_to(cls, relates_to: dict) -> "MessageRelation | None":
+        """Parse a Matrix event's `m.relates_to` content.
 
-def _parse_relation(relates_to: dict) -> MessageRelation | None:
-    """Extract a MessageRelation from an event's `m.relates_to` content.
+        Threads and edits put `event_id` at the top alongside `rel_type`.
+        Replies use the nested `m.in_reply_to.event_id` shape with no
+        top-level `rel_type`.
+        """
+        rel_type = relates_to.get("rel_type")
+        if rel_type in ("m.thread", "m.replace") and relates_to.get("event_id"):
+            return cls(related_event_id=relates_to["event_id"], relation_type=rel_type)
+        reply_id = relates_to.get("m.in_reply_to", {}).get("event_id")
+        if reply_id:
+            return cls(related_event_id=reply_id, relation_type="m.in_reply_to")
+        return None
 
-    Threads and edits put `event_id` at the top of `m.relates_to` alongside
-    `rel_type`. Replies use a different shape: `m.in_reply_to.event_id` with
-    no top-level `rel_type`.
-    """
-    rel_type = relates_to.get("rel_type")
-    if rel_type in ("m.thread", "m.replace") and relates_to.get("event_id"):
-        return MessageRelation(related_event_id=relates_to["event_id"], relation_type=rel_type)
-    reply_id = relates_to.get("m.in_reply_to", {}).get("event_id")
-    if reply_id:
-        return MessageRelation(related_event_id=reply_id, relation_type="m.in_reply_to")
-    return None
+    def apply(self, text: str, html: str) -> tuple[str, str, dict]:
+        """Return (body, formatted_body, extra_content) for an outbound
+        send_message that participates in this relation. Edits prefix body
+        with `* ` per the spec and carry an `m.new_content` block."""
+        match self.relation_type:
+            case "m.replace":
+                return (
+                    f"* {text}",
+                    f"* {html}",
+                    {
+                        "m.new_content": {
+                            "msgtype": "m.text",
+                            "body": text,
+                            "format": "org.matrix.custom.html",
+                            "formatted_body": html,
+                        },
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": self.related_event_id},
+                    },
+                )
+            case "m.in_reply_to":
+                return (text, html, {"m.relates_to": {"m.in_reply_to": {"event_id": self.related_event_id}}})
+            case "m.thread":
+                return (text, html, {"m.relates_to": {"rel_type": "m.thread", "event_id": self.related_event_id}})
+            case _:
+                raise ValueError(f"Unsupported relation_type: {self.relation_type!r}")
 
 
 @dataclass
@@ -159,12 +225,32 @@ class Message:
     sent_at: str | None = None
     verified: bool = False
 
+    @classmethod
+    def from_nio(cls, room: MatrixRoom, event, pinned_event_ids: list[str] | None = None) -> "Message":
+        """Build from a nio text or media room-message event."""
+        if isinstance(event, RoomMessageText):
+            text: str | None = event.body
+            attachments: list[Attachment] = []
+        else:
+            attachment = Attachment.from_nio_event(event)
+            text = attachment.caption
+            attachments = [attachment]
+        return cls(
+            sender=Sender.from_nio(room, event.sender),
+            room=Room.from_nio(room, pinned_event_ids),
+            event_id=event.event_id,
+            text=text,
+            attachments=attachments,
+            relation=MessageRelation.from_relates_to(event.source.get("content", {}).get("m.relates_to", {})),
+            sent_at=_format_ts(event.server_timestamp),
+            verified=event.verified,
+        )
 
     def to_event(self, source: str = "matrix") -> dict:
         metadata: dict = {
             "message_id": self.event_id,
-            "sender": _sender_dict(self.sender),
-            "room": _room_dict(self.room),
+            "sender": self.sender.to_dict(),
+            "room": self.room.to_dict(),
             "sent_at": self.sent_at,
             "verified": self.verified,
         }
@@ -200,6 +286,19 @@ class Reaction:
     sent_at: str | None = None
     verified: bool = False
 
+    @classmethod
+    def from_nio(cls, room: MatrixRoom, event: ReactionEvent, pinned_event_ids: list[str] | None = None) -> "Reaction":
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        return cls(
+            sender=Sender.from_nio(room, event.sender),
+            room=Room.from_nio(room, pinned_event_ids),
+            event_id=event.event_id,
+            emoji=relates_to.get("key", ""),
+            target_event_id=relates_to.get("event_id", ""),
+            sent_at=_format_ts(event.server_timestamp),
+            verified=event.verified,
+        )
+
     def to_event(self, source: str = "matrix") -> dict:
         return {
             "source": source,
@@ -208,8 +307,8 @@ class Reaction:
             "text": json.dumps({"type": "reaction", "emoji": self.emoji, "target_event_id": self.target_event_id}),
             "metadata": {
                 "message_id": self.event_id,
-                "sender": _sender_dict(self.sender),
-                "room": _room_dict(self.room),
+                "sender": self.sender.to_dict(),
+                "room": self.room.to_dict(),
                 "sent_at": self.sent_at,
                 "verified": self.verified,
             },
@@ -224,6 +323,17 @@ class Redaction:
   sent_at: str | None = None
   verified: bool = False
 
+  @classmethod
+  def from_nio(cls, room: MatrixRoom, event: RedactionEvent, pinned_event_ids: list[str] | None = None) -> "Redaction":
+      return cls(
+          sender=Sender.from_nio(room, event.sender),
+          room=Room.from_nio(room, pinned_event_ids),
+          target_event_id=event.redacts,
+          reason=event.reason,
+          sent_at=_format_ts(event.server_timestamp),
+          verified=event.verified,
+      )
+
   def to_event(self, source: str = "matrix") -> dict:
     return {
         "source": source,
@@ -231,8 +341,8 @@ class Redaction:
         "energy": "passive",
         "text": json.dumps({"type": "redaction", "target_event_id": self.target_event_id, "reason": self.reason}),
         "metadata": {
-            "sender": _sender_dict(self.sender),
-            "room": _room_dict(self.room),
+            "sender": self.sender.to_dict(),
+            "room": self.room.to_dict(),
             "sent_at": self.sent_at,
             "verified": self.verified,
         },
@@ -259,8 +369,8 @@ class Pin:
                 "target_event_id": self.target_event_id,
             }),
             "metadata": {
-                "sender": _sender_dict(self.sender),
-                "room": _room_dict(self.room),
+                "sender": self.sender.to_dict(),
+                "room": self.room.to_dict(),
                 "sent_at": self.sent_at,
                 "verified": self.verified,
             },
@@ -336,11 +446,9 @@ class MatrixClient:
                     "access_token": resp.access_token,
                 }))
 
-        # Don't sync here. The first sync (and any backlog from offline time)
-        # has to happen *after* listen() registers event callbacks — otherwise
-        # nio advances the sync token over those events without firing the
-        # handlers, and the backlog is lost. _handle_invite and _handle_sync
-        # cover the invite-accept and device-trust work via callbacks.
+        # Defer the first sync until after listen() registers event callbacks
+        # — otherwise nio advances the sync token over the backlog without
+        # firing handlers.
 
     # ── Listening ────────────────────────────────────────────
 
@@ -387,82 +495,30 @@ class MatrixClient:
 
     # ── Per-type handlers ────────────────────────────────────
 
-    def _room_model(self, room: MatrixRoom) -> Room:
-        return Room.from_nio(room, pinned_event_ids=self._known_pins.get(room.room_id, []))
-
-    def _sender(self, room: MatrixRoom, user_id: str) -> Sender:
-        return Sender(
-            id=user_id,
-            name=room.user_name(user_id),
-            avatar_url=room.avatar_url(user_id),
-        )
-
-    def _build_text(self, room: MatrixRoom, event: RoomMessageText) -> Message:
-        return Message(
-            sender=self._sender(room, event.sender),
-            room=self._room_model(room),
-            event_id=event.event_id,
-            text=event.body,
-            relation=_parse_relation(event.source.get("content", {}).get("m.relates_to", {})),
-            sent_at=_format_ts(event.server_timestamp),
-            verified=event.verified,
-        )
-
-    def _build_media(self, room: MatrixRoom, event) -> Message:
-        attachment = self._extract_media(event)
-        return Message(
-            sender=self._sender(room, event.sender),
-            room=self._room_model(room),
-            event_id=event.event_id,
-            text=attachment.caption,
-            attachments=[attachment],
-            sent_at=_format_ts(event.server_timestamp),
-            verified=event.verified,
-        )
-
-    def _build_reaction(self, room: MatrixRoom, event: ReactionEvent) -> Reaction:
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        return Reaction(
-            sender=self._sender(room, event.sender),
-            room=self._room_model(room),
-            event_id=event.event_id,
-            emoji=relates_to.get("key", ""),
-            target_event_id=relates_to.get("event_id", ""),
-            sent_at=_format_ts(event.server_timestamp),
-            verified=event.verified,
-        )
-
-    def _build_redaction(self, room: MatrixRoom, event: RedactionEvent) -> Redaction:
-        return Redaction(
-            sender=self._sender(room, event.sender),
-            room=self._room_model(room),
-            target_event_id=event.redacts,
-            reason=event.reason,
-            sent_at=_format_ts(event.server_timestamp),
-            verified=event.verified,
-        )
+    def _pinned(self, room_id: str) -> list[str]:
+        return self._known_pins.get(room_id, [])
 
     async def _on_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
-        msg = self._build_text(room, event)
+        msg = Message.from_nio(room, event, self._pinned(room.room_id))
         logger.info("Received text in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
     async def _on_media(self, room: MatrixRoom, event) -> None:
-        msg = self._build_media(room, event)
+        msg = Message.from_nio(room, event, self._pinned(room.room_id))
         logger.info("Received media in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
     async def _on_reaction(self, room: MatrixRoom, event: ReactionEvent) -> None:
-        reaction = self._build_reaction(room, event)
+        reaction = Reaction.from_nio(room, event, self._pinned(room.room_id))
         logger.info("Received reaction in %s from %s: %s",
                     reaction.room.name, reaction.sender.name, reaction.emoji)
         if self._on_message:
             await self._on_message(reaction)
 
     async def _on_redaction(self, room: MatrixRoom, event: RedactionEvent) -> None:
-        redaction = self._build_redaction(room, event)
+        redaction = Redaction.from_nio(room, event, self._pinned(room.room_id))
         logger.info("Received redaction of %s in %s from %s (%s)",
                     redaction.target_event_id, redaction.room.name, redaction.sender.name, redaction.reason)
         if self._on_message:
@@ -494,8 +550,8 @@ class MatrixClient:
         removed = old_set - new_set
         if not (added or removed):
             return
-        sender = self._sender(room, event.sender)
-        room_model = self._room_model(room)
+        sender = Sender.from_nio(room, event.sender)
+        room_model = Room.from_nio(room, self._pinned(room.room_id))
         sent_at = _format_ts(getattr(event, "server_timestamp", None))
         verified = getattr(event, "verified", False)
         for event_id in added:
@@ -556,42 +612,6 @@ class MatrixClient:
         logger.info("Accepting invite to %s from %s", room.room_id, event.sender)
         await self._client.join(room.room_id)
 
-    # ── Helpers ──────────────────────────────────────────────
-
-    def _extract_media(self, event) -> Attachment:
-        """Build an Attachment from an inbound media event. MSC2530: body is
-        the caption, filename lives in a top-level `filename` field. Legacy:
-        body is the filename, no explicit filename field."""
-        content = getattr(event, "source", {}).get("content", {})
-        info = content.get("info", {})
-
-        params = {"mime": info.get("mimetype", "application/octet-stream")}
-        file_info = content.get("file")
-        if file_info:
-            key = file_info.get("key") or {}
-            hashes = file_info.get("hashes") or {}
-            params["k"] = key.get("k", "")
-            params["iv"] = file_info.get("iv", "")
-            params["hash"] = hashes.get("sha256", "")
-        parts = urlsplit(event.url)
-        url = urlunsplit(parts._replace(query=urlencode({k: v for k, v in params.items() if v})))
-
-        top_filename = content.get("filename") or info.get("filename")
-        if top_filename and top_filename != event.body:
-            filename = top_filename
-            caption = event.body
-        else:
-            filename = top_filename or event.body
-            caption = None
-
-        return Attachment(
-            url=url,
-            content_type=info.get("mimetype"),
-            filename=filename,
-            size=info.get("size"),
-            caption=caption,
-        )
-
     # ── Writing ──────────────────────────────────────────────
 
     async def _room_send(self, room_id: str, message_type: str, content: dict) -> RoomSendResponse:
@@ -609,26 +629,7 @@ class MatrixClient:
         relation: MessageRelation | None = None,
     ) -> str:
         html = _MARKDOWN(text).strip()
-        body, formatted = text, html
-        extra: dict = {}
-        if relation:
-            rid = relation.related_event_id
-            match relation.relation_type:
-                case "m.replace":
-                    extra["m.new_content"] = {
-                        "msgtype": "m.text",
-                        "body": text,
-                        "format": "org.matrix.custom.html",
-                        "formatted_body": html,
-                    }
-                    body, formatted = f"* {text}", f"* {html}"
-                    extra["m.relates_to"] = {"rel_type": "m.replace", "event_id": rid}
-                case "m.in_reply_to":
-                    extra["m.relates_to"] = {"m.in_reply_to": {"event_id": rid}}
-                case "m.thread":
-                    extra["m.relates_to"] = {"rel_type": "m.thread", "event_id": rid}
-                case _:
-                    raise ValueError(f"Unsupported relation_type: {relation.relation_type!r}")
+        body, formatted, extra = (relation.apply(text, html) if relation else (text, html, {}))
         content: dict = {
             "msgtype": "m.text",
             "body": body,
@@ -759,10 +760,9 @@ class MatrixClient:
         if room is None:
             raise RuntimeError(f"Room {room_id} not in client state")
 
-        if isinstance(event, RoomMessageText):
-            return self._build_text(room, event)
-        if isinstance(event, (RoomMessageImage, RoomMessageFile, RoomEncryptedImage, RoomEncryptedFile)):
-            return self._build_media(room, event)
+        if isinstance(event, (RoomMessageText, RoomMessageImage, RoomMessageFile,
+                              RoomEncryptedImage, RoomEncryptedFile)):
+            return Message.from_nio(room, event, self._pinned(room.room_id))
         raise RuntimeError(f"Event {event_id} is not a message (type={type(event).__name__})")
 
     async def _upload(
