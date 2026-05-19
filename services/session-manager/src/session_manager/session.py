@@ -1,66 +1,130 @@
-"""Session manager: JSONL history per session_id with token-based truncation."""
+"""Session storage: versioned JSONL files with reported-token compaction signals.
+
+Each session_id has one or more `<safe_id>.<N>.jsonl` files, where the highest
+N is the active file. Compaction writes a new version N+1 with a summary at
+the top followed by the recent recency-window messages. Older versions stay
+on disk as an audit trail.
+
+Token accounting reads `{"type": "comment", "kind": "usage", "input_tokens": …}`
+entries written by the orchestrator after each LLM call — ground truth from
+the model, not a char-count heuristic.
+"""
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 
 class SessionManager:
-    def __init__(self, store_dir: Path, max_history_tokens: int = 100000):
+    def __init__(self, store_dir: Path):
         self.store_dir = Path(store_dir)
         self.store_dir.mkdir(parents=True, exist_ok=True)
-        self.max_history_tokens = max_history_tokens
+        self._migrate_unversioned()
 
-    def _session_path(self, session_id: str) -> Path:
-        safe_id = session_id.replace("/", "_").replace("\\", "_")
-        return self.store_dir / f"{safe_id}.jsonl"
+    # ── path helpers ─────────────────────────────────────────
+
+    @staticmethod
+    def _safe_id(session_id: str) -> str:
+        return session_id.replace("/", "_").replace("\\", "_")
+
+    _VERSION_RE = re.compile(r"^(?P<id>.+)\.(?P<n>\d+)\.jsonl$")
+
+    def _versioned_files(self, session_id: str) -> list[tuple[int, Path]]:
+        """Return [(version, path), …] sorted ascending. Empty if none exist."""
+        safe = self._safe_id(session_id)
+        out: list[tuple[int, Path]] = []
+        for p in self.store_dir.iterdir():
+            m = self._VERSION_RE.match(p.name)
+            if m and m.group("id") == safe:
+                out.append((int(m.group("n")), p))
+        out.sort()
+        return out
+
+    def _active_path(self, session_id: str) -> Path:
+        """Highest-version file, or version 0 if none yet."""
+        versions = self._versioned_files(session_id)
+        if versions:
+            return versions[-1][1]
+        return self.store_dir / f"{self._safe_id(session_id)}.0.jsonl"
+
+    def _migrate_unversioned(self) -> None:
+        """One-time rename of legacy `<id>.jsonl` files to `<id>.0.jsonl`."""
+        for path in self.store_dir.glob("*.jsonl"):
+            if self._VERSION_RE.match(path.name):
+                continue
+            new_path = path.with_name(f"{path.stem}.0.jsonl")
+            if not new_path.exists():
+                path.rename(new_path)
+
+    # ── read / write ─────────────────────────────────────────
 
     def load(self, session_id: str) -> list[dict[str, Any]]:
-        path = self._session_path(session_id)
+        """Read all messages from the active version."""
+        path = self._active_path(session_id)
         if not path.exists():
             return []
-        messages = []
-        for line in path.read_text().strip().splitlines():
-            if line:
-                messages.append(json.loads(line))
-        return messages
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
 
     def append(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        path = self._session_path(session_id)
+        """Append messages to the active version."""
+        path = self._active_path(session_id)
         with path.open("a") as f:
             for msg in messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
-    def load_truncated(self, session_id: str) -> list[dict[str, Any]]:
-        messages = self.load(session_id)
-        if not messages:
-            return messages
+    def bump_version(self, session_id: str, messages: list[dict[str, Any]]) -> Path:
+        """Write a new version N+1 with the given messages and return its path.
 
-        token_count = self._count_tokens(messages)
-        if token_count <= self.max_history_tokens:
-            return messages
+        Previous versions are kept on disk as audit trail. The new version
+        becomes the active file for subsequent `load` / `append` calls.
+        """
+        versions = self._versioned_files(session_id)
+        next_n = (versions[-1][0] + 1) if versions else 0
+        new_path = self.store_dir / f"{self._safe_id(session_id)}.{next_n}.jsonl"
+        with new_path.open("w") as f:
+            for msg in messages:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        return new_path
 
-        exchanges = self._group_exchanges(messages)
-        while exchanges and self._count_tokens(
-            [m for ex in exchanges for m in ex]
-        ) > self.max_history_tokens:
-            exchanges.pop(0)
+    # ── compaction support ───────────────────────────────────
 
-        return [m for ex in exchanges for m in ex]
+    @staticmethod
+    def latest_input_tokens(messages: list[dict[str, Any]]) -> int | None:
+        """Walk messages newest-to-oldest, return the most recent usage
+        comment's `input_tokens`. None if no usage data is present.
+        """
+        for m in reversed(messages):
+            if (m.get("type") == "comment"
+                    and m.get("kind") == "usage"
+                    and m.get("input_tokens") is not None):
+                return m["input_tokens"]
+        return None
 
-    def _group_exchanges(self, messages: list[dict]) -> list[list[dict]]:
-        exchanges: list[list[dict]] = []
-        current: list[dict] = []
-        for msg in messages:
-            if msg.get("role") == "user" and current:
-                exchanges.append(current)
-                current = []
-            current.append(msg)
-        if current:
-            exchanges.append(current)
-        return exchanges
+    @staticmethod
+    def recency_split(messages: list[dict[str, Any]], recency_tokens: int) -> int:
+        """Find the index where `messages[index:]` covers ≥ recency_tokens.
 
-    def _count_tokens(self, messages: list[dict]) -> int:
-        """Estimate token count. Rough heuristic: ~4 chars per token."""
-        total_chars = sum(len(json.dumps(m)) for m in messages)
-        return total_chars // 4
+        Walks `usage` comments backward, summing deltas between consecutive
+        comments. Each delta is the token cost of everything appended
+        between those two LLM calls. Returns 0 (keep all) if the file
+        doesn't have enough usage data to identify a cutoff.
+        """
+        usages: list[tuple[int, int]] = []
+        for i, m in enumerate(messages):
+            if (m.get("type") == "comment"
+                    and m.get("kind") == "usage"
+                    and m.get("input_tokens") is not None):
+                usages.append((i, m["input_tokens"]))
+
+        if len(usages) < 2:
+            return 0
+
+        cumulative = 0
+        for i in range(len(usages) - 1, 0, -1):
+            line_curr, tok_curr = usages[i]
+            line_prev, tok_prev = usages[i - 1]
+            cumulative += tok_curr - tok_prev
+            if cumulative >= recency_tokens:
+                return line_prev + 1
+        return 0
