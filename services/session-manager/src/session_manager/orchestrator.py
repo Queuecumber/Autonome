@@ -157,11 +157,17 @@ written by you, in your own voice. That summary lands at the top of context as a
 `event` of `context_summary`. Treat it as your own past notes — the canonical record of what happened before
 the recency window.
 
+If the current conversation references something from before the summary and that detail isn't in your
+summary, the original messages are no longer in your working memory (they live in the on-disk audit trail
+you can't directly read). Check long-term memory (via the Memory MCP) before assuming you don't have it.
+
 When you receive a developer message asking you to produce a summary (event `summarize`), the user message
-that follows is the older context to fold. Produce a structured summary that preserves whatever you think
-will matter going forward: identity, relationships, in-flight commitments, decisions, open threads, anything
-emotionally load-bearing. You choose the structure. Be terse and specific — this is your memory of older
-context, not a transcript.
+that follows is the older context to fold. Before emitting your summary, save anything important from that
+older context to long-term memory via the Memory MCP — after this turn, the raw content is gone from your
+working memory; only your summary and whatever you persisted survive. Then produce a structured summary
+that preserves whatever you think will matter going forward: identity, relationships, in-flight commitments,
+decisions, open threads, anything emotionally load-bearing. You choose the structure. Be terse and specific —
+this is your memory of older context, not a transcript.
 
 ## Safety and Accuracy
 
@@ -225,11 +231,14 @@ def _developer_event(event_type: str, **fields) -> dict:
 
 SUMMARIZE_INSTRUCTION = (
     "The user message below contains older session context that has aged out "
-    "of the working memory window. Produce a structured summary in your own "
-    "voice that preserves whatever you think will matter going forward — "
-    "identity, relationships, in-flight commitments, decisions, open threads, "
-    "anything emotionally load-bearing. You choose the structure. Be terse "
-    "and specific; this is memory, not transcript."
+    "of the working memory window. First, save anything important to long-term "
+    "memory via the Memory MCP — after this turn, the raw content is gone from "
+    "your working memory and only your summary plus whatever you persisted "
+    "survives. Then produce a structured summary in your own voice that "
+    "preserves whatever you think will matter going forward — identity, "
+    "relationships, in-flight commitments, decisions, open threads, anything "
+    "emotionally load-bearing. You choose the structure. Be terse and "
+    "specific; this is memory, not transcript."
 )
 
 
@@ -549,32 +558,57 @@ class SessionOrchestrator:
         logger.info("compaction: wrote %s (%d msgs)", new_path.name, 1 + len(keep_messages))
 
     async def _summarize(self, fold_messages: list[dict]) -> str:
-        """Run a one-shot LLM call asking the agent to summarize `fold_messages`.
+        """Run an LLM call asking the agent to summarize `fold_messages`.
 
         Uses the same instructions (system prompt + personality + tool docs)
-        as a normal turn so the summary lands in her voice, but passes no
-        tools — this is a generation-only call.
+        as a normal turn so the summary lands in her voice, and exposes the
+        same tools so she can persist anything important to long-term memory
+        (via the Memory MCP) before emitting the summary — the raw content
+        is about to leave her working memory.
+
+        Loops on tool calls like `_process_events`, but non-streaming and
+        without history persistence (this call's outputs aren't appended to
+        the session — only the final summary lands in the next version's
+        first message).
         """
         prompt_msg = _developer_event("summarize", instruction=SUMMARIZE_INSTRUCTION)
         content_msg = {"role": "user", "content": json.dumps(fold_messages, ensure_ascii=False)}
+        input_items: list[Any] = [prompt_msg, content_msg]
+
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
         call_kwargs["instructions"] = self._build_instructions()
-        call_kwargs["input"] = [prompt_msg, content_msg]
         call_kwargs.setdefault("max_output_tokens", 16384)
-        call_kwargs.pop("tools", None)
+        if self.openai_tools:
+            call_kwargs["tools"] = self.openai_tools
 
-        response = await self.llm.responses.create(**call_kwargs)
-        parts: list[str] = []
-        for item in response.output:
-            if getattr(item, "type", None) == "message":
-                for block in item.content or []:
-                    if hasattr(block, "text") and block.text:
-                        parts.append(block.text)
-        text = "\n".join(parts).strip()
-        if not text:
-            raise RuntimeError("summary call returned no text content")
-        return text
+        for _ in range(self.max_tool_iterations):
+            call_kwargs["input"] = input_items
+            response = await self.llm.responses.create(**call_kwargs)
+
+            tool_calls = [i for i in response.output if getattr(i, "type", None) == "function_call"]
+            if tool_calls:
+                tool_results = []
+                image_items = []
+                for tc in tool_calls:
+                    result, images = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
+                    tool_results.append(result)
+                    image_items.extend(images)
+                input_items = input_items + list(response.output) + tool_results + image_items
+                continue
+
+            parts: list[str] = []
+            for item in response.output:
+                if getattr(item, "type", None) == "message":
+                    for block in item.content or []:
+                        if hasattr(block, "text") and block.text:
+                            parts.append(block.text)
+            text = "\n".join(parts).strip()
+            if not text:
+                raise RuntimeError("summary call returned no text content")
+            return text
+
+        raise RuntimeError(f"summary call exceeded {self.max_tool_iterations} tool iterations")
 
     async def _process_events(
         self,

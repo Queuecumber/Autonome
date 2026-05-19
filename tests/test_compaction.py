@@ -188,6 +188,46 @@ async def test_compaction_failure_leaves_session_unchanged(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_summary_call_runs_tool_loop_then_emits_text(tmp_path):
+    """Tool calls during summarization (e.g. memory writes) are executed,
+    their results fed back, and the loop continues until the agent emits
+    her final summary text."""
+    orch = _orchestrator(tmp_path)
+
+    tool_call_item = MagicMock()
+    tool_call_item.type = "function_call"
+    tool_call_item.call_id = "call-1"
+    tool_call_item.name = "memory_write"
+    tool_call_item.arguments = '{"note": "something important"}'
+
+    first_resp = MagicMock()
+    first_resp.output = [tool_call_item]
+    second_resp = _mock_summary_response("FINAL SUMMARY")
+
+    responses_iter = iter([first_resp, second_resp])
+
+    async def fake_create(**kwargs):
+        return next(responses_iter)
+
+    orch.llm = MagicMock()
+    orch.llm.responses = MagicMock()
+    orch.llm.responses.create = fake_create
+
+    tool_outputs = []
+
+    async def fake_tool(call_id, name, arguments):
+        tool_outputs.append((name, arguments))
+        return {"type": "function_call_output", "call_id": call_id, "output": "ok"}, []
+
+    orch._execute_tool_call = fake_tool
+
+    result = await orch._summarize([{"role": "user", "content": "old"}])
+
+    assert result == "FINAL SUMMARY"
+    assert tool_outputs == [("memory_write", '{"note": "something important"}')]
+
+
+@pytest.mark.asyncio
 async def test_summary_call_raises_when_response_empty(tmp_path):
     """An LLM that returns no text content surfaces a clear error rather
     than silently writing an empty summary."""
