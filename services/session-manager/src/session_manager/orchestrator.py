@@ -555,7 +555,7 @@ class SessionOrchestrator:
         as a normal turn so the summary lands in her voice, but passes no
         tools — this is a generation-only call.
         """
-        prompt_msg = {"role": "developer", "content": SUMMARIZE_INSTRUCTION}
+        prompt_msg = _developer_event("summarize", instruction=SUMMARIZE_INSTRUCTION)
         content_msg = {"role": "user", "content": json.dumps(fold_messages, ensure_ascii=False)}
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model

@@ -132,7 +132,9 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     assert captured["model"] == "test-model"
     inputs = captured["input"]
     assert inputs[0]["role"] == "developer"
-    assert "structured summary" in inputs[0]["content"]
+    prompt_payload = json.loads(inputs[0]["content"])
+    assert prompt_payload["event"] == "summarize"
+    assert "structured summary" in prompt_payload["instruction"]
     # The folded content payload contains the older messages.
     folded = json.loads(inputs[1]["content"])
     assert {"role": "user", "content": "very old"} in folded
