@@ -11,12 +11,12 @@ Deploys one Autonome agent — session-manager + matrix-adapter + MCP servers �
 ## Install
 
 ```bash
-helm install heather ./charts/autonome \
-  --namespace heather --create-namespace \
+helm install <release> ./charts/autonome \
+  --namespace <release> --create-namespace \
   --set image.tag=unstable \
   --set storage.storageClass=local-path \
   --set matrix.homeserver=https://matrix.example.com \
-  --set matrix.userId=@heather:matrix.example.com
+  --set matrix.userId=@agent:matrix.example.com
 ```
 
 ## Secrets
@@ -34,11 +34,9 @@ These live in the `<release>-config` PVC. Bootstrap however suits the cluster �
 
 ## Seeding PVCs from existing state
 
-If your storage class exposes the backing directories on the host filesystem (NFS, hostPath, local-path) you can just `cp -r` your existing state into the bound PVC directories directly — no need to go through a pod.
+If your storage class exposes the backing directories on the host filesystem (NFS, hostPath, local-path) you can just `cp -r` existing state into the bound PVC directories directly. For storage classes without host access, a scratch pod that mounts every PVC at `/mnt/<name>` is the usual `kubectl cp` workflow.
 
-If you don't have host access to the backing storage, `examples/seed-pod.yaml` is a scratch pod that mounts every PVC at `/mnt/<name>` so you can `kubectl cp` into it. Replace `HEATHER` with your release name, apply, copy, delete.
-
-Matrix encryption keys (`matrix-crypto/`) are the load-bearing one either way — copy that intact or the agent loses E2E history.
+Matrix encryption keys (`matrix-crypto/`) are the load-bearing one either way — copy that intact or the agent loses E2E history on restart.
 
 ## Values
 
@@ -60,7 +58,7 @@ All Services are ClusterIP. Nothing is exposed externally — matrix-adapter syn
 ## Upgrade
 
 ```bash
-helm upgrade heather ./charts/autonome --namespace heather --reuse-values
+helm upgrade <release> ./charts/autonome --namespace <release> --reuse-values
 ```
 
 Pods use `strategy: Recreate` because PVCs are RWO; the new pod can't bind the volume until the old one's gone.
