@@ -137,9 +137,16 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     prompt_payload = json.loads(inputs[0]["content"])
     assert prompt_payload["event"] == "summarize"
     assert "structured summary" in prompt_payload["instruction"]
-    # The folded content payload contains the older messages.
-    folded = json.loads(inputs[1]["content"])
+    # Second input is the fold block — older content to summarize.
+    assert "MESSAGES TO SUMMARIZE" in inputs[1]["content"]
+    fold_json = inputs[1]["content"].split("===\n", 1)[1]
+    folded = json.loads(fold_json)
     assert {"role": "user", "content": "very old"} in folded
+    # Third input is the keep block — recency window, marked don't-summarize.
+    assert "STAYING IN CONTEXT" in inputs[2]["content"]
+    keep_json = inputs[2]["content"].split("===\n", 1)[1]
+    kept_payload = json.loads(keep_json)
+    assert {"role": "user", "content": "new"} in kept_payload
 
 
 @pytest.mark.asyncio
@@ -223,7 +230,10 @@ async def test_summary_call_runs_tool_loop_then_emits_text(tmp_path):
 
     orch._execute_tool_call = fake_tool
 
-    result = await orch._summarize([{"role": "user", "content": "old"}])
+    result = await orch._summarize(
+        [{"role": "user", "content": "old"}],
+        [{"role": "user", "content": "kept"}],
+    )
 
     assert result == "FINAL SUMMARY"
     assert tool_outputs == [("memory_write", '{"note": "something important"}')]
@@ -246,4 +256,7 @@ async def test_summary_call_raises_when_response_empty(tmp_path):
     orch.llm.responses.create = fake_create
 
     with pytest.raises(RuntimeError, match="no text content"):
-        await orch._summarize([{"role": "user", "content": "anything"}])
+        await orch._summarize(
+            [{"role": "user", "content": "anything"}],
+            [],
+        )

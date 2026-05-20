@@ -230,15 +230,20 @@ def _developer_event(event_type: str, **fields) -> dict:
 
 
 SUMMARIZE_INSTRUCTION = (
-    "The user message below contains older session context that has aged out "
-    "of the working memory window. First, save anything important to long-term "
-    "memory via the Memory MCP — after this turn, the raw content is gone from "
-    "your working memory and only your summary plus whatever you persisted "
-    "survives. "
-    "If the first item in the content is itself a prior summary (a "
-    "`context_summary` developer event), treat it as your existing notes — "
-    "preserve still-true facts, drop stale ones, integrate the new content "
-    "into a single updated summary rather than appending a new layer. "
+    "Two content blocks follow. The first contains older session messages "
+    "that are about to leave your working memory — summarize these. The "
+    "second contains messages that stay in context after compaction — use "
+    "them for grounding, but do NOT include them in your summary; they "
+    "remain available verbatim. Without this separation you'd duplicate "
+    "content that's still right there. "
+    "First, save anything important from the to-summarize block to long-term "
+    "memory via the Memory MCP — after this turn, the raw content is gone "
+    "from your working memory and only your summary plus whatever you "
+    "persisted survives. "
+    "If the first item in the to-summarize block is itself a prior summary "
+    "(a `context_summary` developer event), treat it as your existing "
+    "notes — preserve still-true facts, drop stale ones, integrate the new "
+    "content into a single updated summary rather than appending a new layer. "
     "Then produce a structured summary in your own voice that preserves "
     "whatever you think will matter going forward — relationships, in-flight "
     "commitments, decisions, open threads, anything emotionally load-bearing. "
@@ -560,7 +565,7 @@ class SessionOrchestrator:
         )
 
         try:
-            summary_text = await self._summarize(fold_messages)
+            summary_text = await self._summarize(fold_messages, keep_messages)
         except Exception as e:
             logger.error("compaction: summary call failed, leaving session as-is: %r", e)
             return
@@ -570,8 +575,12 @@ class SessionOrchestrator:
         new_path = self.session.bump_version(session_id, [summary_msg, *clean_keep])
         logger.info("compaction: wrote %s (%d msgs)", new_path.name, 1 + len(clean_keep))
 
-    async def _summarize(self, fold_messages: list[dict]) -> str:
+    async def _summarize(self, fold_messages: list[dict], keep_messages: list[dict]) -> str:
         """Run an LLM call asking the agent to summarize `fold_messages`.
+
+        `keep_messages` is the recency window that will stay in context
+        after compaction — passed so the agent knows the boundary and
+        doesn't summarize what's still available verbatim.
 
         Uses the same instructions (system prompt + personality + tool docs)
         as a normal turn so the summary lands in her voice, and exposes the
@@ -585,8 +594,21 @@ class SessionOrchestrator:
         first message).
         """
         prompt_msg = _developer_event("summarize", instruction=SUMMARIZE_INSTRUCTION)
-        content_msg = {"role": "user", "content": json.dumps(fold_messages, ensure_ascii=False)}
-        input_items: list[Any] = [prompt_msg, content_msg]
+        fold_block = {
+            "role": "user",
+            "content": (
+                "=== MESSAGES TO SUMMARIZE (leaving your working memory) ===\n"
+                + json.dumps(fold_messages, ensure_ascii=False)
+            ),
+        }
+        keep_block = {
+            "role": "user",
+            "content": (
+                "=== MESSAGES STAYING IN CONTEXT (do not summarize) ===\n"
+                + json.dumps(keep_messages, ensure_ascii=False)
+            ),
+        }
+        input_items: list[Any] = [prompt_msg, fold_block, keep_block]
 
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
