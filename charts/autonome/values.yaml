@@ -37,8 +37,8 @@ secrets:
   create: true
   existingName: ""
   values:
-    nimApiKey: ""        # → OPENAI_API_KEY in session-manager
-    matrixPassword: ""   # → matrix-adapter login
+    openaiApiKey: ""     # session-manager LLM client (any OpenAI-compatible endpoint)
+    matrixPassword: ""   # matrix-adapter login
     searchApiKey: ""     # optional → system-mcp web search
 
 # Where session-manager points its OpenAI-compatible client.

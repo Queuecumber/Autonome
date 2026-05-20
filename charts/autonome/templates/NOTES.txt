@@ -5,7 +5,7 @@ Secrets are {{ if .Values.secrets.create }}managed by this release (Secret/{{ .R
 {{- if not .Values.secrets.create }}
 
   kubectl -n {{ .Release.Namespace }} create secret generic {{ include "autonome.secretName" . }} \
-    --from-literal=NIM_API_KEY=… \
+    --from-literal=OPENAI_API_KEY=… \
     --from-literal=MATRIX_PASSWORD=… \
     --from-literal=SEARCH_API_KEY=…
 {{- end }}
