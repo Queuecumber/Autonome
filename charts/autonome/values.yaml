@@ -59,7 +59,9 @@ time:
   continuityCron: "*/20 * * * *"
   continuityMessage: "continuity check"
 
-# Timezone passed to session-manager and time-mcp.
+# Timezone passed as TZ to session-manager and time-mcp. Set to "" to
+# skip — useful if you already inject TZ via an admission webhook or
+# similar.
 timezone: America/New_York
 
 # Global resource defaults. Per-service overrides go under each section

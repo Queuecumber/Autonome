@@ -35,7 +35,9 @@ spec:
             - { name: TIME_MCP_PORT,         value: "{{ $svc.port }}" }
             - { name: CONTINUITY_CRON,       value: {{ .Values.time.continuityCron | quote }} }
             - { name: CONTINUITY_MESSAGE,    value: {{ .Values.time.continuityMessage | quote }} }
-            - { name: TZ,                    value: {{ .Values.timezone | quote }} }
+            {{- with .Values.timezone }}
+            - { name: TZ,                    value: {{ . | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: time, mountPath: /data }
           readinessProbe:
