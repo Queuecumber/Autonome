@@ -32,6 +32,14 @@ Keys (both modes): `OPENAI_API_KEY` (required — passed straight to the LLM cli
 
 These live in the `<release>-config` PVC. Bootstrap however suits the cluster — `kubectl cp` from a temp pod, an init Job, pre-provisioned PV. Session-manager mounts them read-only at `/app/agent.yaml` and `/app/PERSONALITY.md`.
 
+## Seeding PVCs from existing state
+
+If your storage class exposes the backing directories on the host filesystem (NFS, hostPath, local-path) you can just `cp -r` your existing state into the bound PVC directories directly — no need to go through a pod.
+
+If you don't have host access to the backing storage, `examples/seed-pod.yaml` is a scratch pod that mounts every PVC at `/mnt/<name>` so you can `kubectl cp` into it. Replace `HEATHER` with your release name, apply, copy, delete.
+
+Matrix encryption keys (`matrix-crypto/`) are the load-bearing one either way — copy that intact or the agent loses E2E history.
+
 ## Values
 
 See `values.yaml`. Anything in there is `--set`-able.

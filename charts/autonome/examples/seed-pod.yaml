@@ -1,0 +1,32 @@
+# A throwaway pod that mounts every PVC the chart provisions so you can
+# `kubectl cp` existing state into them before starting the real workload.
+# Replace HEATHER with your release name and apply in the release's namespace.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: HEATHER-seeder
+  labels:
+    app.kubernetes.io/name: seeder
+    app.kubernetes.io/instance: HEATHER
+spec:
+  restartPolicy: Never
+  containers:
+    - name: seeder
+      image: busybox
+      command: ["sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - { name: config,        mountPath: /mnt/config }
+        - { name: sessions,      mountPath: /mnt/sessions }
+        - { name: binaries,      mountPath: /mnt/binaries }
+        - { name: workspace,     mountPath: /mnt/workspace }
+        - { name: memory,        mountPath: /mnt/memory }
+        - { name: matrix-crypto, mountPath: /mnt/matrix-crypto }
+        - { name: time,          mountPath: /mnt/time }
+  volumes:
+    - { name: config,        persistentVolumeClaim: { claimName: HEATHER-config } }
+    - { name: sessions,      persistentVolumeClaim: { claimName: HEATHER-sessions } }
+    - { name: binaries,      persistentVolumeClaim: { claimName: HEATHER-binaries } }
+    - { name: workspace,     persistentVolumeClaim: { claimName: HEATHER-workspace } }
+    - { name: memory,        persistentVolumeClaim: { claimName: HEATHER-memory } }
+    - { name: matrix-crypto, persistentVolumeClaim: { claimName: HEATHER-matrix-crypto } }
+    - { name: time,          persistentVolumeClaim: { claimName: HEATHER-time } }
