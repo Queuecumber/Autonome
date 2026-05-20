@@ -41,18 +41,20 @@ secrets:
     matrixPassword: ""   # matrix-adapter login
     searchApiKey: ""     # optional → system-mcp web search
 
-# Where session-manager points its OpenAI-compatible client.
+# Where session-manager points its OpenAI-compatible client. Leave empty
+# to use the OpenAI client library's default endpoint.
 openai:
-  baseUrl: https://inference-api.nvidia.com/v1
+  baseUrl: ""
 
 # Matrix adapter — homeserver and user identity. Password lives in the Secret.
 matrix:
   homeserver: ""
   userId: ""
 
-# system-mcp's web search backend.
+# system-mcp's web search backend. Leave empty to use system-mcp's
+# default (Perplexity).
 system:
-  searchUrl: https://api.perplexity.ai/search
+  searchUrl: ""
 
 # time-mcp continuity tick. Both fields are forwarded to the pod only
 # when set; leave empty/unset to fall back to time-mcp's own defaults

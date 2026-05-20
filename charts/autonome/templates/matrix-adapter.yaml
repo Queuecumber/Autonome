@@ -32,9 +32,13 @@ spec:
             - { name: mcp, containerPort: {{ $svc.port }} }
           env:
             - { name: SESSION_MANAGER_URL, value: "http://session-manager:{{ .Values.services.sessionManager.port }}" }
-            - { name: MATRIX_HOMESERVER,   value: {{ .Values.matrix.homeserver | quote }} }
-            - { name: MATRIX_USER_ID,      value: {{ .Values.matrix.userId | quote }} }
             - { name: CHANNEL_MCP_PORT,    value: "{{ $svc.port }}" }
+            {{- with .Values.matrix.homeserver }}
+            - { name: MATRIX_HOMESERVER,   value: {{ . | quote }} }
+            {{- end }}
+            {{- with .Values.matrix.userId }}
+            - { name: MATRIX_USER_ID,      value: {{ . | quote }} }
+            {{- end }}
             - name: MATRIX_PASSWORD
               valueFrom:
                 secretKeyRef:

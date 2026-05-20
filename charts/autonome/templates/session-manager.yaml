@@ -33,7 +33,9 @@ spec:
           env:
             - { name: AGENT_CONFIG,          value: /app/agent.yaml }
             - { name: SESSION_MANAGER_PORT,  value: "{{ $svc.port }}" }
-            - { name: OPENAI_BASE_URL,       value: {{ .Values.openai.baseUrl | quote }} }
+            {{- with .Values.openai.baseUrl }}
+            - { name: OPENAI_BASE_URL,       value: {{ . | quote }} }
+            {{- end }}
             {{- with .Values.timezone }}
             - { name: TZ,                    value: {{ . | quote }} }
             {{- end }}

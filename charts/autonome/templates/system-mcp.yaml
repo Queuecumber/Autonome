@@ -31,7 +31,9 @@ spec:
           ports:
             - { name: mcp, containerPort: {{ $svc.port }} }
           env:
-            - { name: SEARCH_URL, value: {{ .Values.system.searchUrl | quote }} }
+            {{- with .Values.system.searchUrl }}
+            - { name: SEARCH_URL, value: {{ . | quote }} }
+            {{- end }}
             - name: SEARCH_API_KEY
               valueFrom:
                 secretKeyRef:

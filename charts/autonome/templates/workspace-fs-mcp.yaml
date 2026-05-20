@@ -30,8 +30,6 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - { name: mcp, containerPort: {{ $svc.port }} }
-          env:
-            - { name: WORKSPACE_DIR, value: /workspace }
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
           readinessProbe:

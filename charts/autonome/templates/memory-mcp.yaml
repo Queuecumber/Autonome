@@ -30,8 +30,6 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - { name: mcp, containerPort: {{ $svc.port }} }
-          env:
-            - { name: MEMORY_DIR, value: /memory }
           volumeMounts:
             - { name: memory, mountPath: /memory }
           readinessProbe:
