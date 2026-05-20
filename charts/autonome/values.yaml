@@ -1,0 +1,88 @@
+# One Helm release deploys a single agent's stack: session-manager
+# orchestrator + per-source adapters + MCP servers. Each agent gets
+# its own release (often its own namespace) so state is fully isolated.
+
+image:
+  # Each service uses ghcr.io/<registry>/<service>:<tag>.
+  # Images are published by the repo's CI under ghcr.io/queuecumber.
+  registry: ghcr.io/queuecumber
+  tag: latest
+  pullPolicy: IfNotPresent
+  # Optional list of pull secrets if the registry is private.
+  pullSecrets: []
+
+# All stateful services back onto PVCs. Set `storageClass` to "" to use
+# the cluster default. Sizes are conservative defaults — adjust to taste.
+storage:
+  storageClass: ""
+  sessions:    { size: 5Gi }
+  binaries:    { size: 10Gi }
+  workspace:   { size: 10Gi }
+  memory:      { size: 1Gi }
+  matrixCrypto: { size: 100Mi }
+  time:        { size: 100Mi }
+  # Holds agent.yaml and PERSONALITY.md for session-manager. Bootstrap
+  # however you like (e.g. `kubectl cp` into a sidecar, or a Job).
+  config:      { size: 100Mi }
+
+# The chart references a single existing Secret with these keys:
+#   - NIM_API_KEY      (required) → OPENAI_API_KEY for the LLM client
+#   - MATRIX_PASSWORD  (required by matrix-adapter)
+#   - SEARCH_API_KEY   (optional)  → system-mcp search
+# Create it ahead of `helm install`:
+#   kubectl create secret generic autonome-secrets \
+#     --from-literal=NIM_API_KEY=… \
+#     --from-literal=MATRIX_PASSWORD=… \
+#     --from-literal=SEARCH_API_KEY=…
+secrets:
+  name: autonome-secrets
+
+# Where session-manager points its OpenAI-compatible client.
+openai:
+  baseUrl: https://inference-api.nvidia.com/v1
+
+# Matrix adapter — homeserver and user identity. Password lives in the Secret.
+matrix:
+  homeserver: ""
+  userId: ""
+
+# system-mcp's web search backend.
+system:
+  searchUrl: https://api.perplexity.ai/search
+
+# time-mcp continuity tick.
+time:
+  continuityCron: "*/20 * * * *"
+  continuityMessage: "continuity check"
+
+# Timezone passed to session-manager and time-mcp.
+timezone: America/New_York
+
+# Global resource defaults. Per-service overrides go under each section
+# below (e.g. `services.sessionManager.resources`).
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits:   {           memory: 1Gi }
+
+# Per-service overrides. Each block accepts: replicas, image (with tag
+# override), resources, nodeSelector, tolerations, affinity. Replicas
+# stays at 1 for stateful services because PVCs are RWO.
+services:
+  sessionManager:
+    image: { name: autonome-session-manager }
+    port: 5000
+  matrixAdapter:
+    image: { name: autonome-matrix-adapter }
+    port: 8200
+  workspaceFsMcp:
+    image: { name: autonome-workspace-fs-mcp }
+    port: 8000
+  memoryMcp:
+    image: { name: autonome-memory-mcp }
+    port: 8001
+  systemMcp:
+    image: { name: autonome-system-mcp }
+    port: 8002
+  timeMcp:
+    image: { name: autonome-time-mcp }
+    port: 8300

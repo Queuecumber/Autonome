@@ -1,0 +1,62 @@
+{{- $svc := .Values.services.workspaceFsMcp }}
+{{- $name := "workspace-fs-mcp" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-{{ $name }}
+  labels:
+    {{- include "autonome.labels" (dict "name" $name "Release" .Release "Chart" .Chart) | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "autonome.image" (dict "root" $ "svc" $svc) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: mcp, containerPort: {{ $svc.port }} }
+          env:
+            - { name: WORKSPACE_DIR, value: /workspace }
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+          readinessProbe:
+            tcpSocket: { port: {{ $svc.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: {{ $svc.port }} }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- include "autonome.resources" (dict "root" $ "svc" $svc) | nindent 12 }}
+      volumes:
+        - { name: workspace, persistentVolumeClaim: { claimName: {{ .Release.Name }}-workspace } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "autonome.labels" (dict "name" $name "Release" .Release "Chart" .Chart) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: mcp, port: {{ $svc.port }}, targetPort: mcp }
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}

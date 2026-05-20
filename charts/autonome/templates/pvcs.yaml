@@ -1,0 +1,20 @@
+{{- range $name, $cfg := .Values.storage }}
+{{- if ne $name "storageClass" }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $.Release.Name }}-{{ $name | kebabcase }}
+  labels:
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $cfg.size }}
+  {{- if $.Values.storage.storageClass }}
+  storageClassName: {{ $.Values.storage.storageClass | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

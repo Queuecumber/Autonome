@@ -1,0 +1,25 @@
+Released {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Before this stack will actually work, two things need to be in place:
+
+1. A Secret named "{{ .Values.secrets.name }}" with these keys:
+     NIM_API_KEY       (LLM client key)
+     MATRIX_PASSWORD   (matrix-adapter login)
+     SEARCH_API_KEY    (optional — system-mcp search)
+
+   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.secrets.name }} \
+     --from-literal=NIM_API_KEY=… \
+     --from-literal=MATRIX_PASSWORD=… \
+     --from-literal=SEARCH_API_KEY=…
+
+2. agent.yaml and PERSONALITY.md in the config PVC ({{ .Release.Name }}-config).
+   Copy them in however you prefer — `kubectl cp` from a sidecar pod, an
+   init Job, or pre-provisioned PV content. The session-manager mounts
+   them at /app/agent.yaml and /app/PERSONALITY.md.
+
+Configured:
+  Matrix homeserver: {{ .Values.matrix.homeserver }}
+  Matrix user id:    {{ .Values.matrix.userId }}
+  OpenAI base URL:   {{ .Values.openai.baseUrl }}
+  Image tag:         {{ .Values.image.tag }}
+  Storage class:     {{ default "(cluster default)" .Values.storage.storageClass }}
