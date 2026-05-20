@@ -147,3 +147,42 @@ def test_recency_split_returns_zero_when_recency_exceeds_all_deltas():
         {"type": "comment", "kind": "usage", "input_tokens": 150},
     ]
     assert SessionManager.recency_split(messages, 10_000) == 0
+
+
+def test_recency_split_stops_at_negative_delta_version_boundary():
+    """Kept messages carried from a prior compaction bring their stale
+    `input_tokens` with them. Walking backward across that boundary
+    produces a negative delta — the older usages are stale, so we stop."""
+    messages = [
+        # Stale usages from a prior version (carried into this file as recency).
+        {"type": "comment", "kind": "usage", "input_tokens": 100},   # 0
+        {"type": "comment", "kind": "usage", "input_tokens": 2000},  # 1, delta 1900 (stale)
+        {"role": "user", "content": "x"},                             # 2
+        # Version boundary — input_tokens drops because compaction shrunk the file.
+        {"type": "comment", "kind": "usage", "input_tokens": 500},   # 3
+        {"type": "comment", "kind": "usage", "input_tokens": 600},   # 4, delta 100
+    ]
+    # Recency 200 of *real* growth is more than the 100 of new content,
+    # so we must return 0 (don't compact). Without the boundary check, the
+    # walk would cross into stale territory and return a bogus split.
+    assert SessionManager.recency_split(messages, 200) == 0
+
+
+def test_recency_split_prefers_earlier_cutoff_when_giant_delta_overshoots():
+    """A single huge tool-result delta shouldn't blow up the kept window.
+    When including the delta overshoots recency more than excluding it
+    undershoots, prefer the earlier cutoff (less kept)."""
+    messages = [
+        {"type": "comment", "kind": "usage", "input_tokens": 100},   # 0
+        {"role": "user", "content": "x"},                             # 1
+        # Huge delta — e.g. a giant tool result.
+        {"type": "comment", "kind": "usage", "input_tokens": 1100},  # 2, delta 1000
+        {"role": "user", "content": "y"},                             # 3
+        {"type": "comment", "kind": "usage", "input_tokens": 1200},  # 4, delta 100
+    ]
+    # Recency 200. Walking back:
+    #   delta 100 → cumulative 100 (< 200, continue)
+    #   delta 1000 → would be 1100 (overshoots by 900)
+    # Excluding the giant delta undershoots by 100; including overshoots by
+    # 900. Earlier cutoff is closer → return line_curr + 1 = 3.
+    assert SessionManager.recency_split(messages, 200) == 3

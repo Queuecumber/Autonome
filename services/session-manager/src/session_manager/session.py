@@ -103,12 +103,22 @@ class SessionManager:
 
     @staticmethod
     def recency_split(messages: list[dict[str, Any]], recency_tokens: int) -> int:
-        """Find the index where `messages[index:]` covers ≥ recency_tokens.
+        """Find the index where `messages[index:]` covers ~recency_tokens.
 
         Walks `usage` comments backward, summing deltas between consecutive
         comments. Each delta is the token cost of everything appended
-        between those two LLM calls. Returns 0 (keep all) if the file
-        doesn't have enough usage data to identify a cutoff.
+        between those two LLM calls. Stops at the first negative delta —
+        that signals a version boundary, where kept messages from a prior
+        compaction brought their stale `input_tokens` with them. Anything
+        older than that boundary doesn't reflect this file's actual size.
+
+        When a single delta would push the cumulative *past* recency by
+        more than it currently undershoots, prefer the earlier cutoff
+        (less kept) — keeps the post-compaction state from blowing up
+        when one iteration emitted a huge tool result.
+
+        Returns 0 (keep all) if there isn't enough monotonic usage data
+        to identify a cutoff.
         """
         usages: list[tuple[int, int]] = []
         for i, m in enumerate(messages):
@@ -124,7 +134,16 @@ class SessionManager:
         for i in range(len(usages) - 1, 0, -1):
             line_curr, tok_curr = usages[i]
             line_prev, tok_prev = usages[i - 1]
-            cumulative += tok_curr - tok_prev
-            if cumulative >= recency_tokens:
-                return line_prev + 1
+            delta = tok_curr - tok_prev
+            if delta < 0:
+                # Version boundary. Older usages are stale.
+                break
+            new_cumulative = cumulative + delta
+            if new_cumulative >= recency_tokens:
+                # Closer to recency: stop here (include this delta) or stop one
+                # step later (exclude this delta)?
+                if (new_cumulative - recency_tokens) <= (recency_tokens - cumulative):
+                    return line_prev + 1
+                return line_curr + 1
+            cumulative = new_cumulative
         return 0
