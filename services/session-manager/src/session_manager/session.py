@@ -107,18 +107,14 @@ class SessionManager:
 
         Walks `usage` comments backward, summing deltas between consecutive
         comments. Each delta is the token cost of everything appended
-        between those two LLM calls. Stops at the first negative delta —
-        that signals a version boundary, where kept messages from a prior
-        compaction brought their stale `input_tokens` with them. Anything
-        older than that boundary doesn't reflect this file's actual size.
+        between those two LLM calls. When a single delta would push the
+        cumulative *past* recency by more than it currently undershoots,
+        prefer the earlier cutoff (less kept) — keeps the post-compaction
+        state from blowing up when one iteration emitted a huge tool
+        result.
 
-        When a single delta would push the cumulative *past* recency by
-        more than it currently undershoots, prefer the earlier cutoff
-        (less kept) — keeps the post-compaction state from blowing up
-        when one iteration emitted a huge tool result.
-
-        Returns 0 (keep all) if there isn't enough monotonic usage data
-        to identify a cutoff.
+        Returns 0 (keep all) if there isn't enough usage data to identify
+        a cutoff.
         """
         usages: list[tuple[int, int]] = []
         for i, m in enumerate(messages):
@@ -134,16 +130,19 @@ class SessionManager:
         for i in range(len(usages) - 1, 0, -1):
             line_curr, tok_curr = usages[i]
             line_prev, tok_prev = usages[i - 1]
-            delta = tok_curr - tok_prev
-            if delta < 0:
-                # Version boundary. Older usages are stale.
-                break
-            new_cumulative = cumulative + delta
+            new_cumulative = cumulative + (tok_curr - tok_prev)
             if new_cumulative >= recency_tokens:
-                # Closer to recency: stop here (include this delta) or stop one
-                # step later (exclude this delta)?
                 if (new_cumulative - recency_tokens) <= (recency_tokens - cumulative):
                     return line_prev + 1
                 return line_curr + 1
             cumulative = new_cumulative
         return 0
+
+    @staticmethod
+    def strip_usage_comments(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop `usage` comments. The recorded `input_tokens` only reflect
+        the file state at the original call site; once messages are carried
+        into a new version they're misleading. Call before writing kept
+        messages to the next version."""
+        return [m for m in messages
+                if not (m.get("type") == "comment" and m.get("kind") == "usage")]

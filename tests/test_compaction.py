@@ -123,9 +123,11 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     assert summary_payload["event"] == "context_summary"
     assert summary_payload["content"] == "MY STRUCTURED SUMMARY"
 
-    # Kept tail matches what we expected: messages from index 6 onward.
+    # Kept tail matches what we expected: messages from index 6 onward,
+    # with usage comments stripped (they'd be stale in the new version).
     kept = new_history[1:]
     assert kept[0] == {"role": "user", "content": "new"}
+    assert all(not (m.get("type") == "comment" and m.get("kind") == "usage") for m in kept)
 
     # Summary call carried our instructions and no tools.
     assert "tools" not in captured

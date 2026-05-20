@@ -566,8 +566,9 @@ class SessionOrchestrator:
             return
 
         summary_msg = _developer_event("context_summary", content=summary_text)
-        new_path = self.session.bump_version(session_id, [summary_msg, *keep_messages])
-        logger.info("compaction: wrote %s (%d msgs)", new_path.name, 1 + len(keep_messages))
+        clean_keep = SessionManager.strip_usage_comments(keep_messages)
+        new_path = self.session.bump_version(session_id, [summary_msg, *clean_keep])
+        logger.info("compaction: wrote %s (%d msgs)", new_path.name, 1 + len(clean_keep))
 
     async def _summarize(self, fold_messages: list[dict]) -> str:
         """Run an LLM call asking the agent to summarize `fold_messages`.
