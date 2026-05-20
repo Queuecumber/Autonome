@@ -238,7 +238,9 @@ SUMMARIZE_INSTRUCTION = (
     "preserves whatever you think will matter going forward — identity, "
     "relationships, in-flight commitments, decisions, open threads, anything "
     "emotionally load-bearing. You choose the structure. Be terse and "
-    "specific; this is memory, not transcript."
+    "specific; this is memory, not transcript. Your identity, personality, "
+    "and standing context are already in your system prompt — don't restate "
+    "them; focus the summary on what's specific to this conversation."
 )
 
 
