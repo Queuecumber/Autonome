@@ -38,7 +38,7 @@ spec:
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.name }}
+                  name: {{ include "autonome.secretName" . }}
                   key: NIM_API_KEY
           volumeMounts:
             - { name: config,   mountPath: /app/agent.yaml,      subPath: agent.yaml,     readOnly: true }

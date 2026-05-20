@@ -25,17 +25,21 @@ storage:
   # however you like (e.g. `kubectl cp` into a sidecar, or a Job).
   config:      { size: 100Mi }
 
-# The chart references a single existing Secret with these keys:
-#   - NIM_API_KEY      (required) → OPENAI_API_KEY for the LLM client
-#   - MATRIX_PASSWORD  (required by matrix-adapter)
-#   - SEARCH_API_KEY   (optional)  → system-mcp search
-# Create it ahead of `helm install`:
-#   kubectl create secret generic autonome-secrets \
-#     --from-literal=NIM_API_KEY=… \
-#     --from-literal=MATRIX_PASSWORD=… \
-#     --from-literal=SEARCH_API_KEY=…
 secrets:
-  name: autonome-secrets
+  # If true, the chart creates a Secret named <release>-secrets from the
+  # values below. If false, it references an existing Secret (defaulting
+  # to <release>-secrets unless `existingName` is set).
+  #
+  # Inline values are convenient but plain-text in your values.yaml — fine
+  # for a private local file, *not* fine to commit to a public repo. For
+  # GitOps, set `create: false` and create the Secret out of band (sealed-
+  # secrets, external-secrets, SOPS, vault, etc.).
+  create: true
+  existingName: ""
+  values:
+    nimApiKey: ""        # → OPENAI_API_KEY in session-manager
+    matrixPassword: ""   # → matrix-adapter login
+    searchApiKey: ""     # optional → system-mcp web search
 
 # Where session-manager points its OpenAI-compatible client.
 openai:

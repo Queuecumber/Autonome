@@ -23,3 +23,17 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- $merged := mergeOverwrite (deepCopy .root.Values.resources) $svcResources -}}
 {{- toYaml $merged -}}
 {{- end -}}
+
+{{/*
+Resolves the name of the Secret holding NIM_API_KEY / MATRIX_PASSWORD /
+SEARCH_API_KEY. When the chart owns the Secret it's <release>-secrets;
+otherwise the user-specified existing Secret (falling back to the same
+default name).
+*/}}
+{{- define "autonome.secretName" -}}
+{{- if and (not .Values.secrets.create) .Values.secrets.existingName -}}
+{{ .Values.secrets.existingName }}
+{{- else -}}
+{{ .Release.Name }}-secrets
+{{- end -}}
+{{- end -}}

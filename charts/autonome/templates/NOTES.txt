@@ -1,21 +1,19 @@
 Released {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
-Before this stack will actually work, two things need to be in place:
+Secrets are {{ if .Values.secrets.create }}managed by this release (Secret/{{ .Release.Name }}-secrets){{ else }}expected to exist externally as Secret/{{ include "autonome.secretName" . }}{{ end }}.
 
-1. A Secret named "{{ .Values.secrets.name }}" with these keys:
-     NIM_API_KEY       (LLM client key)
-     MATRIX_PASSWORD   (matrix-adapter login)
-     SEARCH_API_KEY    (optional — system-mcp search)
+{{- if not .Values.secrets.create }}
 
-   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.secrets.name }} \
-     --from-literal=NIM_API_KEY=… \
-     --from-literal=MATRIX_PASSWORD=… \
-     --from-literal=SEARCH_API_KEY=…
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ include "autonome.secretName" . }} \
+    --from-literal=NIM_API_KEY=… \
+    --from-literal=MATRIX_PASSWORD=… \
+    --from-literal=SEARCH_API_KEY=…
+{{- end }}
 
-2. agent.yaml and PERSONALITY.md in the config PVC ({{ .Release.Name }}-config).
-   Copy them in however you prefer — `kubectl cp` from a sidecar pod, an
-   init Job, or pre-provisioned PV content. The session-manager mounts
-   them at /app/agent.yaml and /app/PERSONALITY.md.
+Bootstrap the config PVC ({{ .Release.Name }}-config) with agent.yaml and PERSONALITY.md
+before session-manager will start cleanly. Use `kubectl cp` from a temp pod, an
+init Job, or pre-provisioned PV content — the pod mounts both files read-only
+at /app/agent.yaml and /app/PERSONALITY.md.
 
 Configured:
   Matrix homeserver: {{ .Values.matrix.homeserver }}

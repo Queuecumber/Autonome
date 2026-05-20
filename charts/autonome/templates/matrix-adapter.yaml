@@ -38,7 +38,7 @@ spec:
             - name: MATRIX_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.name }}
+                  name: {{ include "autonome.secretName" . }}
                   key: MATRIX_PASSWORD
           volumeMounts:
             - { name: matrix-crypto, mountPath: /data/crypto }

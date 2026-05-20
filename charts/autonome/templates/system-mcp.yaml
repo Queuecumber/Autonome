@@ -35,7 +35,7 @@ spec:
             - name: SEARCH_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.name }}
+                  name: {{ include "autonome.secretName" . }}
                   key: SEARCH_API_KEY
                   optional: true
           readinessProbe:

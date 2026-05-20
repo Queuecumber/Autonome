@@ -19,10 +19,18 @@ helm install heather ./charts/autonome \
   --set matrix.userId=@heather:matrix.example.com
 ```
 
-Then bootstrap the prerequisites the chart's NOTES describe:
+## Secrets
 
-1. A Secret named per `secrets.name` (default `autonome-secrets`) with `NIM_API_KEY`, `MATRIX_PASSWORD`, and optionally `SEARCH_API_KEY`.
-2. `agent.yaml` and `PERSONALITY.md` placed inside the config PVC (`<release>-config`).
+Two modes, controlled by `secrets.create`:
+
+- **Chart-managed** (default): set `secrets.values.nimApiKey`, `secrets.values.matrixPassword`, and optionally `secrets.values.searchApiKey` in your values file. The chart creates `<release>-secrets`. Values are plain text in your values.yaml — fine for a local private file, **don't commit it to a public repo**. For GitOps, encrypt with SOPS, sealed-secrets, etc., or switch to the external mode.
+- **External**: set `secrets.create: false` and either let it default to `<release>-secrets` or set `secrets.existingName: <your-secret-name>`. You create the Secret out of band with `kubectl create secret generic …` or via your secrets controller of choice.
+
+Keys (both modes): `NIM_API_KEY` (required), `MATRIX_PASSWORD` (required), `SEARCH_API_KEY` (optional).
+
+## Personality and agent.yaml
+
+These live in the `<release>-config` PVC. Bootstrap however suits the cluster — `kubectl cp` from a temp pod, an init Job, pre-provisioned PV. Session-manager mounts them read-only at `/app/agent.yaml` and `/app/PERSONALITY.md`.
 
 ## Values
 
