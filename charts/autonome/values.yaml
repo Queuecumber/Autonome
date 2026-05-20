@@ -54,10 +54,12 @@ matrix:
 system:
   searchUrl: https://api.perplexity.ai/search
 
-# time-mcp continuity tick.
+# time-mcp continuity tick. Both fields are forwarded to the pod only
+# when set; leave empty/unset to fall back to time-mcp's own defaults
+# (cron "*/20 * * * *", message "✨").
 time:
-  continuityCron: "*/20 * * * *"
-  continuityMessage: "continuity check"
+  continuityCron: ""
+  continuityMessage: ""
 
 # Timezone passed as TZ to session-manager and time-mcp. Set to "" to
 # skip — useful if you already inject TZ via an admission webhook or

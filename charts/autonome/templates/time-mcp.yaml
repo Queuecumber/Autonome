@@ -33,8 +33,12 @@ spec:
           env:
             - { name: SESSION_MANAGER_URL,   value: "http://session-manager:{{ .Values.services.sessionManager.port }}" }
             - { name: TIME_MCP_PORT,         value: "{{ $svc.port }}" }
-            - { name: CONTINUITY_CRON,       value: {{ .Values.time.continuityCron | quote }} }
-            - { name: CONTINUITY_MESSAGE,    value: {{ .Values.time.continuityMessage | quote }} }
+            {{- with .Values.time.continuityCron }}
+            - { name: CONTINUITY_CRON,       value: {{ . | quote }} }
+            {{- end }}
+            {{- with .Values.time.continuityMessage }}
+            - { name: CONTINUITY_MESSAGE,    value: {{ . | quote }} }
+            {{- end }}
             {{- with .Values.timezone }}
             - { name: TZ,                    value: {{ . | quote }} }
             {{- end }}
