@@ -23,10 +23,14 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
+          # PAT so the force-push below triggers build-images.yml.
+          # Pushes made with the built-in GITHUB_TOKEN are silently
+          # excluded from triggering other workflows.
+          token: ${{ secrets.WORKFLOWS_PAT }}
 
       - name: Rebuild unstable
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.WORKFLOWS_PAT }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
