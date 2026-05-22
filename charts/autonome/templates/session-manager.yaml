@@ -60,7 +60,7 @@ spec:
           resources:
             {{- include "autonome.resources" (dict "root" $ "svc" $svc) | nindent 12 }}
       volumes:
-        - { name: config,   persistentVolumeClaim: { claimName: {{ .Release.Name }}-config } }
+        - { name: config,   configMap: { name: {{ .Release.Name }}-agent-config } }
         - { name: sessions, persistentVolumeClaim: { claimName: {{ .Release.Name }}-sessions } }
         - { name: binaries, persistentVolumeClaim: { claimName: {{ .Release.Name }}-binaries } }
 ---

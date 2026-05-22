@@ -1,98 +1,59 @@
-# One Helm release deploys a single agent's stack: session-manager
-# orchestrator + per-source adapters + MCP servers. Each agent gets
-# its own release (often its own namespace) so state is fully isolated.
-
 image:
-  # Each service uses ghcr.io/<registry>/<service>:<tag>.
-  # Images are published by the repo's CI under ghcr.io/queuecumber.
   registry: ghcr.io/queuecumber
   tag: latest
   pullPolicy: IfNotPresent
-  # Optional list of pull secrets if the registry is private.
   pullSecrets: []
 
-# All stateful services back onto PVCs. Set `storageClass` to "" to use
-# the cluster default. Sizes are conservative defaults — adjust to taste.
 storage:
   storageClass: ""
-  sessions:    { size: 5Gi }
-  binaries:    { size: 10Gi }
-  workspace:   { size: 10Gi }
-  memory:      { size: 1Gi }
+  sessions:     { size: 5Gi }
+  binaries:     { size: 10Gi }
+  workspace:    { size: 10Gi }
+  memory:       { size: 1Gi }
   matrixCrypto: { size: 100Mi }
-  time:        { size: 100Mi }
-  # Holds agent.yaml and PERSONALITY.md for session-manager. Bootstrap
-  # however you like (e.g. `kubectl cp` into a sidecar, or a Job).
-  config:      { size: 100Mi }
+  time:         { size: 100Mi }
 
+# agent.yaml and PERSONALITY.md contents — typically supplied via
+# `helm install --set-file agent.config=agent.yaml --set-file agent.personality=PERSONALITY.md`
+agent:
+  config: ""
+  personality: ""
+
+# If create: true, chart writes <release>-secrets from the values below.
+# If false, references existingName (or <release>-secrets if blank).
 secrets:
-  # If true, the chart creates a Secret named <release>-secrets from the
-  # values below. If false, it references an existing Secret (defaulting
-  # to <release>-secrets unless `existingName` is set).
-  #
-  # Inline values are convenient but plain-text in your values.yaml — fine
-  # for a private local file, *not* fine to commit to a public repo. For
-  # GitOps, set `create: false` and create the Secret out of band (sealed-
-  # secrets, external-secrets, SOPS, vault, etc.).
   create: true
   existingName: ""
-  values:
-    openaiApiKey: ""     # session-manager LLM client (any OpenAI-compatible endpoint)
-    matrixPassword: ""   # matrix-adapter login
-    searchApiKey: ""     # optional → system-mcp web search
 
-# Where session-manager points its OpenAI-compatible client. Leave empty
-# to use the OpenAI client library's default endpoint.
 openai:
   baseUrl: ""
+  apiKey: ""
 
-# Matrix adapter — homeserver and user identity. Password lives in the Secret.
 matrix:
   homeserver: ""
   userId: ""
+  password: ""
 
-# system-mcp's web search backend. Leave empty to use system-mcp's
-# default (Perplexity).
 system:
   searchUrl: ""
+  searchApiKey: ""
 
-# time-mcp continuity tick. Both fields are forwarded to the pod only
-# when set; leave empty/unset to fall back to time-mcp's own defaults
-# (cron "*/20 * * * *", message "✨").
+# Empty values fall back to time-mcp's own defaults.
 time:
   continuityCron: ""
   continuityMessage: ""
 
-# Timezone passed as TZ to session-manager and time-mcp. Set to "" to
-# skip — useful if you already inject TZ via an admission webhook or
-# similar.
+# Empty skips the TZ env var entirely.
 timezone: America/New_York
 
-# Global resource defaults. Per-service overrides go under each section
-# below (e.g. `services.sessionManager.resources`).
 resources:
   requests: { cpu: 50m, memory: 128Mi }
-  limits:   {           memory: 1Gi }
+  limits:   { memory: 1Gi }
 
-# Per-service overrides. Each block accepts: replicas, image (with tag
-# override), resources, nodeSelector, tolerations, affinity. Replicas
-# stays at 1 for stateful services because PVCs are RWO.
 services:
-  sessionManager:
-    image: { name: autonome-session-manager }
-    port: 5000
-  matrixAdapter:
-    image: { name: autonome-matrix-adapter }
-    port: 8200
-  workspaceFsMcp:
-    image: { name: autonome-workspace-fs-mcp }
-    port: 8000
-  memoryMcp:
-    image: { name: autonome-memory-mcp }
-    port: 8001
-  systemMcp:
-    image: { name: autonome-system-mcp }
-    port: 8002
-  timeMcp:
-    image: { name: autonome-time-mcp }
-    port: 8300
+  sessionManager: { image: { name: autonome-session-manager }, port: 5000 }
+  matrixAdapter:  { image: { name: autonome-matrix-adapter },  port: 8200 }
+  workspaceFsMcp: { image: { name: autonome-workspace-fs-mcp }, port: 8000 }
+  memoryMcp:      { image: { name: autonome-memory-mcp },      port: 8001 }
+  systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
+  timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: autonome
-description: An autonomous-agent platform — session-manager orchestrator plus its MCP servers and chat adapters.
+description: An autonomous-agent platform.
 type: application
 version: 0.1.0
 appVersion: "unstable"

@@ -1,23 +1,4 @@
 Released {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
-Secrets are {{ if .Values.secrets.create }}managed by this release (Secret/{{ .Release.Name }}-secrets){{ else }}expected to exist externally as Secret/{{ include "autonome.secretName" . }}{{ end }}.
-
-{{- if not .Values.secrets.create }}
-
-  kubectl -n {{ .Release.Namespace }} create secret generic {{ include "autonome.secretName" . }} \
-    --from-literal=OPENAI_API_KEY=… \
-    --from-literal=MATRIX_PASSWORD=… \
-    --from-literal=SEARCH_API_KEY=…
-{{- end }}
-
-Bootstrap the config PVC ({{ .Release.Name }}-config) with agent.yaml and PERSONALITY.md
-before session-manager will start cleanly. Use `kubectl cp` from a temp pod, an
-init Job, or pre-provisioned PV content — the pod mounts both files read-only
-at /app/agent.yaml and /app/PERSONALITY.md.
-
-Configured:
-  Matrix homeserver: {{ .Values.matrix.homeserver }}
-  Matrix user id:    {{ .Values.matrix.userId }}
-  OpenAI base URL:   {{ .Values.openai.baseUrl }}
-  Image tag:         {{ .Values.image.tag }}
-  Storage class:     {{ default "(cluster default)" .Values.storage.storageClass }}
+Secrets: {{ if .Values.secrets.create }}created as Secret/{{ .Release.Name }}-secrets{{ else }}expected externally as Secret/{{ include "autonome.secretName" . }}{{ end }}.
+Config:  ConfigMap/{{ .Release.Name }}-agent-config from values.agent.{config,personality}.
