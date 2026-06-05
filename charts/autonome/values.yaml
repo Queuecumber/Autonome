@@ -1,0 +1,59 @@
+image:
+  registry: ghcr.io/queuecumber
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+storage:
+  storageClass: ""
+  sessions:     { size: 5Gi }
+  binaries:     { size: 10Gi }
+  workspace:    { size: 10Gi }
+  memory:       { size: 1Gi }
+  matrixCrypto: { size: 100Mi }
+  time:         { size: 100Mi }
+
+# agent.yaml and PERSONALITY.md contents — typically supplied via
+# `helm install --set-file agent.config=agent.yaml --set-file agent.personality=PERSONALITY.md`
+agent:
+  config: ""
+  personality: ""
+
+# If create: true, chart writes <release>-secrets from the values below.
+# If false, references existingName (or <release>-secrets if blank).
+secrets:
+  create: true
+  existingName: ""
+
+openai:
+  baseUrl: ""
+  apiKey: ""
+
+matrix:
+  homeserver: ""
+  userId: ""
+  password: ""
+
+system:
+  searchUrl: ""
+  searchApiKey: ""
+
+# Empty values fall back to time-mcp's own defaults.
+time:
+  continuityCron: ""
+  continuityMessage: ""
+
+# Empty skips the TZ env var entirely.
+timezone: America/New_York
+
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits:   { memory: 1Gi }
+
+services:
+  sessionManager: { image: { name: autonome-session-manager }, port: 5000 }
+  matrixAdapter:  { image: { name: autonome-matrix-adapter },  port: 8200 }
+  workspaceFsMcp: { image: { name: autonome-workspace-fs-mcp }, port: 8000 }
+  memoryMcp:      { image: { name: autonome-memory-mcp },      port: 8001 }
+  systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
+  timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }

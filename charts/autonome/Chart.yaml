@@ -1,0 +1,9 @@
+apiVersion: v2
+name: autonome
+description: An autonomous-agent platform.
+type: application
+version: 0.1.0
+appVersion: "unstable"
+home: https://github.com/Queuecumber/Autonome
+sources:
+  - https://github.com/Queuecumber/Autonome

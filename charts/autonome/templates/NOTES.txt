@@ -1,0 +1,4 @@
+Released {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Secrets: {{ if .Values.secrets.create }}created as Secret/{{ .Release.Name }}-secrets{{ else }}expected externally as Secret/{{ include "autonome.secretName" . }}{{ end }}.
+Config:  ConfigMap/{{ .Release.Name }}-agent-config from values.agent.{config,personality}.

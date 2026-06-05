@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-agent-config
+  labels:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  agent.yaml: |
+{{ required "agent.config required (typically --set-file agent.config=agent.yaml)" .Values.agent.config | indent 4 }}
+  PERSONALITY.md: |
+{{ required "agent.personality required (typically --set-file agent.personality=PERSONALITY.md)" .Values.agent.personality | indent 4 }}

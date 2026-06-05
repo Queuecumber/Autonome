@@ -1,0 +1,72 @@
+{{- $svc := .Values.services.timeMcp }}
+{{- $name := "time-mcp" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-{{ $name }}
+  labels:
+    {{- include "autonome.labels" (dict "name" $name "Release" .Release "Chart" .Chart) | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "autonome.image" (dict "root" $ "svc" $svc) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: mcp, containerPort: {{ $svc.port }} }
+          env:
+            - { name: SESSION_MANAGER_URL,   value: "http://session-manager:{{ .Values.services.sessionManager.port }}" }
+            - { name: TIME_MCP_PORT,         value: "{{ $svc.port }}" }
+            {{- with .Values.time.continuityCron }}
+            - { name: CONTINUITY_CRON,       value: {{ . | quote }} }
+            {{- end }}
+            {{- with .Values.time.continuityMessage }}
+            - { name: CONTINUITY_MESSAGE,    value: {{ . | quote }} }
+            {{- end }}
+            {{- with .Values.timezone }}
+            - { name: TZ,                    value: {{ . | quote }} }
+            {{- end }}
+          volumeMounts:
+            - { name: time, mountPath: /data }
+          readinessProbe:
+            tcpSocket: { port: {{ $svc.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: {{ $svc.port }} }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- include "autonome.resources" (dict "root" $ "svc" $svc) | nindent 12 }}
+      volumes:
+        - { name: time, persistentVolumeClaim: { claimName: {{ .Release.Name }}-time } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "autonome.labels" (dict "name" $name "Release" .Release "Chart" .Chart) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: mcp, port: {{ $svc.port }}, targetPort: mcp }
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
