@@ -27,12 +27,6 @@ helm install <release> ./charts/autonome \
 
 Keys: `OPENAI_API_KEY` (required), `MATRIX_PASSWORD` (required), `SEARCH_API_KEY` (optional).
 
-## Seeding existing state
-
-PVCs (`<release>-sessions`, `-binaries`, `-workspace`, `-memory`, `-matrix-crypto`, `-time`) start empty. If you're migrating an existing agent, copy your prior directories in before the pods successfully boot. For NFS / hostPath / local-path storage classes that expose backing directories, `cp -r` directly. Otherwise mount via a scratch pod and `kubectl cp`.
-
-Matrix `credentials.json` is the load-bearing one — if matrix-adapter password-logs-in against an existing `device_id`, server-side keys rotate and the prior token dies. To avoid: set `matrix.password` to a placeholder so initial login fails harmlessly, copy `credentials.json` in, let matrix-adapter restart and restore.
-
 ## What's deployed
 
 | Service | Port | Volumes |
