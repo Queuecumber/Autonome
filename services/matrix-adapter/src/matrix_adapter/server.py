@@ -12,9 +12,9 @@ from matrix_adapter.model import (
     MatrixClient,
     Message,
     MessageRelation,
-    Pin,
     Reaction,
     Redaction,
+    RoomPins,
     Sender,
     UserProfile,
 )
@@ -154,10 +154,10 @@ a reply or if it just seems like the user wants to go in a different direction, 
 
 ## Pinned Messages
 
-When someone pins a message in a room you will receive a `pin` event with the event id
-of the newly pinned message; when someone unpins one, you will receive an `unpin` event with
-the same shape. Each room message you receive also carries the current pinned list in its metadata
-as `pinned_event_ids`.
+When someone changes the pinned messages in a room you will receive a `pinned_events`
+event carrying the full new list of pinned event ids. Diff against your prior view if
+you want add/remove granularity. Use `list_pinned(room_id)` if you want the current list
+on demand (e.g. when you first walk into a room).
 
 The pinned messages themselves may already be in your conversation history. If not, fetch
 them with `get_message(room_id, event_id)`. Treat pins as a signal that the message matters
@@ -323,6 +323,12 @@ async def unpin_message(room_id: str, event_id: str) -> None:
 
 
 @mcp.tool
+async def list_pinned(room_id: str) -> list[str]:
+    """Return the room's current pinned-message event ids."""
+    return await client.get_pinned_events(room_id)
+
+
+@mcp.tool
 async def read_receipt(room_id: str, event_id: str) -> None:
     """Send a read receipt for a message.
 
@@ -483,7 +489,7 @@ async def update_profile(display_name: str | None = None, avatar: Base64Bytes | 
 
 # ── Inbound event forwarding ─────────────────────────────
 
-async def on_message(msg: Message | Reaction | Redaction | Pin) -> None:
+async def on_message(msg: Message | Reaction | Redaction | RoomPins) -> None:
     logger.info("Received: %s", msg)
     await _event_queue.put(msg.to_event())
 

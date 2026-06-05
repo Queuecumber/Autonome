@@ -42,13 +42,9 @@ def test_sender_to_dict_shape():
 
 def test_room_to_dict_shape():
     from matrix_adapter.model import Room
-    r = Room(id="!r:s", display_name="Chat", encrypted=True, member_count=3, pinned_event_ids=["$p"])
+    r = Room(id="!r:s", display_name="Chat", encrypted=True, member_count=3)
     out = r.to_dict()
-    assert out["id"] == "!r:s"
-    assert out["name"] == "Chat"
-    assert out["encrypted"] is True
-    assert out["member_count"] == 3
-    assert out["pinned_event_ids"] == ["$p"]
+    assert out == {"id": "!r:s", "name": "Chat", "encrypted": True, "member_count": 3}
 
 
 def test_message_relation_from_relates_to_thread():
@@ -187,19 +183,21 @@ def test_redaction_to_event(alice, room):
     assert payload["reason"] == "spam"
 
 
-def test_pin_to_event_pin_kind(alice, room):
-    from matrix_adapter.model import Pin
-    p = Pin(sender=alice, room=room, target_event_id="$t", pinned=True)
+def test_room_pins_to_event_shape(alice, room):
+    from matrix_adapter.model import RoomPins
+    p = RoomPins(sender=alice, room=room, pinned_event_ids=["$a", "$b"])
     out = p.to_event()
-    assert out["event_type"] == "pin"
+    assert out["event_type"] == "pinned_events"
     assert out["energy"] == "passive"
-    assert json.loads(out["text"])["type"] == "pin"
+    payload = json.loads(out["text"])
+    assert payload == {"type": "pinned_events", "pinned_event_ids": ["$a", "$b"]}
 
 
-def test_pin_to_event_unpin_kind(alice, room):
-    from matrix_adapter.model import Pin
-    p = Pin(sender=alice, room=room, target_event_id="$t", pinned=False)
-    assert p.to_event()["event_type"] == "unpin"
+def test_room_pins_to_event_empty_list(alice, room):
+    from matrix_adapter.model import RoomPins
+    p = RoomPins(sender=alice, room=room, pinned_event_ids=[])
+    payload = json.loads(p.to_event()["text"])
+    assert payload["pinned_event_ids"] == []
 
 
 # ── Build helpers ────────────────────────────────────────
@@ -210,7 +208,6 @@ def _new_client():
     c = MatrixClient.__new__(MatrixClient)
     c.user_id = "@me:srv"
     c.allowed_rooms = None
-    c._known_pins = {}
     c._synced_rooms = set()
     c._on_message = None
     return c
@@ -366,8 +363,8 @@ async def test_handle_event_respects_allowed_rooms():
 
 
 @pytest.mark.asyncio
-async def test_on_pinned_events_initial_seed_suppresses_emit():
-    """First state event for a room during initial sync just seeds; no Pin emitted."""
+async def test_on_pinned_events_initial_sync_suppresses_emit():
+    """During initial sync (room not yet in _synced_rooms), no event emits."""
     client = _new_client()
     client._on_message = AsyncMock()
     room = _mock_nio_room()
@@ -376,65 +373,40 @@ async def test_on_pinned_events_initial_seed_suppresses_emit():
     event.source = {"content": {"pinned": ["$p1", "$p2"]}}
 
     await client._on_pinned_events(room, event)
-    assert client._known_pins[room.room_id] == ["$p1", "$p2"]
     client._on_message.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_on_pinned_events_diff_emits_after_sync():
-    """Once the room is in _synced_rooms, delta emits Pin events."""
+async def test_on_pinned_events_emits_full_list_after_sync():
+    """Post-initial-sync, a state event emits a single RoomPins with the full list."""
     client = _new_client()
     client._on_message = AsyncMock()
     client._synced_rooms = {"!r:s"}
-    client._known_pins = {"!r:s": ["$old"]}
     room = _mock_nio_room()
     event = MagicMock()
     event.sender = "@alice:srv"
     event.server_timestamp = 0
     event.verified = False
-    event.source = {"content": {"pinned": ["$old", "$new"]}}
+    event.source = {"content": {"pinned": ["$a", "$b"]}}
 
     await client._on_pinned_events(room, event)
-    # One Pin emit for the added id.
     assert client._on_message.await_count == 1
-    pin = client._on_message.await_args.args[0]
-    assert pin.target_event_id == "$new"
-    assert pin.pinned is True
+    room_pins = client._on_message.await_args.args[0]
+    assert room_pins.pinned_event_ids == ["$a", "$b"]
 
 
 @pytest.mark.asyncio
-async def test_on_pinned_events_unpin_diff():
+async def test_on_pinned_events_self_sender_suppresses_emit():
+    """Our own pin state changes don't emit (we already know we did it)."""
     client = _new_client()
     client._on_message = AsyncMock()
     client._synced_rooms = {"!r:s"}
-    client._known_pins = {"!r:s": ["$a", "$b"]}
-    room = _mock_nio_room()
-    event = MagicMock()
-    event.sender = "@alice:srv"
-    event.server_timestamp = 0
-    event.verified = False
-    event.source = {"content": {"pinned": ["$a"]}}
-
-    await client._on_pinned_events(room, event)
-    pin = client._on_message.await_args.args[0]
-    assert pin.target_event_id == "$b"
-    assert pin.pinned is False
-
-
-@pytest.mark.asyncio
-async def test_on_pinned_events_self_sender_tracks_no_emit():
-    """Our own pin state changes update _known_pins but don't emit Pin events."""
-    client = _new_client()
-    client._on_message = AsyncMock()
-    client._synced_rooms = {"!r:s"}
-    client._known_pins = {"!r:s": []}
     room = _mock_nio_room()
     event = MagicMock()
     event.sender = "@me:srv"
     event.source = {"content": {"pinned": ["$x"]}}
 
     await client._on_pinned_events(room, event)
-    assert client._known_pins["!r:s"] == ["$x"]
     client._on_message.assert_not_called()
 
 
@@ -490,26 +462,28 @@ async def test_on_redaction_dispatches():
 
 @pytest.mark.asyncio
 async def test_on_unknown_routes_pinned_events():
+    """m.room.pinned_events UnknownEvent gets routed to _on_pinned_events."""
     client = _new_client()
+    client._on_message = AsyncMock()
     event = MagicMock()
     event.type = "m.room.pinned_events"
     event.sender = "@alice:srv"
     event.source = {"content": {"pinned": []}}
     room = _mock_nio_room()
+    # Not in _synced_rooms → silent.
     await client._on_unknown(room, event)
-    # Seeded silently because room not in _synced_rooms.
-    assert client._known_pins[room.room_id] == []
+    client._on_message.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_on_unknown_ignores_other_types():
     client = _new_client()
+    client._on_message = AsyncMock()
     event = MagicMock()
     event.type = "m.room.topic"
     room = _mock_nio_room()
-    # No exception, no state change.
     await client._on_unknown(room, event)
-    assert room.room_id not in client._known_pins
+    client._on_message.assert_not_called()
 
 
 # ── _compute_trust_status ────────────────────────────────
@@ -686,7 +660,6 @@ async def test_pin_message_adds_to_state():
     await client.pin_message("!r:s", "$new")
     put_args = client._client.room_put_state.await_args
     assert put_args.args[2] == {"pinned": ["$existing", "$new"]}
-    assert client._known_pins["!r:s"] == ["$existing", "$new"]
 
 
 @pytest.mark.asyncio
@@ -728,7 +701,7 @@ async def test_get_pinned_events_no_state_returns_empty():
     client = _new_client()
     client._client = MagicMock()
     client._client.room_get_state_event = AsyncMock(return_value=MagicMock())  # not RoomGetStateEventResponse
-    assert await client._get_pinned_events("!r:s") == []
+    assert await client.get_pinned_events("!r:s") == []
 
 
 # ── send_message relations ───────────────────────────────
@@ -1042,20 +1015,6 @@ def test_attachment_from_nio_event_top_filename_same_as_body():
     att = Attachment.from_nio_event(event)
     assert att.filename == "photo.png"
     assert att.caption is None
-
-
-@pytest.mark.asyncio
-async def test_on_pinned_events_noop_when_set_unchanged():
-    client = _new_client()
-    client._on_message = AsyncMock()
-    client._synced_rooms = {"!r:s"}
-    client._known_pins = {"!r:s": ["$a"]}
-    room = _mock_nio_room()
-    event = MagicMock()
-    event.sender = "@alice:srv"
-    event.source = {"content": {"pinned": ["$a"]}}  # same set
-    await client._on_pinned_events(room, event)
-    client._on_message.assert_not_called()
 
 
 @pytest.mark.asyncio

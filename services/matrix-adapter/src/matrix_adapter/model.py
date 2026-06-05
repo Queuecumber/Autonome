@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable, Literal, Self, Union
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import mistune
@@ -68,7 +68,7 @@ class Sender:
             self.name = self.id
 
     @classmethod
-    def from_nio(cls, room: MatrixRoom, user_id: str) -> "Sender":
+    def from_nio(cls, room: MatrixRoom, user_id: str) -> Self:
         return cls(
             id=user_id,
             name=room.user_name(user_id),
@@ -95,21 +95,19 @@ class Room:
     canonical_alias: str | None = None
     encrypted: bool = False
     member_count: int = 0
-    pinned_event_ids: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
         return self.display_name or self.canonical_alias or self.id
 
     @classmethod
-    def from_nio(cls, room: MatrixRoom, pinned_event_ids: list[str] | None = None) -> "Room":
+    def from_nio(cls, room: MatrixRoom) -> Self:
         return cls(
             id=room.room_id,
             display_name=room.display_name,
             canonical_alias=room.canonical_alias,
             encrypted=room.encrypted,
             member_count=len(room.users or {}),
-            pinned_event_ids=list(pinned_event_ids or []),
         )
 
     def to_dict(self) -> dict:
@@ -118,7 +116,6 @@ class Room:
             "name": self.name,
             "encrypted": self.encrypted,
             "member_count": self.member_count,
-            "pinned_event_ids": list(self.pinned_event_ids),
         }
 
 
@@ -131,7 +128,10 @@ class Attachment:
     caption: str | None = None
 
     @classmethod
-    def from_nio_event(cls, event) -> "Attachment":
+    def from_nio_event(
+        cls,
+        event: RoomMessageImage | RoomMessageFile | RoomEncryptedImage | RoomEncryptedFile,
+    ) -> Self:
         """Build from a nio media event. MSC2530: body is the caption,
         filename lives in a top-level `filename` field. Legacy: body is the
         filename, no explicit filename field."""
@@ -172,7 +172,7 @@ class MessageRelation:
     relation_type: Literal["m.thread", "m.replace", "m.in_reply_to"]
 
     @classmethod
-    def from_relates_to(cls, relates_to: dict) -> "MessageRelation | None":
+    def from_relates_to(cls, relates_to: dict) -> Self | None:
         """Parse a Matrix event's `m.relates_to` content.
 
         Threads and edits put `event_id` at the top alongside `rel_type`.
@@ -226,7 +226,11 @@ class Message:
     verified: bool = False
 
     @classmethod
-    def from_nio(cls, room: MatrixRoom, event, pinned_event_ids: list[str] | None = None) -> "Message":
+    def from_nio(
+        cls,
+        room: MatrixRoom,
+        event: RoomMessageText | RoomMessageImage | RoomMessageFile | RoomEncryptedImage | RoomEncryptedFile,
+    ) -> Self:
         """Build from a nio text or media room-message event."""
         if isinstance(event, RoomMessageText):
             text: str | None = event.body
@@ -237,7 +241,7 @@ class Message:
             attachments = [attachment]
         return cls(
             sender=Sender.from_nio(room, event.sender),
-            room=Room.from_nio(room, pinned_event_ids),
+            room=Room.from_nio(room),
             event_id=event.event_id,
             text=text,
             attachments=attachments,
@@ -287,11 +291,11 @@ class Reaction:
     verified: bool = False
 
     @classmethod
-    def from_nio(cls, room: MatrixRoom, event: ReactionEvent, pinned_event_ids: list[str] | None = None) -> "Reaction":
+    def from_nio(cls, room: MatrixRoom, event: ReactionEvent) -> Self:
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         return cls(
             sender=Sender.from_nio(room, event.sender),
-            room=Room.from_nio(room, pinned_event_ids),
+            room=Room.from_nio(room),
             event_id=event.event_id,
             emoji=relates_to.get("key", ""),
             target_event_id=relates_to.get("event_id", ""),
@@ -324,10 +328,10 @@ class Redaction:
   verified: bool = False
 
   @classmethod
-  def from_nio(cls, room: MatrixRoom, event: RedactionEvent, pinned_event_ids: list[str] | None = None) -> "Redaction":
+  def from_nio(cls, room: MatrixRoom, event: RedactionEvent) -> Self:
       return cls(
           sender=Sender.from_nio(room, event.sender),
-          room=Room.from_nio(room, pinned_event_ids),
+          room=Room.from_nio(room),
           target_event_id=event.redacts,
           reason=event.reason,
           sent_at=_format_ts(event.server_timestamp),
@@ -350,23 +354,24 @@ class Redaction:
 
 
 @dataclass
-class Pin:
+class RoomPins:
+    """A room's `m.room.pinned_events` state changed. Carries the full
+    current list of pinned event ids — clients diff against their own
+    view if they want add/remove granularity."""
     sender: Sender
     room: Room
-    target_event_id: str
-    pinned: bool
+    pinned_event_ids: list[str]
     sent_at: str | None = None
     verified: bool = False
 
     def to_event(self, source: str = "matrix") -> dict:
-        kind = "pin" if self.pinned else "unpin"
         return {
             "source": source,
-            "event_type": kind,
+            "event_type": "pinned_events",
             "energy": "passive",
             "text": json.dumps({
-                "type": kind,
-                "target_event_id": self.target_event_id,
+                "type": "pinned_events",
+                "pinned_event_ids": list(self.pinned_event_ids),
             }),
             "metadata": {
                 "sender": self.sender.to_dict(),
@@ -400,9 +405,8 @@ class MatrixClient:
             homeserver, user_id, device_id=device_id,
             store_path=store_path, config=config,
         )
-        self._on_message: Callable[[Message | Reaction | Redaction | Pin], Awaitable[None]] | None = None
+        self._on_message: Callable[[Message | Reaction | Redaction | RoomPins], Awaitable[None]] | None = None
         self._synced_rooms: set[str] = set()
-        self._known_pins: dict[str, list[str]] = {}
 
         # Event type → handler dispatch table
         self._handlers: dict[type, Callable] = {
@@ -452,7 +456,7 @@ class MatrixClient:
 
     # ── Listening ────────────────────────────────────────────
 
-    async def listen(self, on_message: Callable[[Message | Reaction | Redaction | Pin], Awaitable[None]]) -> None:
+    async def listen(self, on_message: Callable[[Message | Reaction | Redaction | RoomPins], Awaitable[None]]) -> None:
         self._on_message = on_message
 
         self._client.add_response_callback(self._handle_sync, SyncResponse)
@@ -484,9 +488,8 @@ class MatrixClient:
     async def _handle_event(self, room: MatrixRoom, event) -> None:
         if self.allowed_rooms and room.room_id not in self.allowed_rooms:
             return
-        # State events (currently UnknownEvent) need tracking regardless of
-        # sender so we keep _known_pins in sync with our own writes too.
-        # Timeline events from self are dropped — no point notifying ourselves.
+        # State events (currently UnknownEvent) flow through regardless of
+        # sender; timeline events from self are dropped to avoid self-notify.
         if not isinstance(event, UnknownEvent) and event.sender == self.user_id:
             return
         handler = self._handlers.get(type(event))
@@ -495,30 +498,27 @@ class MatrixClient:
 
     # ── Per-type handlers ────────────────────────────────────
 
-    def _pinned(self, room_id: str) -> list[str]:
-        return self._known_pins.get(room_id, [])
-
     async def _on_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
-        msg = Message.from_nio(room, event, self._pinned(room.room_id))
+        msg = Message.from_nio(room, event)
         logger.info("Received text in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
     async def _on_media(self, room: MatrixRoom, event) -> None:
-        msg = Message.from_nio(room, event, self._pinned(room.room_id))
+        msg = Message.from_nio(room, event)
         logger.info("Received media in %s from %s", msg.room.name, msg.sender.name)
         if self._on_message:
             await self._on_message(msg)
 
     async def _on_reaction(self, room: MatrixRoom, event: ReactionEvent) -> None:
-        reaction = Reaction.from_nio(room, event, self._pinned(room.room_id))
+        reaction = Reaction.from_nio(room, event)
         logger.info("Received reaction in %s from %s: %s",
                     reaction.room.name, reaction.sender.name, reaction.emoji)
         if self._on_message:
             await self._on_message(reaction)
 
     async def _on_redaction(self, room: MatrixRoom, event: RedactionEvent) -> None:
-        redaction = Redaction.from_nio(room, event, self._pinned(room.room_id))
+        redaction = Redaction.from_nio(room, event)
         logger.info("Received redaction of %s in %s from %s (%s)",
                     redaction.target_event_id, redaction.room.name, redaction.sender.name, redaction.reason)
         if self._on_message:
@@ -529,41 +529,26 @@ class MatrixClient:
             await self._on_pinned_events(room, event)
 
     async def _on_pinned_events(self, room: MatrixRoom, event: UnknownEvent) -> None:
-        # The pinned_events state event always carries the full current list,
-        # so we diff against the previously-seen set to recover add/remove.
-        # Suppress emit during the initial sync replay (room not yet in
-        # _synced_rooms — _handle_sync fills that *after* the first sync's
-        # events have been processed), so we don't flood with pin events
-        # for everything pinned before we started.
+        # The pinned_events state event carries the full current list. Emit
+        # a single RoomPins with that list; clients diff against their own
+        # view if they want add/remove granularity. Suppress during initial
+        # sync (room not yet in _synced_rooms) and for self-sent changes.
         new_pins = event.source.get("content", {}).get("pinned", []) or []
-        old_set = set(self._known_pins.get(room.room_id, []))
-        new_set = set(new_pins)
-        self._known_pins[room.room_id] = new_pins
         if room.room_id not in self._synced_rooms:
-            logger.info("pinned_events for %s during initial sync — seeding %d ids", room.room_id, len(new_pins))
+            logger.info("pinned_events for %s during initial sync — %d ids, skipping emit", room.room_id, len(new_pins))
             return
-        logger.info("pinned_events for %s: old=%d new=%d sender=%s", room.room_id, len(old_set), len(new_set), event.sender)
         if event.sender == self.user_id:
-            # We made the change ourselves — track state, skip emit.
             return
-        added = new_set - old_set
-        removed = old_set - new_set
-        if not (added or removed):
-            return
-        sender = Sender.from_nio(room, event.sender)
-        room_model = Room.from_nio(room, self._pinned(room.room_id))
-        sent_at = _format_ts(getattr(event, "server_timestamp", None))
-        verified = getattr(event, "verified", False)
-        for event_id in added:
-            pin = Pin(sender=sender, room=room_model, target_event_id=event_id, pinned=True, sent_at=sent_at, verified=verified)
-            logger.info("Pin in %s by %s: %s", room_model.name, sender.name, event_id)
-            if self._on_message:
-                await self._on_message(pin)
-        for event_id in removed:
-            pin = Pin(sender=sender, room=room_model, target_event_id=event_id, pinned=False, sent_at=sent_at, verified=verified)
-            logger.info("Unpin in %s by %s: %s", room_model.name, sender.name, event_id)
-            if self._on_message:
-                await self._on_message(pin)
+        room_pins = RoomPins(
+            sender=Sender.from_nio(room, event.sender),
+            room=Room.from_nio(room),
+            pinned_event_ids=list(new_pins),
+            sent_at=_format_ts(getattr(event, "server_timestamp", None)),
+            verified=getattr(event, "verified", False),
+        )
+        logger.info("RoomPins in %s by %s: %d ids", room_pins.room.name, room_pins.sender.name, len(new_pins))
+        if self._on_message:
+            await self._on_message(room_pins)
 
     # ── Sync / verification / invite callbacks ───────────────
 
@@ -660,9 +645,9 @@ class MatrixClient:
     async def _update_pinned(
         self, room_id: str, add: str | None = None, remove: str | None = None
     ) -> None:
-        # Fetch authoritative state before writing — `_known_pins` may be stale
-        # if a concurrent client edited the list since our last sync.
-        current = await self._get_pinned_events(room_id)
+        # Fetch authoritative state before writing — other clients may have
+        # edited the list since our last sync.
+        current = await self.get_pinned_events(room_id)
         new_list = list(current)
         if add and add not in new_list:
             new_list.append(add)
@@ -675,11 +660,8 @@ class MatrixClient:
         )
         if not isinstance(resp, RoomPutStateResponse):
             raise RuntimeError(f"Matrix room_put_state(pinned_events) failed: {resp}")
-        # Optimistically update local cache so a slow sync doesn't make the next
-        # write race against stale state.
-        self._known_pins[room_id] = new_list
 
-    async def _get_pinned_events(self, room_id: str) -> list[str]:
+    async def get_pinned_events(self, room_id: str) -> list[str]:
         resp = await self._client.room_get_state_event(room_id, "m.room.pinned_events", "")
         if not isinstance(resp, RoomGetStateEventResponse):
             # Room has no pinned_events state event yet — treat as empty.
@@ -762,7 +744,7 @@ class MatrixClient:
 
         if isinstance(event, (RoomMessageText, RoomMessageImage, RoomMessageFile,
                               RoomEncryptedImage, RoomEncryptedFile)):
-            return Message.from_nio(room, event, self._pinned(room.room_id))
+            return Message.from_nio(room, event)
         raise RuntimeError(f"Event {event_id} is not a message (type={type(event).__name__})")
 
     async def _upload(
