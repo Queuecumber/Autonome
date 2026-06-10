@@ -133,20 +133,18 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     assert "tools" not in captured
     assert captured["model"] == "test-model"
     inputs = captured["input"]
+    # Developer event with framing.
     assert inputs[0]["role"] == "developer"
     prompt_payload = json.loads(inputs[0]["content"])
     assert prompt_payload["event"] == "summarize"
     assert "structured summary" in prompt_payload["instruction"]
-    # Second input is the fold block — older content to summarize.
-    assert "MESSAGES TO SUMMARIZE" in inputs[1]["content"]
-    fold_json = inputs[1]["content"].split("===\n", 1)[1]
-    folded = json.loads(fold_json)
-    assert {"role": "user", "content": "very old"} in folded
-    # Third input is the keep block — recency window, marked don't-summarize.
-    assert "STAYING IN CONTEXT" in inputs[2]["content"]
-    keep_json = inputs[2]["content"].split("===\n", 1)[1]
-    kept_payload = json.loads(keep_json)
-    assert {"role": "user", "content": "new"} in kept_payload
+    assert prompt_payload["fold_count"] == 6
+    assert prompt_payload["keep_count"] == 2
+    # User content with the actual fold + keep messages as JSON.
+    assert inputs[1]["role"] == "user"
+    content = json.loads(inputs[1]["content"])
+    assert {"role": "user", "content": "very old"} in content["fold"]
+    assert {"role": "user", "content": "new"} in content["keep"]
 
 
 @pytest.mark.asyncio

@@ -593,22 +593,25 @@ class SessionOrchestrator:
         the session — only the final summary lands in the next version's
         first message).
         """
-        prompt_msg = _developer_event("summarize", instruction=SUMMARIZE_INSTRUCTION)
-        fold_block = {
+        # Same developer-event + user-content pairing every other event uses.
+        # Developer event carries the framing; user content carries the data.
+        prompt_msg = _developer_event(
+            "summarize",
+            instruction=SUMMARIZE_INSTRUCTION,
+            fold_count=len(fold_messages),
+            keep_count=len(keep_messages),
+        )
+        content_msg = {
             "role": "user",
-            "content": (
-                "=== MESSAGES TO SUMMARIZE (leaving your working memory) ===\n"
-                + json.dumps(fold_messages, ensure_ascii=False)
+            "content": json.dumps(
+                {"fold": fold_messages, "keep": keep_messages},
+                ensure_ascii=False,
             ),
         }
-        keep_block = {
-            "role": "user",
-            "content": (
-                "=== MESSAGES STAYING IN CONTEXT (do not summarize) ===\n"
-                + json.dumps(keep_messages, ensure_ascii=False)
-            ),
-        }
-        input_items: list[Any] = [prompt_msg, fold_block, keep_block]
+        # This call's input is just these two items — session history is not
+        # reloaded. The point of compaction is to *replace* the loaded
+        # history; passing it in here would defeat that.
+        input_items: list[Any] = [prompt_msg, content_msg]
 
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
