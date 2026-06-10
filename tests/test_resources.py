@@ -333,25 +333,24 @@ async def test_resources_read_rejects_unknown_scheme():
 # ── matrix-adapter mxc URI ───────────────────────────────
 
 
-def test_matrix_extract_media_inlines_mime_unencrypted():
-    """_extract_media adds the sender-declared mime to plain mxc URLs so the
-    resource handler downstream can return it via ResourceResult."""
-    from matrix_adapter.model import MatrixClient
+def test_matrix_attachment_inlines_mime_unencrypted():
+    """Attachment.from_nio_event adds the sender-declared mime to plain mxc
+    URLs so the resource handler downstream can return it via ResourceResult."""
+    from matrix_adapter.model import Attachment
 
     event = MagicMock()
     event.source = {"content": {"info": {"mimetype": "text/markdown"}}}
     event.url = "mxc://srv/abc"
     event.body = "doc.md"
 
-    client = MatrixClient.__new__(MatrixClient)
-    att = client._extract_media(event)
+    att = Attachment.from_nio_event(event)
     assert "mime=text%2Fmarkdown" in att.url
     assert att.content_type == "text/markdown"
 
 
-def test_matrix_extract_media_inlines_mime_encrypted():
+def test_matrix_attachment_inlines_mime_encrypted():
     """Same inlining for encrypted attachments, alongside k/iv/hash."""
-    from matrix_adapter.model import MatrixClient
+    from matrix_adapter.model import Attachment
 
     event = MagicMock()
     event.source = {"content": {
@@ -368,8 +367,7 @@ def test_matrix_extract_media_inlines_mime_encrypted():
     event.url = "mxc://srv/enc"
     event.body = "img.png"
 
-    client = MatrixClient.__new__(MatrixClient)
-    att = client._extract_media(event)
+    att = Attachment.from_nio_event(event)
     assert "mime=image%2Fpng" in att.url
     assert "k=KEY" in att.url
 

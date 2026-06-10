@@ -8,15 +8,24 @@ import filetype
 import httpx
 from fastmcp import FastMCP
 from fastmcp.resources import ResourceContent, ResourceResult
+from matrix_adapter.model import (
+    MatrixClient,
+    Message,
+    MessageRelation,
+    Reaction,
+    Redaction,
+    RoomPins,
+    Sender,
+    UserProfile,
+)
 from pydantic import Base64Bytes
-
-from matrix_adapter.model import MatrixClient, Message, Reaction, Sender
 
 logger = logging.getLogger(__name__)
 
 client: MatrixClient
 session_manager_url: str
 _http: httpx.AsyncClient
+_event_queue: asyncio.Queue
 
 mcp = FastMCP("matrix", instructions=(
   """
@@ -107,16 +116,79 @@ don't think you have anything to add, you are free to not respond.
 
 Regardless of whether or not you respond to a message, you will end up reading it. This may surface
 interesting information and you should consider if it should be remembered using a memory tool.
+
+## Redaction
+
+User's may "redact" or delete a message, when this happens you will recieve a redaction event the references
+the message ID of the message which was redacted. You will still have the original message in your memory
+but you should note that the message was redacted and refrain from mentioning it unless there is a good
+reason to do otherwise.
+
+## Edits
+
+User's may edit a message, in this case you will receive a message containing the new (replaced) content
+of the message as well as an additional "relation" field that will show the event_id of the message which
+is edited and a relation_type of `m.replace`. As usual you may have all "versions" of an edited message in
+context however you should treat the most recent version as authoritative unless there is a good reason to do otherwise.
+
+## Threads and Replies
+
+Users may organize responses into threads. Similar to edits, you will receive a new message
+with new content and a "relation" field. This will show the event_id of the *thread root* along with
+a relation_type of `m.thread`. You can reply to threads by including this same *thread root* event id
+in your message using the `related_event_id` field and specifying the `m.thread` relationship type.
+
+You should keep in mind which messages are organized into which threads in order to keep track of
+the different information directly related to each thread. Threads will typically be focused around
+a particular topic or discussion. Be careful not to respond to the wrong thread when composing a reply.
+
+Users may also reply directly to a message to clarify what they are referring to. If this
+happens the new message will have a relation_type of `m.in_reply_to` along with the event_id of a
+previous message. You can do the same by specifying the event id of the message you want to reply
+directly to in the `related_event_id` field and specifying the same `m.in_reply_to` relationship
+type.
+
+Good practice is to prefer threads for group messages and replies for direct messages if the context
+isn't obvious but be flexible and go with the flow. If something makes sense as a threaded response or
+a reply or if it just seems like the user wants to go in a different direction, you can bend the rules.
+
+## Pinned Messages
+
+When someone changes the pinned messages in a room you will receive a `pinned_events`
+event carrying the full new list of pinned event ids. Diff against your prior view if
+you want add/remove granularity. Use `list_pinned(room_id)` if you want the current list
+on demand (e.g. when you first walk into a room).
+
+The pinned messages themselves may already be in your conversation history. If not, fetch
+them with `get_message(room_id, event_id)`. Treat pins as a signal that the message matters
+to the room — worth remembering when it looks like a rule, an announcement, or context the
+room expects everyone to know.
+
+You can pin and unpin messages yourself with the `pin_message` and `unpin_message` tools.
+Use this when something is genuinely worth keeping at the top of the room — a decision, a
+recurring reference, a rule. Don't pin casually; the pinned list is shared room state and
+everyone sees what you put there.
+
+
+
 """
 ))
 
 
 @mcp.tool
-async def send_message(room_id: str, text: str, action: str | None = None) -> None:
+async def send_message(room_id: str, text: str, action: str | None = None, related_event_id: str | None = None, relationship_type: str | None = None) -> str:
     """Send a text message to a Matrix room.
 
     Stops the typing indicator automatically. Markdown in `text` and
    `action` renders as HTML in supporting clients.
+
+   The message you are going to send *could* be related to another event (for example a thread
+   or a reply). To manage this relationship use the related_event_id and the relationship_type
+   arguments. Refer to the server instructions for more details.
+
+   Some common relationship types:
+    m.thread: reply in a thread, the related_event_id should be the *root* of the thread
+    m.in_reply_to: reply to a single message, calling out the message you are replying to for clarity
 
     Args:
         room_id: The Matrix room (e.g. `!abc:example.com`) — usually from
@@ -124,6 +196,11 @@ async def send_message(room_id: str, text: str, action: str | None = None) -> No
         text: The message body.
         action: Optional roleplay action (gesture, expression, thought)
             rendered separately from the body.
+        related_event_id: Optional event id of a previous event that is related to this message
+        relationship_type: Optional type of the relationship between this event and the previous event
+
+    Returns:
+      The event_id of the message which was sent
 
     Raises:
         RuntimeError: If the homeserver rejects the send.
@@ -135,9 +212,64 @@ async def send_message(room_id: str, text: str, action: str | None = None) -> No
         logger.warning("stop-typing before send_message failed: %r", e)
 
     if action:
-      text = f"> {action}\n\n{text}"
+        text = f"> {action}\n\n{text}"
 
-    await client.send_message(room_id, text)
+    if (related_event_id is None) != (relationship_type is None):
+        raise ValueError("related_event_id and relationship_type must both be set or both omitted")
+
+    relation = (
+        MessageRelation(related_event_id=related_event_id, relation_type=relationship_type)
+        if related_event_id else None
+    )
+    return await client.send_message(room_id, text, relation=relation)
+
+
+@mcp.tool
+async def redact_message(room_id: str, event_id: str, reason: str | None = None) -> None:
+    """Redact (delete) a message.
+
+    Use to redact a message by ID, this should be the ID of a message which you have sent.
+
+    Args:
+        room_id: The matrix room.
+        event_id: The event ID of the message to redact.
+        reason: Optional reason for why the message is being redacted.
+
+    Raises:
+        RuntimeError: If the homeserver rejects the redaction.
+    """
+    await client.redact_message(room_id, event_id, reason)
+
+
+@mcp.tool
+async def edit_message(room_id: str, event_id: str, text: str, action: str | None = None) -> str:
+    """Edit a message.
+
+    Replaces the contents of a previous message you sent with the new (optional action) and text.
+
+    Args:
+        room_id: The matrix room.
+        event_id: The ID of the message to edit.
+        text: The new text.
+        action: Optional new action.
+
+    Returns:
+        The event_id of the new message which replaces the old message.
+
+    Raises:
+        RuntimeError: If the homeserver rejects the edit.
+    """
+    try:
+        await client.send_typing(room_id, typing=False)
+    except Exception as e:
+        # Typing indicator is best-effort — never let it block the actual send.
+        logger.warning("stop-typing before edit_message failed: %r", e)
+
+    if action:
+        text = f"> {action}\n\n{text}"
+
+    relation = MessageRelation(related_event_id=event_id, relation_type="m.replace")
+    return await client.send_message(room_id, text, relation=relation)
 
 
 @mcp.tool
@@ -154,6 +286,46 @@ async def react(room_id: str, event_id: str, emoji: str) -> None:
         RuntimeError: If the homeserver rejects the reaction.
     """
     await client.send_reaction(room_id, event_id, emoji)
+
+
+@mcp.tool
+async def pin_message(room_id: str, event_id: str) -> None:
+    """Pin a message in a Matrix room.
+
+    Adds `event_id` to the room's pinned-messages list.
+
+    Args:
+        room_id: The Matrix room.
+        event_id: The message to pin.
+
+    Raises:
+        RuntimeError: If the homeserver rejects the change (e.g. insufficient
+            power level).
+    """
+    await client.pin_message(room_id, event_id)
+
+
+@mcp.tool
+async def unpin_message(room_id: str, event_id: str) -> None:
+    """Unpin a message in a Matrix room.
+
+    Removes `event_id` from the room's pinned-messages list.
+
+    Args:
+        room_id: The Matrix room.
+        event_id: The message to unpin.
+
+    Raises:
+        RuntimeError: If the homeserver rejects the change (e.g. insufficient
+            power level).
+    """
+    await client.unpin_message(room_id, event_id)
+
+
+@mcp.tool
+async def list_pinned(room_id: str) -> list[str]:
+    """Return the room's current pinned-message event ids."""
+    return await client.get_pinned_events(room_id)
 
 
 @mcp.tool
@@ -182,6 +354,52 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
         stop: Hide the indicator instead of showing it.
     """
     await client.send_typing(room_id, typing=not stop)
+
+
+@mcp.tool
+async def get_message(room_id: str, event_id: str) -> Message:
+    """Fetch a Matrix message by id.
+
+    Args:
+        room_id: The Matrix room the message lives in.
+        event_id: The event id to look up.
+
+    Returns:
+        The message with its sender, room, text, attachments, and relation.
+
+    Raises:
+        RuntimeError: If the homeserver can't find the event, the event
+            isn't a message (e.g. a reaction or state event), or the message
+            is encrypted and we don't have the decryption key.
+    """
+    return await client.get_message(room_id, event_id)
+
+
+@mcp.tool
+async def get_user_profile(user_id: str, room_id: str | None = None) -> UserProfile:
+    """Look up a Matrix user's profile.
+
+    Use this when you see a user_id you don't recognize, when you want to
+    show what someone looks like (avatar), or when reasoning about who has
+    moderation authority in a room. `trust_status` reflects the verification
+    state of the user's devices — useful when deciding how much to trust a
+    message at face value.
+
+    Args:
+        user_id: The Matrix user id (e.g. `@alice:example.com`).
+        room_id: Optional. If provided, includes the user's power level in
+            that room.
+
+    Returns:
+        Profile with `display_name`, `avatar_url` (an `mxc://` URI you can
+        read with `resources_read` to see the image), `trust_status` (one of
+        `verified`, `partial`, `unverified`, `blacklisted`, `unknown`), and
+        `power_level` if a room was given.
+
+    Raises:
+        RuntimeError: If the homeserver rejects the lookup.
+    """
+    return await client.get_user_profile(user_id, room_id)
 
 
 @mcp.tool
@@ -271,18 +489,33 @@ async def update_profile(display_name: str | None = None, avatar: Base64Bytes | 
 
 # ── Inbound event forwarding ─────────────────────────────
 
-async def on_message(msg: Message | Reaction) -> None:
+async def on_message(msg: Message | Reaction | Redaction | RoomPins) -> None:
     logger.info("Received: %s", msg)
-    try:
-        await _http.post(f"{session_manager_url}/event", json=msg.to_event())
-    except Exception as e:
-        logger.error("Failed to push event to session manager: %s", e)
+    await _event_queue.put(msg.to_event())
+
+
+async def _forward_events() -> None:
+    """Drain queued events to session-manager. Retries each event with
+    exponential backoff (1s–60s) until it sticks — so a session-manager
+    blip doesn't drop messages."""
+    while True:
+        payload = await _event_queue.get()
+        backoff = 1
+        while True:
+            try:
+                await _http.post(f"{session_manager_url}/event", json=payload)
+                break
+            except Exception as e:
+                logger.warning("Event delivery failed (%s); retry in %ds", e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+        _event_queue.task_done()
 
 
 # ── Entrypoint ───────────────────────────────────────────
 
 async def main():
-    global client, session_manager_url, _http
+    global client, session_manager_url, _http, _event_queue
 
     logging.basicConfig(
         level=logging.INFO,
@@ -307,6 +540,7 @@ async def main():
         allowed_rooms=allowed_rooms if allowed_rooms else None,
     )
     _http = httpx.AsyncClient(timeout=600)
+    _event_queue = asyncio.Queue()
 
     await client.login()
 
@@ -314,6 +548,7 @@ async def main():
         await asyncio.gather(
             client.listen(on_message),
             mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port),
+            _forward_events(),
         )
     finally:
         await _http.aclose()
