@@ -230,13 +230,12 @@ def _developer_event(event_type: str, **fields) -> dict:
 
 
 SUMMARIZE_INSTRUCTION = (
-    "Two content blocks follow. The first contains older session messages "
-    "that are about to leave your working memory — summarize these. The "
-    "second contains messages that stay in context after compaction — use "
-    "them for grounding, but do NOT include them in your summary; they "
-    "remain available verbatim. Without this separation you'd duplicate "
-    "content that's still right there. "
-    "First, save anything important from the to-summarize block to long-term "
+    "The user content below contains older session messages that are about "
+    "to leave your working memory — summarize them. The recency window "
+    "(more recent messages) stays in your context after this compaction "
+    "and is not shown here, so anything in it doesn't need to be in your "
+    "summary; it remains available verbatim. "
+    "First, save anything important from the messages below to long-term "
     "memory via the Memory MCP — after this turn, the raw content is gone "
     "from your working memory and only your summary plus whatever you "
     "persisted survives. "
@@ -594,7 +593,11 @@ class SessionOrchestrator:
         first message).
         """
         # Same developer-event + user-content pairing every other event uses.
-        # Developer event carries the framing; user content carries the data.
+        # Developer event carries the framing; user content carries the fold.
+        # The keep is NOT included — sending it here would roughly double the
+        # call's input and bust the model's context window for any session
+        # near the trigger. The agent's next turn already has keep visible
+        # as its working context.
         prompt_msg = _developer_event(
             "summarize",
             instruction=SUMMARIZE_INSTRUCTION,
@@ -603,10 +606,7 @@ class SessionOrchestrator:
         )
         content_msg = {
             "role": "user",
-            "content": json.dumps(
-                {"fold": fold_messages, "keep": keep_messages},
-                ensure_ascii=False,
-            ),
+            "content": json.dumps(fold_messages, ensure_ascii=False),
         }
         # This call's input is just these two items — session history is not
         # reloaded. The point of compaction is to *replace* the loaded
