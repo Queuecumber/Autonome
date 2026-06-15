@@ -616,7 +616,10 @@ class SessionOrchestrator:
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
         call_kwargs["instructions"] = self._build_instructions()
-        call_kwargs.setdefault("max_output_tokens", 16384)
+        # Match the main turn's output budget — when reasoning effort is on,
+        # the model's thinking budget can exceed a tight cap and the provider
+        # rejects with `max_tokens must be greater than thinking.budget_tokens`.
+        call_kwargs.setdefault("max_output_tokens", 65536)
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
