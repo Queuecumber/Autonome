@@ -140,13 +140,15 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     assert "structured summary" in prompt_payload["instruction"]
     assert prompt_payload["fold_count"] == 6
     assert prompt_payload["keep_count"] == 2
-    # User content carries only the fold (keep is implied by the recency
-    # window and shouldn't be re-sent — would otherwise double the call's
-    # input on large sessions).
-    assert inputs[1]["role"] == "user"
-    fold = json.loads(inputs[1]["content"])
-    assert {"role": "user", "content": "very old"} in fold
-    assert {"role": "user", "content": "new"} not in fold
+    # Fold messages ride as direct input items (not JSON-wrapped) so the
+    # tokenizer sees them natively. Comments and reasoning are filtered.
+    fold_items = inputs[1:]
+    assert {"role": "user", "content": "very old"} in fold_items
+    assert {"role": "user", "content": "new"} not in fold_items
+    assert all(
+        not (m.get("type") == "comment" and m.get("kind") == "usage")
+        for m in fold_items
+    )
 
 
 @pytest.mark.asyncio

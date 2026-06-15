@@ -130,12 +130,13 @@ class SessionManager:
         for i in range(len(usages) - 1, 0, -1):
             line_curr, tok_curr = usages[i]
             line_prev, tok_prev = usages[i - 1]
-            new_cumulative = cumulative + (tok_curr - tok_prev)
-            if new_cumulative >= recency_tokens:
-                if (new_cumulative - recency_tokens) <= (recency_tokens - cumulative):
-                    return line_prev + 1
-                return line_curr + 1
-            cumulative = new_cumulative
+            cumulative += tok_curr - tok_prev
+            if cumulative >= recency_tokens:
+                # Always include the crossing delta in keep. Overshooting
+                # recency_tokens is fine (keep is slightly larger than
+                # target); undershooting means fold balloons toward the
+                # summarize call's context window limit.
+                return line_prev + 1
         return 0
 
     @staticmethod

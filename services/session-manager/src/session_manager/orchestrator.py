@@ -592,26 +592,25 @@ class SessionOrchestrator:
         the session — only the final summary lands in the next version's
         first message).
         """
-        # Same developer-event + user-content pairing every other event uses.
-        # Developer event carries the framing; user content carries the fold.
-        # The keep is NOT included — sending it here would roughly double the
-        # call's input and bust the model's context window for any session
-        # near the trigger. The agent's next turn already has keep visible
-        # as its working context.
+        # Developer event carries the framing; the fold messages ride as
+        # input items directly (NOT JSON-dumped into a user message — that
+        # form is tokenized as escaped text and inflates the call by 2-3x).
+        # The keep is not included — sending it would roughly double the
+        # call's input and bust the model's context window. The agent's
+        # next turn already has keep visible as its working context. Match
+        # _process_events' filter to drop reasoning/comment items, which
+        # are noise for summarization.
         prompt_msg = _developer_event(
             "summarize",
             instruction=SUMMARIZE_INSTRUCTION,
             fold_count=len(fold_messages),
             keep_count=len(keep_messages),
         )
-        content_msg = {
-            "role": "user",
-            "content": json.dumps(fold_messages, ensure_ascii=False),
-        }
-        # This call's input is just these two items — session history is not
-        # reloaded. The point of compaction is to *replace* the loaded
-        # history; passing it in here would defeat that.
-        input_items: list[Any] = [prompt_msg, content_msg]
+        fold_input = [
+            m for m in fold_messages
+            if m.get("type") not in ("reasoning", "comment")
+        ]
+        input_items: list[Any] = [prompt_msg, *fold_input]
 
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model

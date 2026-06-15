@@ -149,10 +149,10 @@ def test_recency_split_returns_zero_when_recency_exceeds_all_deltas():
     assert SessionManager.recency_split(messages, 10_000) == 0
 
 
-def test_recency_split_prefers_earlier_cutoff_when_giant_delta_overshoots():
-    """A single huge tool-result delta shouldn't blow up the kept window.
-    When including the delta overshoots recency more than excluding it
-    undershoots, prefer the earlier cutoff (less kept)."""
+def test_recency_split_always_includes_crossing_delta():
+    """Crossing-delta is always included in keep. Overshooting recency
+    is fine (slightly larger keep window); undershooting would balloon
+    the fold past the summarize call's context window."""
     messages = [
         {"type": "comment", "kind": "usage", "input_tokens": 100},   # 0
         {"role": "user", "content": "x"},                             # 1
@@ -161,12 +161,10 @@ def test_recency_split_prefers_earlier_cutoff_when_giant_delta_overshoots():
         {"role": "user", "content": "y"},                             # 3
         {"type": "comment", "kind": "usage", "input_tokens": 1200},  # 4, delta 100
     ]
-    # Recency 200. Walking back:
-    #   delta 100 → cumulative 100 (< 200, continue)
-    #   delta 1000 → would be 1100 (overshoots by 900)
-    # Excluding the giant delta undershoots by 100; including overshoots by
-    # 900. Earlier cutoff is closer → return line_curr + 1 = 3.
-    assert SessionManager.recency_split(messages, 200) == 3
+    # Recency 200. Walking back: delta 100 → cumulative 100, delta 1000
+    # → cumulative 1100 ≥ 200, return line_prev + 1 = 1. Keep everything
+    # from index 1 onward (overshoot is fine).
+    assert SessionManager.recency_split(messages, 200) == 1
 
 
 def test_strip_usage_comments_drops_only_usage_kind():
