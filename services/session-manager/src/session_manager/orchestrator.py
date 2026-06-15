@@ -545,6 +545,12 @@ class SessionOrchestrator:
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
+        # Re-pass input via extra_body so cache_control survives the SDK's
+        # typed serialization.
+        extra_body = dict(call_kwargs.get("extra_body") or {})
+        extra_body["input"] = input_items
+        call_kwargs["extra_body"] = extra_body
+
         logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
                     len(input_items), len(self.openai_tools), len(events))
 
