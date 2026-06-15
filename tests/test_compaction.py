@@ -133,16 +133,20 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     assert "tools" not in captured
     assert captured["model"] == "test-model"
     inputs = captured["input"]
-    # Developer event with framing.
-    assert inputs[0]["role"] == "developer"
-    prompt_payload = json.loads(inputs[0]["content"])
+    # Last two items: developer-event + user-content pair carrying the
+    # summarize directive (same shape as a normal event arrival).
+    prompt_msg = inputs[-2]
+    content_msg = inputs[-1]
+    assert prompt_msg["role"] == "developer"
+    prompt_payload = json.loads(prompt_msg["content"])
     assert prompt_payload["event"] == "summarize"
-    assert "structured summary" in prompt_payload["instruction"]
     assert prompt_payload["fold_count"] == 6
     assert prompt_payload["keep_count"] == 2
+    assert content_msg["role"] == "user"
+    assert "structured summary" in content_msg["content"]
     # Fold messages ride as direct input items (not JSON-wrapped) so the
     # tokenizer sees them natively. Comments and reasoning are filtered.
-    fold_items = inputs[1:]
+    fold_items = inputs[:-2]
     assert {"role": "user", "content": "very old"} in fold_items
     assert {"role": "user", "content": "new"} not in fold_items
     assert all(

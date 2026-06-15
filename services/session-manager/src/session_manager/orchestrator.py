@@ -592,25 +592,25 @@ class SessionOrchestrator:
         the session — only the final summary lands in the next version's
         first message).
         """
-        # Developer event carries the framing; the fold messages ride as
-        # input items directly (NOT JSON-dumped into a user message — that
-        # form is tokenized as escaped text and inflates the call by 2-3x).
-        # The keep is not included — sending it would roughly double the
-        # call's input and bust the model's context window. The agent's
-        # next turn already has keep visible as its working context. Match
-        # _process_events' filter to drop reasoning/comment items, which
-        # are noise for summarization.
-        prompt_msg = _developer_event(
-            "summarize",
-            instruction=SUMMARIZE_INSTRUCTION,
-            fold_count=len(fold_messages),
-            keep_count=len(keep_messages),
-        )
+        # Fold rides as native input items (NOT JSON-dumped into a user
+        # message — that form inflates the call by 2-3x). Keep isn't sent
+        # here — the agent's next turn has it as recency. Filter reasoning
+        # and comment items to match _process_events.
+        # The summarize directive sits at the *end* as a regular event
+        # (developer-event + user-content pair, same shape as every other
+        # event the agent handles) — putting it at the front gets ignored
+        # after the model wades through the fold.
         fold_input = [
             m for m in fold_messages
             if m.get("type") not in ("reasoning", "comment")
         ]
-        input_items: list[Any] = [prompt_msg, *fold_input]
+        prompt_msg = _developer_event(
+            "summarize",
+            fold_count=len(fold_messages),
+            keep_count=len(keep_messages),
+        )
+        content_msg = {"role": "user", "content": SUMMARIZE_INSTRUCTION}
+        input_items: list[Any] = [*fold_input, prompt_msg, content_msg]
 
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
