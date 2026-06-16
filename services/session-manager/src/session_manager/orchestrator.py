@@ -186,6 +186,47 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
+def _attach_history_cache_breakpoint(
+    input_items: list[dict], history_len: int
+) -> list[dict]:
+    """Wrap the last role-based message in history with cache_control.
+
+    Walks history backward, finds the last item with a `content` field
+    (role-based messages — function_call / function_call_output have no
+    content array to attach to), and rebuilds it with a content-blocks
+    list whose final block carries `cache_control: {ttl: 1h}`. Returns a
+    new input_items list; the original is untouched.
+
+    No-op if history is empty or has no cacheable item.
+    """
+    for i in range(history_len - 1, -1, -1):
+        item = input_items[i]
+        if item.get("role") not in ("user", "assistant", "developer", "system"):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            new_content: list[dict] = [{
+                "type": "input_text",
+                "text": content,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            }]
+        elif isinstance(content, list) and content:
+            new_content = [dict(b) if isinstance(b, dict) else b for b in content]
+            if isinstance(new_content[-1], dict):
+                new_content[-1] = {
+                    **new_content[-1],
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                }
+            else:
+                continue
+        else:
+            continue
+        new_items = list(input_items)
+        new_items[i] = {**item, "content": new_content}
+        return new_items
+    return input_items
+
+
 def _describe_interrupted(completed_items: list) -> list[dict]:
     """Build structured descriptions of what the model had generated before interruption."""
     parts = []
@@ -515,6 +556,17 @@ class SessionOrchestrator:
         history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
         input_items = history + new_items
 
+        # Second breakpoint: slide a cache_control marker onto the last
+        # role-based message in history (the boundary between persisted
+        # context and this turn's new events). Anthropic only charges the
+        # write premium on the new portion that extends prior cache, so
+        # each turn the breakpoint moves forward and we cache-read the
+        # entire stable history. The Responses translator currently drops
+        # cache_control on input items (NVIDIA bug, to be reported) — this
+        # is a no-op until the gateway forwards it through, after which
+        # it's free savings without a code change.
+        input_items = _attach_history_cache_breakpoint(input_items, len(history))
+
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
         call_kwargs["input"] = input_items
@@ -522,17 +574,16 @@ class SessionOrchestrator:
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
-        # Caching only fires when cache_control sits on the top-level
-        # `instructions` parameter as content blocks (verified by probe
-        # against this gateway; the same directive on a developer- or
-        # system-role message inside `input` doesn't cache). The typed
-        # signature is `instructions: str`, so we override via extra_body.
+        # First breakpoint: cache the system prompt + tool docs + personality
+        # via the top-level `instructions` parameter as content blocks. This
+        # is the only position the Responses gateway currently honors. 1h TTL
+        # so the prefix survives idle stretches between conversations.
         extra_body = dict(call_kwargs.get("extra_body") or {})
         extra_body["instructions"] = [
             {
                 "type": "text",
                 "text": self._build_instructions(),
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
             }
         ]
         call_kwargs["extra_body"] = extra_body
