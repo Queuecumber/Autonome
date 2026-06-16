@@ -683,6 +683,7 @@ class SessionOrchestrator:
                 # persisted — pointer lives in the function_call_output.
                 call_kwargs["input"] = input_items + response.output + tool_results + image_items
                 input_items = call_kwargs["input"]
+                call_kwargs["extra_body"]["input"] = input_items
                 continue
 
             # No tool calls — final response
