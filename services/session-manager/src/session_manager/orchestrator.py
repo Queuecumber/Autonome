@@ -186,47 +186,6 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
-def _attach_history_cache_breakpoint(
-    input_items: list[dict], history_len: int
-) -> list[dict]:
-    """Wrap the last role-based message in history with cache_control.
-
-    Walks history backward, finds the last item with a `content` field
-    (role-based messages — function_call / function_call_output have no
-    content array to attach to), and rebuilds it with a content-blocks
-    list whose final block carries `cache_control: {ttl: 1h}`. Returns a
-    new input_items list; the original is untouched.
-
-    No-op if history is empty or has no cacheable item.
-    """
-    for i in range(history_len - 1, -1, -1):
-        item = input_items[i]
-        if item.get("role") not in ("user", "assistant", "developer", "system"):
-            continue
-        content = item.get("content")
-        if isinstance(content, str):
-            new_content: list[dict] = [{
-                "type": "input_text",
-                "text": content,
-                "cache_control": {"type": "ephemeral", "ttl": "1h"},
-            }]
-        elif isinstance(content, list) and content:
-            new_content = [dict(b) if isinstance(b, dict) else b for b in content]
-            if isinstance(new_content[-1], dict):
-                new_content[-1] = {
-                    **new_content[-1],
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                }
-            else:
-                continue
-        else:
-            continue
-        new_items = list(input_items)
-        new_items[i] = {**item, "content": new_content}
-        return new_items
-    return input_items
-
-
 def _describe_interrupted(completed_items: list) -> list[dict]:
     """Build structured descriptions of what the model had generated before interruption."""
     parts = []
@@ -556,12 +515,6 @@ class SessionOrchestrator:
         history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
         input_items = history + new_items
 
-        # Sliding history breakpoint: attach cache_control to the last
-        # role-based message in history. Currently a no-op — the Responses
-        # gateway drops cache_control on input items. Code stays in place
-        # so it activates when NVIDIA fixes the translator.
-        input_items = _attach_history_cache_breakpoint(input_items, len(history))
-
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
         call_kwargs["input"] = input_items
@@ -570,12 +523,21 @@ class SessionOrchestrator:
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
-        # Caching disabled: the only position that caches on Responses is
-        # `instructions` as a content-blocks list (verified via probe), but
-        # LiteLLM's streaming response model has `instructions: str` and
-        # 500s when it tries to echo the list back. Non-streaming strips
-        # instructions from the response and works, but we'd lose mid-stream
-        # cancellation. Reported to NVIDIA — revisit when fixed.
+        # Prompt caching via LiteLLM's AnthropicCacheControlHook: declare
+        # the breakpoints, the hook injects cache_control on the right
+        # content blocks per Anthropic's spec. Two breakpoints, both 1h:
+        # one pinned to the system message (instructions + tools prefix),
+        # one sliding to the last message each turn so persisted history
+        # caches across turns. Dormant until NVIDIA's LiteLLM is past
+        # BerriAI/litellm#27727 (merged 2026-05-13), then activates.
+        extra_body = dict(call_kwargs.get("extra_body") or {})
+        extra_body["cache_control_injection_points"] = [
+            {"location": "message", "role": "system",
+             "control": {"type": "ephemeral", "ttl": "1h"}},
+            {"location": "message", "index": -1,
+             "control": {"type": "ephemeral", "ttl": "1h"}},
+        ]
+        call_kwargs["extra_body"] = extra_body
 
         logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
                     len(input_items), len(self.openai_tools), len(events))
