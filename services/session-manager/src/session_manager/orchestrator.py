@@ -512,32 +512,9 @@ class SessionOrchestrator:
             new_items.append(context_msg)
             new_items.append(user_msg)
 
-        # Build input: instructions (as a content block with cache_control,
-        # so providers that gate prompt caching on an explicit directive
-        # cache the tools+system prefix across turns) + history + new
-        # events. Plain-string instructions can't carry the directive.
-        # Tools render before the system block, so a breakpoint on the
-        # instructions block covers tools + system as one cached prefix.
-        # The prefix is byte-identical across calls (deterministic build,
-        # stable tools list set at startup) so the cache hits.
-        instructions_msg = {
-            "role": "developer",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": self._build_instructions(),
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-        }
         history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
-        input_items = [instructions_msg] + history + new_items
+        input_items = history + new_items
 
-        # User config (reasoning, extra_body, etc.) starts as the base;
-        # orchestrator-owned fields overwrite it. max_output_tokens uses
-        # setdefault so user can override the 64K fallback. We deliberately
-        # do NOT set the top-level `instructions` parameter — the system
-        # prompt rides in input_items so it can carry the cache directive.
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
         call_kwargs["input"] = input_items
@@ -545,10 +522,19 @@ class SessionOrchestrator:
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
-        # Re-pass input via extra_body so cache_control survives the SDK's
-        # typed serialization.
+        # Caching only fires when cache_control sits on the top-level
+        # `instructions` parameter as content blocks (verified by probe
+        # against this gateway; the same directive on a developer- or
+        # system-role message inside `input` doesn't cache). The typed
+        # signature is `instructions: str`, so we override via extra_body.
         extra_body = dict(call_kwargs.get("extra_body") or {})
-        extra_body["input"] = input_items
+        extra_body["instructions"] = [
+            {
+                "type": "text",
+                "text": self._build_instructions(),
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
         call_kwargs["extra_body"] = extra_body
 
         logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
@@ -683,7 +669,6 @@ class SessionOrchestrator:
                 # persisted — pointer lives in the function_call_output.
                 call_kwargs["input"] = input_items + response.output + tool_results + image_items
                 input_items = call_kwargs["input"]
-                call_kwargs["extra_body"]["input"] = input_items
                 continue
 
             # No tool calls — final response
