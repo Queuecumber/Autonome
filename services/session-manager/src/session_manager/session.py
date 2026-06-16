@@ -103,15 +103,16 @@ class SessionManager:
 
     @staticmethod
     def recency_split(messages: list[dict[str, Any]], recency_tokens: int) -> int:
-        """Find the index where `messages[index:]` covers ~recency_tokens.
+        """Find the index where `messages[index:]` covers ~recency_tokens
+        of *post-filter* input.
 
-        Walks `usage` comments backward, summing deltas between consecutive
-        comments. Each delta is the token cost of everything appended
-        between those two LLM calls. When a single delta would push the
-        cumulative *past* recency by more than it currently undershoots,
-        prefer the earlier cutoff (less kept) — keeps the post-compaction
-        state from blowing up when one iteration emitted a huge tool
-        result.
+        Walks `usage` comments backward, summing deltas — but each delta
+        is discounted by the estimated size of reasoning items in its
+        span. Reasoning is in the LLM's in-turn input (so it contributes
+        to `input_tokens` deltas) but the orchestrator filters it before
+        the next turn's call. Counting reasoning toward recency would
+        cross the budget on bloat that won't replay, leaving the kept
+        window dramatically smaller than the configured target.
 
         Returns 0 (keep all) if there isn't enough usage data to identify
         a cutoff.
@@ -130,7 +131,12 @@ class SessionManager:
         for i in range(len(usages) - 1, 0, -1):
             line_curr, tok_curr = usages[i]
             line_prev, tok_prev = usages[i - 1]
-            cumulative += tok_curr - tok_prev
+            reasoning_chars = sum(
+                len(json.dumps(m, ensure_ascii=False))
+                for m in messages[line_prev + 1 : line_curr]
+                if m.get("type") == "reasoning"
+            )
+            cumulative += max(0, (tok_curr - tok_prev) - reasoning_chars // 4)
             if cumulative >= recency_tokens:
                 # Always include the crossing delta in keep. Overshooting
                 # recency_tokens is fine (keep is slightly larger than
