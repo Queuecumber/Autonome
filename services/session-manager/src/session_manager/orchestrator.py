@@ -556,37 +556,26 @@ class SessionOrchestrator:
         history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
         input_items = history + new_items
 
-        # Second breakpoint: slide a cache_control marker onto the last
-        # role-based message in history (the boundary between persisted
-        # context and this turn's new events). Anthropic only charges the
-        # write premium on the new portion that extends prior cache, so
-        # each turn the breakpoint moves forward and we cache-read the
-        # entire stable history. The Responses translator currently drops
-        # cache_control on input items (NVIDIA bug, to be reported) — this
-        # is a no-op until the gateway forwards it through, after which
-        # it's free savings without a code change.
+        # Sliding history breakpoint: attach cache_control to the last
+        # role-based message in history. Currently a no-op — the Responses
+        # gateway drops cache_control on input items. Code stays in place
+        # so it activates when NVIDIA fixes the translator.
         input_items = _attach_history_cache_breakpoint(input_items, len(history))
 
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
         call_kwargs["input"] = input_items
+        call_kwargs["instructions"] = self._build_instructions()
         call_kwargs.setdefault("max_output_tokens", 65536)
         if self.openai_tools:
             call_kwargs["tools"] = self.openai_tools
 
-        # First breakpoint: cache the system prompt + tool docs + personality
-        # via the top-level `instructions` parameter as content blocks. This
-        # is the only position the Responses gateway currently honors. 1h TTL
-        # so the prefix survives idle stretches between conversations.
-        extra_body = dict(call_kwargs.get("extra_body") or {})
-        extra_body["instructions"] = [
-            {
-                "type": "text",
-                "text": self._build_instructions(),
-                "cache_control": {"type": "ephemeral", "ttl": "1h"},
-            }
-        ]
-        call_kwargs["extra_body"] = extra_body
+        # Caching disabled: the only position that caches on Responses is
+        # `instructions` as a content-blocks list (verified via probe), but
+        # LiteLLM's streaming response model has `instructions: str` and
+        # 500s when it tries to echo the list back. Non-streaming strips
+        # instructions from the response and works, but we'd lose mid-stream
+        # cancellation. Reported to NVIDIA — revisit when fixed.
 
         logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
                     len(input_items), len(self.openai_tools), len(events))
