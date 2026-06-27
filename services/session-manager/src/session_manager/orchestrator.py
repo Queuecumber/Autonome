@@ -663,18 +663,37 @@ class SessionOrchestrator:
 
                 # Images go after tool results (Bedrock adjacency) and aren't
                 # persisted — pointer lives in the function_call_output.
-                # Strip reasoning items from response.output to match how
-                # we filter history at load time: LiteLLM's Responses-to-Chat
-                # transformer maps reasoning items (no role) to user-role
-                # messages, which Bedrock's anthropic-claude-opus-4-6
-                # reconciliation can leave dangling such that the
-                # conversation ends with an assistant message — Bedrock
-                # then rejects with "model does not support assistant
-                # message prefill".
-                fresh_output = [
-                    item for item in response.output
-                    if getattr(item, "type", None) != "reasoning"
-                ]
+                # Coerce response.output items to plain input-shape dicts:
+                # the typed SDK objects serialize with extra output-only
+                # fields (id, status, etc.) that LiteLLM's Responses->Chat
+                # transformer can silently drop, so the model ends up
+                # never seeing the agent's tool_calls between iterations
+                # (visible as the agent repeatedly re-initiating from the
+                # first user message). Reasoning items get skipped — they
+                # map to user-role messages downstream which breaks the
+                # user/assistant turn structure on Bedrock's anthropic
+                # models.
+                fresh_output: list[dict[str, Any]] = []
+                for item in response.output:
+                    item_type = getattr(item, "type", None)
+                    if item_type == "function_call":
+                        fresh_output.append({
+                            "type": "function_call",
+                            "call_id": item.call_id,
+                            "name": item.name,
+                            "arguments": item.arguments,
+                        })
+                    elif item_type == "message":
+                        text_parts: list[str] = []
+                        for block in item.content or []:
+                            if hasattr(block, "text") and block.text:
+                                text_parts.append(block.text)
+                        if text_parts:
+                            fresh_output.append({
+                                "role": "assistant",
+                                "content": "\n".join(text_parts),
+                            })
+                    # reasoning items: skip (see comment above)
                 call_kwargs["input"] = input_items + fresh_output + tool_results + image_items
                 input_items = call_kwargs["input"]
                 continue
