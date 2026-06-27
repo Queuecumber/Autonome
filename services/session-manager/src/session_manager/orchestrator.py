@@ -639,7 +639,19 @@ class SessionOrchestrator:
 
                 # Images go after tool results (Bedrock adjacency) and aren't
                 # persisted — pointer lives in the function_call_output.
-                call_kwargs["input"] = input_items + response.output + tool_results + image_items
+                # Strip reasoning items from response.output to match how
+                # we filter history at load time: LiteLLM's Responses-to-Chat
+                # transformer maps reasoning items (no role) to user-role
+                # messages, which Bedrock's anthropic-claude-opus-4-6
+                # reconciliation can leave dangling such that the
+                # conversation ends with an assistant message — Bedrock
+                # then rejects with "model does not support assistant
+                # message prefill".
+                fresh_output = [
+                    item for item in response.output
+                    if getattr(item, "type", None) != "reasoning"
+                ]
+                call_kwargs["input"] = input_items + fresh_output + tool_results + image_items
                 input_items = call_kwargs["input"]
                 continue
 
