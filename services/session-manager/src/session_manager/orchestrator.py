@@ -534,6 +534,12 @@ class SessionOrchestrator:
         all_new_messages = list(new_items)
 
         for iteration in range(self.max_tool_iterations):
+            tail_types = [
+                getattr(i, "type", None) if not isinstance(i, dict) else i.get("type") or i.get("role")
+                for i in call_kwargs["input"][-5:]
+            ]
+            logger.info("iter %d: %d input items, tail types %s",
+                        iteration, len(call_kwargs["input"]), tail_types)
             try:
                 response, completed_items = await self._stream_response(call_kwargs, cancel)
             except Exception as e:
