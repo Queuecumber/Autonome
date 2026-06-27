@@ -563,8 +563,20 @@ class SessionOrchestrator:
             # but preserved in the session log for cost/observability tracking.
             usage = getattr(response, "usage", None)
             if usage is not None:
+                def _int_or_none(v: Any) -> int | None:
+                    return v if isinstance(v, int) else None
                 details = getattr(usage, "output_tokens_details", None)
-                reasoning_tokens = getattr(details, "reasoning_tokens", 0) if details else 0
+                reasoning_tokens = (
+                    _int_or_none(getattr(details, "reasoning_tokens", None)) or 0
+                    if details else 0
+                )
+                input_details = getattr(usage, "input_tokens_details", None)
+                cached_tokens = (
+                    _int_or_none(getattr(input_details, "cached_tokens", None))
+                    if input_details else None
+                )
+                cache_read = _int_or_none(getattr(usage, "cache_read_input_tokens", None))
+                cache_creation = _int_or_none(getattr(usage, "cache_creation_input_tokens", None))
                 comment = {
                     "type": "comment",
                     "kind": "usage",
@@ -573,11 +585,17 @@ class SessionOrchestrator:
                     "output_tokens": getattr(usage, "output_tokens", None),
                     "reasoning_tokens": reasoning_tokens,
                     "total_tokens": getattr(usage, "total_tokens", None),
+                    "cached_tokens": cached_tokens,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_creation,
                 }
                 all_new_messages.append(comment)
-                logger.info("  usage: in=%s out=%s reasoning=%d total=%s",
-                            comment["input_tokens"], comment["output_tokens"],
-                            reasoning_tokens, comment["total_tokens"])
+                logger.info(
+                    "  usage: in=%s out=%s reasoning=%d total=%s cached=%s cache_read=%s cache_create=%s",
+                    comment["input_tokens"], comment["output_tokens"],
+                    reasoning_tokens, comment["total_tokens"],
+                    cached_tokens, cache_read, cache_creation,
+                )
 
             # Process output items
             tool_calls = []
