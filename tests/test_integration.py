@@ -1,6 +1,6 @@
 """Smoke test for the orchestrator's event-handling pipeline.
 
-Mocks the LLM (Responses API streaming) and verifies that an inbound
+Mocks the LLM (chat completions streaming) and verifies that an inbound
 event flows through to a final response and gets persisted to the
 session.
 """
@@ -14,45 +14,41 @@ from session_manager.orchestrator import SessionOrchestrator
 from session_manager.session import SessionManager
 
 
-def _stream_event(event_type: str, **fields) -> MagicMock:
-    """One event of the OpenAI Responses streaming protocol."""
-    e = MagicMock()
-    e.type = event_type
-    for k, v in fields.items():
-        setattr(e, k, v)
-    return e
+def _text_chunk(text: str, finish: str | None = None):
+    """One chat-completions streaming chunk carrying text content."""
+    chunk = MagicMock()
+    choice = MagicMock()
+    delta = MagicMock()
+    delta.content = text
+    delta.tool_calls = None
+    choice.delta = delta
+    choice.finish_reason = finish
+    chunk.choices = [choice]
+    chunk.usage = None
+    return chunk
 
 
-def _mock_message_item(text: str) -> MagicMock:
-    item = MagicMock()
-    item.type = "message"
-    content = MagicMock()
-    content.text = text
-    item.content = [content]
-    return item
-
-
-def _mock_response(text: str) -> MagicMock:
-    resp = MagicMock()
-    resp.status = "completed"
-    resp.output = [_mock_message_item(text)]
-    resp.usage = MagicMock()
-    resp.usage.input_tokens = 100
-    resp.usage.output_tokens = 50
-    resp.usage.total_tokens = 150
-    resp.usage.output_tokens_details = MagicMock()
-    resp.usage.output_tokens_details.reasoning_tokens = 0
-    return resp
+def _final_chunk():
+    """Final chunk that carries usage info and no content."""
+    chunk = MagicMock()
+    chunk.choices = []
+    chunk.usage = MagicMock()
+    chunk.usage.prompt_tokens = 100
+    chunk.usage.completion_tokens = 50
+    chunk.usage.total_tokens = 150
+    chunk.usage.prompt_tokens_details = MagicMock()
+    chunk.usage.prompt_tokens_details.cached_tokens = 0
+    chunk.usage.cache_read_input_tokens = None
+    chunk.usage.cache_creation_input_tokens = None
+    return chunk
 
 
 def _stream(text: str):
-    """Async iterator simulating a non-tool response stream."""
-    response = _mock_response(text)
+    """Async iterator simulating a non-tool chat-completions stream."""
 
     async def _gen():
-        yield _stream_event("response.created")
-        yield _stream_event("response.output_item.done", item=_mock_message_item(text))
-        yield _stream_event("response.completed", response=response)
+        yield _text_chunk(text, finish="stop")
+        yield _final_chunk()
 
     return _gen()
 
@@ -81,8 +77,9 @@ async def test_event_flows_to_response_and_persists(tmp_path):
     async def fake_create(**kwargs):
         return _stream("hello back")
     orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = fake_create
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
 
     event = Event(source="matrix", text="hi", metadata={"room_id": "!r"})
     result = await orch.handle_event(event)
@@ -112,8 +109,9 @@ async def test_explicit_session_id_routes(tmp_path):
     async def fake_create(**kwargs):
         return _stream("ack")
     orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = fake_create
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
 
     event = Event(session_id="cron-target", source="time", text="tick")
     await orch.handle_event(event)

@@ -186,6 +186,90 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
+def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate persisted session items (Responses-API shape) to Chat
+    Completions messages.
+
+    Persisted items come in these flavors:
+      - role-based: {role: user/assistant/developer, content: str}
+      - function_call: {type, call_id, name, arguments}
+      - function_call_output: {type, call_id, output}
+      - reasoning: {type, content} — dropped (not replayable)
+      - comment: {type: comment, ...} — dropped (telemetry)
+
+    Output is the chat-completions form Anthropic expects on the wire:
+      - assistant messages may carry `tool_calls`; adjacent function_call
+        items are merged into one assistant message so all tool_use blocks
+        appear together (matches Anthropic's requirement)
+      - function_call_output → {role: tool, tool_call_id, content}
+      - developer-role events → system messages
+    """
+    messages: list[dict[str, Any]] = []
+    pending_calls: list[dict[str, Any]] = []
+    pending_text = ""
+
+    def flush_assistant() -> None:
+        nonlocal pending_text, pending_calls
+        if not pending_calls and not pending_text:
+            return
+        msg: dict[str, Any] = {"role": "assistant"}
+        if pending_calls:
+            msg["tool_calls"] = pending_calls
+            msg["content"] = pending_text or None
+        else:
+            msg["content"] = pending_text
+        messages.append(msg)
+        pending_calls = []
+        pending_text = ""
+
+    for item in items:
+        item_type = item.get("type")
+        role = item.get("role")
+
+        if item_type == "function_call":
+            pending_calls.append({
+                "id": item["call_id"],
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments") or "",
+                },
+            })
+        elif item_type == "function_call_output":
+            flush_assistant()
+            messages.append({
+                "role": "tool",
+                "tool_call_id": item["call_id"],
+                "content": item.get("output") or "",
+            })
+        elif item_type in ("reasoning", "comment"):
+            continue
+        elif role == "assistant":
+            flush_assistant()
+            pending_text = item.get("content") or ""
+        elif role == "developer":
+            flush_assistant()
+            messages.append({"role": "system", "content": item.get("content") or ""})
+        elif role in ("user", "system"):
+            flush_assistant()
+            messages.append({"role": role, "content": item.get("content") or ""})
+
+    flush_assistant()
+    return messages
+
+
+def _tool_def_for_chat(tool: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a Responses-shape function tool into Chat Completions shape."""
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool.get("description") or "",
+            "parameters": tool.get("parameters") or {},
+        },
+    }
+
+
 def _describe_interrupted(completed_items: list) -> list[dict]:
     """Build structured descriptions of what the model had generated before interruption."""
     parts = []
@@ -406,34 +490,66 @@ class SessionOrchestrator:
         return output, image_items
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
-        """Stream an LLM response, collecting completed items.
+        """Stream a chat completion and aggregate deltas into a single
+        completed response.
 
-        Returns (response, completed_items):
-          - On normal completion: (Response, [all output items])
-          - On interruption: (None, [items completed before cancel])
+        Returns (response, partial):
+          - On normal completion: (dict with content/tool_calls/usage/finish_reason, None)
+          - On interruption: (None, dict with whatever content/tool_calls
+            were collected before cancel)
         """
-        completed_items = []
-        response = None
+        content_parts: list[str] = []
+        tool_calls_by_idx: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
+        usage: Any = None
 
-        async for event in await self.llm.responses.create(**call_kwargs, stream=True):
+        async for chunk in await self.llm.chat.completions.create(**call_kwargs, stream=True):
             if cancel.is_set():
                 logger.info("Stream interrupted by new message")
-                return None, completed_items
+                return None, {
+                    "content": "".join(content_parts),
+                    "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
+                }
 
-            event_type = getattr(event, "type", None)
-            if event_type == "response.output_item.done":
-                completed_items.append(event.item)
-            elif event_type == "response.completed":
-                response = event.response
-            elif event_type == "response.failed":
-                resp = getattr(event, "response", None)
-                status = getattr(resp, "status", "unknown")
-                error = getattr(resp, "error", None)
-                model = getattr(resp, "model", "unknown")
-                logger.error("LLM stream failed: status=%s model=%s error=%s", status, model, error)
-                return None, completed_items
+            # Usage typically rides on the final chunk (some providers send
+            # it as a stand-alone chunk with empty choices).
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
 
-        return response, completed_items
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if getattr(delta, "content", None):
+                content_parts.append(delta.content)
+
+            for tc_delta in getattr(delta, "tool_calls", None) or []:
+                idx = getattr(tc_delta, "index", 0) or 0
+                tc = tool_calls_by_idx.setdefault(idx, {
+                    "id": "",
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                })
+                if getattr(tc_delta, "id", None):
+                    tc["id"] = tc_delta.id
+                func_delta = getattr(tc_delta, "function", None)
+                if func_delta is not None:
+                    if getattr(func_delta, "name", None):
+                        tc["function"]["name"] += func_delta.name
+                    if getattr(func_delta, "arguments", None):
+                        tc["function"]["arguments"] += func_delta.arguments
+
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+        return {
+            "content": "".join(content_parts),
+            "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
+            "finish_reason": finish_reason,
+            "usage": usage,
+        }, None
 
     async def handle_event(self, event: Event) -> str | None:
         """Process an inbound event from any adapter.
@@ -512,135 +628,134 @@ class SessionOrchestrator:
             new_items.append(context_msg)
             new_items.append(user_msg)
 
-        # Build input: history + new events (filter reasoning — output-only type)
+        # Build history (filter non-replayable items) and the persistent
+        # set of items we'll save back at end-of-turn.
         history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
-        input_items = history + new_items
+        all_new_messages: list[dict[str, Any]] = list(new_items)
 
-        # User config (reasoning, extra_body, etc.) starts as the base;
-        # orchestrator-owned fields overwrite it. max_output_tokens uses
-        # setdefault so user can override the 64K fallback.
-        call_kwargs: dict[str, Any] = dict(self.call_config)
-        call_kwargs["model"] = self.model
-        call_kwargs["instructions"] = self._build_instructions()
-        call_kwargs["input"] = input_items
-        call_kwargs.setdefault("max_output_tokens", 65536)
-        if self.openai_tools:
-            call_kwargs["tools"] = self.openai_tools
+        # Base config + tools, rewritten each iteration with fresh messages.
+        base_kwargs: dict[str, Any] = dict(self.call_config)
+        base_kwargs["model"] = self.model
+        base_kwargs.setdefault("max_tokens", 65536)
+        chat_tools = [_tool_def_for_chat(t) for t in self.openai_tools]
 
-        logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
-                    len(input_items), len(self.openai_tools), len(events))
-
-        # Collect all new items to save to history
-        all_new_messages = list(new_items)
+        instructions_msg = {"role": "system", "content": self._build_instructions()}
+        logger.info("Calling LLM: %d history items, %d new items, %d tools, %d event(s)",
+                    len(history), len(new_items), len(chat_tools), len(events))
 
         for iteration in range(self.max_tool_iterations):
+            messages = [instructions_msg] + _to_chat_messages(history + all_new_messages)
+            call_kwargs = dict(base_kwargs)
+            call_kwargs["messages"] = messages
+            if chat_tools:
+                call_kwargs["tools"] = chat_tools
+
+            logger.debug("iter %d: %d messages", iteration, len(messages))
+
             try:
-                response, completed_items = await self._stream_response(call_kwargs, cancel)
+                response, partial = await self._stream_response(call_kwargs, cancel)
             except Exception as e:
                 logger.error("LLM call failed: %s: %r", type(e).__name__, e, exc_info=True)
                 return None
 
             # --- Interrupted during streaming ---
             if response is None:
-                partial = _describe_interrupted(completed_items)
+                parts: list[dict] = []
                 if partial:
-                    all_new_messages.append(_developer_event("interrupted", partial=partial))
-                    logger.info("Interrupted, partial: %s", partial)
+                    if partial.get("content"):
+                        parts.append({"text": partial["content"]})
+                    for tc in partial.get("tool_calls") or []:
+                        try:
+                            args = json.loads(tc["function"]["arguments"])
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            args = tc.get("function", {}).get("arguments", "")
+                        parts.append({"tool": tc["function"]["name"], "arguments": args})
+                if parts:
+                    all_new_messages.append(_developer_event("interrupted", partial=parts))
+                    logger.info("Interrupted, partial: %s", parts)
                 else:
                     logger.info("Interrupted before any output completed")
                 self.session.append(session_id, all_new_messages)
                 return None
 
-            logger.debug("LLM response (iter %d): status=%s", iteration, response.status)
-
             # Record token usage as a transcript comment — stripped from replay
             # but preserved in the session log for cost/observability tracking.
-            usage = getattr(response, "usage", None)
+            usage = response.get("usage")
             if usage is not None:
-                details = getattr(usage, "output_tokens_details", None)
-                reasoning_tokens = getattr(details, "reasoning_tokens", 0) if details else 0
+                def _int_or_none(v: Any) -> int | None:
+                    return v if isinstance(v, int) else None
+                input_details = getattr(usage, "prompt_tokens_details", None)
+                cached = (
+                    _int_or_none(getattr(input_details, "cached_tokens", None))
+                    if input_details else None
+                )
+                cache_read = _int_or_none(getattr(usage, "cache_read_input_tokens", None))
+                cache_creation = _int_or_none(getattr(usage, "cache_creation_input_tokens", None))
                 comment = {
                     "type": "comment",
                     "kind": "usage",
                     "iteration": iteration,
-                    "input_tokens": getattr(usage, "input_tokens", None),
-                    "output_tokens": getattr(usage, "output_tokens", None),
-                    "reasoning_tokens": reasoning_tokens,
-                    "total_tokens": getattr(usage, "total_tokens", None),
+                    "input_tokens": _int_or_none(getattr(usage, "prompt_tokens", None)),
+                    "output_tokens": _int_or_none(getattr(usage, "completion_tokens", None)),
+                    "total_tokens": _int_or_none(getattr(usage, "total_tokens", None)),
+                    "cached_tokens": cached,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_creation,
                 }
                 all_new_messages.append(comment)
-                logger.info("  usage: in=%s out=%s reasoning=%d total=%s",
-                            comment["input_tokens"], comment["output_tokens"],
-                            reasoning_tokens, comment["total_tokens"])
+                logger.info(
+                    "  usage: in=%s out=%s total=%s cached=%s cache_read=%s cache_create=%s",
+                    comment["input_tokens"], comment["output_tokens"], comment["total_tokens"],
+                    cached, cache_read, cache_creation,
+                )
 
-            # Process output items
-            tool_calls = []
-            assistant_text = ""
-            reasoning_text = ""
-
-            logger.debug("response.output types: %s",
-                         [getattr(i, "type", type(i).__name__) for i in response.output])
-            for item in response.output:
-                if item.type == "function_call":
-                    tool_calls.append(item)
-                elif item.type == "reasoning":
-                    logger.debug("reasoning item: summary=%r content=%r",
-                                 getattr(item, "summary", None), item.content)
-                    for block in (getattr(item, "summary", None) or []):
-                        if hasattr(block, "text"):
-                            reasoning_text += block.text
-                    for block in (item.content or []):
-                        if hasattr(block, "text"):
-                            reasoning_text += block.text
-                elif item.type == "message":
-                    for content in item.content or []:
-                        if hasattr(content, "text"):
-                            assistant_text += content.text
-
-            if reasoning_text:
-                all_new_messages.append({"type": "reasoning", "content": reasoning_text})
+            assistant_text = response["content"]
+            tool_calls = response["tool_calls"]
 
             if tool_calls:
-                # Save function calls to history
+                # Save the assistant's text (if any) before the function_calls
+                # so chronological replay matches what the model emitted.
+                if assistant_text:
+                    all_new_messages.append({"role": "assistant", "content": assistant_text})
+
                 for tc in tool_calls:
-                    # Re-encode arguments to get proper unicode instead of ascii escapes
-                    args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
+                    try:
+                        args_unicode = json.dumps(json.loads(tc["function"]["arguments"]), ensure_ascii=False)
+                    except (json.JSONDecodeError, ValueError):
+                        args_unicode = tc["function"].get("arguments") or "{}"
                     all_new_messages.append({
                         "type": "function_call",
-                        "call_id": tc.call_id,
-                        "name": tc.name,
+                        "call_id": tc["id"],
+                        "name": tc["function"]["name"],
                         "arguments": args_unicode,
                     })
 
                 # Execute tool calls, checking for interruption between each
-                tool_results = []
-                image_items = []
                 for tc in tool_calls:
                     if cancel.is_set():
                         pending = []
                         for t in tool_calls[tool_calls.index(tc):]:
                             try:
-                                args = json.loads(t.arguments)
-                            except (json.JSONDecodeError, AttributeError):
-                                args = t.arguments
-                            pending.append({"tool": t.name, "arguments": args})
+                                args = json.loads(t["function"]["arguments"])
+                            except (json.JSONDecodeError, KeyError, ValueError):
+                                args = t["function"].get("arguments", "")
+                            pending.append({"tool": t["function"]["name"], "arguments": args})
                         logger.info("Interrupted between tool calls, pending: %s", pending)
                         all_new_messages.append(_developer_event("interrupted", pending=pending))
                         self.session.append(session_id, all_new_messages)
                         return None
 
-                    logger.info("  Tool call: %s(%s)", tc.name, tc.arguments[:100])
-                    result, images = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
+                    logger.info("  Tool call: %s(%s)", tc["function"]["name"], tc["function"]["arguments"][:100])
+                    result, _images = await self._execute_tool_call(
+                        tc["id"], tc["function"]["name"], tc["function"]["arguments"]
+                    )
                     logger.debug("  Result: %s", result["output"][:200])
-                    tool_results.append(result)
                     all_new_messages.append(_prepare_for_history(result))
-                    for img in images:
-                        image_items.append(img)
+                    # TODO: image tool results don't flow through chat completions
+                    # as cleanly as Responses (they'd need a follow-up user-role
+                    # image message). Skipped for now; pointer URIs in the tool
+                    # output text remain accessible to the agent.
 
-                # Images go after tool results (Bedrock adjacency) and aren't
-                # persisted — pointer lives in the function_call_output.
-                call_kwargs["input"] = input_items + response.output + tool_results + image_items
-                input_items = call_kwargs["input"]
                 continue
 
             # No tool calls — final response
