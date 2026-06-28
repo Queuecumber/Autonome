@@ -500,6 +500,7 @@ class SessionOrchestrator:
         """
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        thinking_blocks: list[dict[str, Any]] = []  # by position, accumulated across chunks
         tool_calls_by_idx: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
         usage: Any = None
@@ -510,6 +511,7 @@ class SessionOrchestrator:
                 return None, {
                     "content": "".join(content_parts),
                     "reasoning": "".join(reasoning_parts),
+                    "thinking_blocks": [b for b in thinking_blocks if b.get("thinking") or b.get("signature")],
                     "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
                 }
 
@@ -534,6 +536,26 @@ class SessionOrchestrator:
             if isinstance(reasoning, str) and reasoning:
                 reasoning_parts.append(reasoning)
 
+            # Structured thinking blocks with signatures — needed for in-turn
+            # replay so the model can resume its reasoning chain across tool
+            # calls. Accumulate by position; each delta may carry partial
+            # thinking text and a final signature.
+            tbs_delta = getattr(delta, "thinking_blocks", None)
+            if isinstance(tbs_delta, list):
+                for i, tb in enumerate(tbs_delta):
+                    while len(thinking_blocks) <= i:
+                        thinking_blocks.append({"type": "thinking", "thinking": ""})
+                    block = thinking_blocks[i]
+                    tb_type = tb.get("type") if isinstance(tb, dict) else getattr(tb, "type", None)
+                    if isinstance(tb_type, str):
+                        block["type"] = tb_type
+                    tb_thinking = tb.get("thinking") if isinstance(tb, dict) else getattr(tb, "thinking", None)
+                    if isinstance(tb_thinking, str) and tb_thinking:
+                        block["thinking"] += tb_thinking
+                    tb_signature = tb.get("signature") if isinstance(tb, dict) else getattr(tb, "signature", None)
+                    if isinstance(tb_signature, str) and tb_signature:
+                        block["signature"] = tb_signature
+
             for tc_delta in getattr(delta, "tool_calls", None) or []:
                 idx = getattr(tc_delta, "index", 0) or 0
                 tc = tool_calls_by_idx.setdefault(idx, {
@@ -556,6 +578,7 @@ class SessionOrchestrator:
         return {
             "content": "".join(content_parts),
             "reasoning": "".join(reasoning_parts),
+            "thinking_blocks": [b for b in thinking_blocks if b.get("thinking") or b.get("signature")],
             "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
             "finish_reason": finish_reason,
             "usage": usage,
@@ -638,12 +661,31 @@ class SessionOrchestrator:
             new_items.append(context_msg)
             new_items.append(user_msg)
 
-        # Build history (filter non-replayable items) and the persistent
-        # set of items we'll save back at end-of-turn.
+        # Two parallel records of this turn's content:
+        #   - all_new_messages: persistence shape (function_call,
+        #     function_call_output, role messages, reasoning, comments).
+        #     Saved to the session file at end-of-turn.
+        #   - in_turn_chat: chat-completions shape (assistant w/ tool_calls,
+        #     tool messages). Held in memory only so we can attach
+        #     thinking_blocks for in-turn reasoning continuity without
+        #     polluting persisted history (Anthropic doesn't replay thinking
+        #     across user turns anyway).
         history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
         all_new_messages: list[dict[str, Any]] = list(new_items)
+        in_turn_chat: list[dict[str, Any]] = []
+        for item in new_items:
+            role = item.get("role")
+            content = item.get("content") or ""
+            in_turn_chat.append({
+                "role": "system" if role == "developer" else role,
+                "content": content,
+            })
 
-        # Base config + tools, rewritten each iteration with fresh messages.
+        # History translated once — it's stable across iterations, no point
+        # re-rendering each loop pass.
+        history_chat = _to_chat_messages(history)
+
+        # Base config + tools.
         base_kwargs: dict[str, Any] = dict(self.call_config)
         base_kwargs["model"] = self.model
         base_kwargs.setdefault("max_tokens", 65536)
@@ -654,7 +696,7 @@ class SessionOrchestrator:
                     len(history), len(new_items), len(chat_tools), len(events))
 
         for iteration in range(self.max_tool_iterations):
-            messages = [instructions_msg] + _to_chat_messages(history + all_new_messages)
+            messages = [instructions_msg] + history_chat + in_turn_chat
             call_kwargs = dict(base_kwargs)
             call_kwargs["messages"] = messages
             if chat_tools:
@@ -722,16 +764,36 @@ class SessionOrchestrator:
             assistant_text = response["content"]
             tool_calls = response["tool_calls"]
             reasoning_text = response.get("reasoning") or ""
+            thinking_blocks = response.get("thinking_blocks") or []
 
             if reasoning_text:
                 all_new_messages.append({"type": "reasoning", "content": reasoning_text})
 
             if tool_calls:
-                # Save the assistant's text (if any) before the function_calls
-                # so chronological replay matches what the model emitted.
+                # Build the assistant message we'll send back on the next
+                # iteration. Attach thinking_blocks so the model can resume
+                # its reasoning chain across tool calls. These don't get
+                # persisted to session — in-memory only.
+                assistant_chat: dict[str, Any] = {"role": "assistant"}
+                if thinking_blocks:
+                    assistant_chat["thinking_blocks"] = thinking_blocks
+                assistant_chat["content"] = assistant_text or None
+                assistant_chat["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"].get("arguments") or "",
+                        },
+                    }
+                    for tc in tool_calls
+                ]
+                in_turn_chat.append(assistant_chat)
+
+                # Persist in our session shape (no thinking_blocks).
                 if assistant_text:
                     all_new_messages.append({"role": "assistant", "content": assistant_text})
-
                 for tc in tool_calls:
                     try:
                         args_unicode = json.dumps(json.loads(tc["function"]["arguments"]), ensure_ascii=False)
@@ -765,6 +827,11 @@ class SessionOrchestrator:
                     )
                     logger.debug("  Result: %s", result["output"][:200])
                     all_new_messages.append(_prepare_for_history(result))
+                    in_turn_chat.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result.get("output") or "",
+                    })
                     # TODO: image tool results don't flow through chat completions
                     # as cleanly as Responses (they'd need a follow-up user-role
                     # image message). Skipped for now; pointer URIs in the tool
