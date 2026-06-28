@@ -729,11 +729,27 @@ class SessionOrchestrator:
         #   - last history message: slides forward each user turn as new
         #     persisted content accumulates
         # 1h TTL so the cache survives idle stretches between conversations.
-        history_chat = _cache_last_msg(_to_chat_messages(history))
+        history_chat_raw = _to_chat_messages(history)
+        history_chat = _cache_last_msg(history_chat_raw)
         instructions_msg = _with_cache_breakpoint({
             "role": "system",
             "content": self._build_instructions(),
         })
+
+        # Diagnostic: SHA of instructions + the bytes-form of history_chat
+        # without cache_control markers (those are metadata, ignored by the
+        # cache lookup per the sliding-marker probe). If consecutive turns
+        # produce the same hash for the overlapping prefix, byte stability
+        # is fine. If it drifts, something non-deterministic is sneaking in.
+        import hashlib
+        instructions_hash = hashlib.sha256(
+            json.dumps(instructions_msg, sort_keys=False, ensure_ascii=False).encode()
+        ).hexdigest()[:12]
+        history_hash = hashlib.sha256(
+            json.dumps(history_chat_raw, sort_keys=False, ensure_ascii=False).encode()
+        ).hexdigest()[:12]
+        logger.info("cache prefix sha: instructions=%s history=%s (%d msgs)",
+                    instructions_hash, history_hash, len(history_chat_raw))
 
         # Base config + tools.
         base_kwargs: dict[str, Any] = dict(self.call_config)
@@ -815,6 +831,7 @@ class SessionOrchestrator:
             assistant_text = response["content"]
             tool_calls = response["tool_calls"]
             reasoning_text = response.get("reasoning") or ""
+            thinking_blocks = response.get("thinking_blocks") or []
 
             if reasoning_text:
                 all_new_messages.append({"type": "reasoning", "content": reasoning_text})
@@ -837,23 +854,24 @@ class SessionOrchestrator:
                     })
 
                 # Build the assistant message we'll send back on the next
-                # iteration. thinking_blocks would help reasoning continuity
-                # but they're in_turn-only — including them here makes turn N's
-                # bytes differ from turn N+1's rebuilt-from-history bytes,
-                # breaking the cross-turn cache. Drop for now; revisit if we
-                # find a way to round-trip them without that cost.
-                assistant_chat: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": assistant_text or None,
-                    "tool_calls": [
-                        {
-                            "id": nc["id"],
-                            "type": "function",
-                            "function": {"name": nc["name"], "arguments": nc["arguments"]},
-                        }
-                        for nc in normalized_calls
-                    ],
-                }
+                # iteration. thinking_blocks ride along so the model can
+                # resume its reasoning chain across tool calls — they're
+                # post-marker (cache_control sits on the last history msg,
+                # not on in_turn content) so they don't affect the cached
+                # prefix, and they get dropped at end-of-turn since
+                # in_turn_chat is in-memory only.
+                assistant_chat: dict[str, Any] = {"role": "assistant"}
+                if thinking_blocks:
+                    assistant_chat["thinking_blocks"] = thinking_blocks
+                assistant_chat["content"] = assistant_text or None
+                assistant_chat["tool_calls"] = [
+                    {
+                        "id": nc["id"],
+                        "type": "function",
+                        "function": {"name": nc["name"], "arguments": nc["arguments"]},
+                    }
+                    for nc in normalized_calls
+                ]
                 in_turn_chat.append(assistant_chat)
 
                 # Persist in our session shape (no thinking_blocks).
