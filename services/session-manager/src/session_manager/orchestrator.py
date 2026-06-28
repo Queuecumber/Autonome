@@ -739,6 +739,8 @@ class SessionOrchestrator:
         base_kwargs: dict[str, Any] = dict(self.call_config)
         base_kwargs["model"] = self.model
         base_kwargs.setdefault("max_tokens", 65536)
+        # Chat completions doesn't include usage on stream by default; opt in.
+        base_kwargs.setdefault("stream_options", {"include_usage": True})
         chat_tools = [_tool_def_for_chat(t) for t in self.openai_tools]
 
         logger.info("Calling LLM: %d history items, %d new items, %d tools, %d event(s)",
