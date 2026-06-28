@@ -815,46 +815,56 @@ class SessionOrchestrator:
             assistant_text = response["content"]
             tool_calls = response["tool_calls"]
             reasoning_text = response.get("reasoning") or ""
-            thinking_blocks = response.get("thinking_blocks") or []
 
             if reasoning_text:
                 all_new_messages.append({"type": "reasoning", "content": reasoning_text})
 
             if tool_calls:
-                # Build the assistant message we'll send back on the next
-                # iteration. Attach thinking_blocks so the model can resume
-                # its reasoning chain across tool calls. These don't get
-                # persisted to session — in-memory only.
-                assistant_chat: dict[str, Any] = {"role": "assistant"}
-                if thinking_blocks:
-                    assistant_chat["thinking_blocks"] = thinking_blocks
-                assistant_chat["content"] = assistant_text or None
-                assistant_chat["tool_calls"] = [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": tc["function"].get("arguments") or "",
-                        },
-                    }
-                    for tc in tool_calls
-                ]
-                in_turn_chat.append(assistant_chat)
-
-                # Persist in our session shape (no thinking_blocks).
-                if assistant_text:
-                    all_new_messages.append({"role": "assistant", "content": assistant_text})
+                # Normalize tool_call arguments once so the in-turn replay and
+                # the persisted form are byte-identical — if they diverge, the
+                # cache prefix in turn N (raw args) won't match turn N+1's
+                # rebuilt prefix (normalized args).
+                normalized_calls: list[dict[str, Any]] = []
                 for tc in tool_calls:
                     try:
                         args_unicode = json.dumps(json.loads(tc["function"]["arguments"]), ensure_ascii=False)
                     except (json.JSONDecodeError, ValueError):
                         args_unicode = tc["function"].get("arguments") or "{}"
-                    all_new_messages.append({
-                        "type": "function_call",
-                        "call_id": tc["id"],
+                    normalized_calls.append({
+                        "id": tc["id"],
                         "name": tc["function"]["name"],
                         "arguments": args_unicode,
+                    })
+
+                # Build the assistant message we'll send back on the next
+                # iteration. thinking_blocks would help reasoning continuity
+                # but they're in_turn-only — including them here makes turn N's
+                # bytes differ from turn N+1's rebuilt-from-history bytes,
+                # breaking the cross-turn cache. Drop for now; revisit if we
+                # find a way to round-trip them without that cost.
+                assistant_chat: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": assistant_text or None,
+                    "tool_calls": [
+                        {
+                            "id": nc["id"],
+                            "type": "function",
+                            "function": {"name": nc["name"], "arguments": nc["arguments"]},
+                        }
+                        for nc in normalized_calls
+                    ],
+                }
+                in_turn_chat.append(assistant_chat)
+
+                # Persist in our session shape (no thinking_blocks).
+                if assistant_text:
+                    all_new_messages.append({"role": "assistant", "content": assistant_text})
+                for nc in normalized_calls:
+                    all_new_messages.append({
+                        "type": "function_call",
+                        "call_id": nc["id"],
+                        "name": nc["name"],
+                        "arguments": nc["arguments"],
                     })
 
                 # Execute tool calls, checking for interruption between each
