@@ -270,6 +270,47 @@ def _tool_def_for_chat(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_CACHE_DIRECTIVE: dict[str, Any] = {"type": "ephemeral", "ttl": "1h"}
+
+
+def _with_cache_breakpoint(msg: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of msg with cache_control attached to its last text block.
+
+    String content gets promoted to a single-block list with the directive.
+    List content gets the directive added to its last block. Messages that
+    don't carry cacheable text (e.g. an assistant message with only
+    tool_calls) are returned unchanged.
+    """
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        return {**msg, "content": [{"type": "text", "text": content, "cache_control": _CACHE_DIRECTIVE}]}
+    if isinstance(content, list) and content:
+        new_content = [dict(b) if isinstance(b, dict) else b for b in content]
+        if isinstance(new_content[-1], dict):
+            new_content[-1] = {**new_content[-1], "cache_control": _CACHE_DIRECTIVE}
+            return {**msg, "content": new_content}
+    return msg
+
+
+def _cache_last_msg(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach a cache breakpoint to the last cacheable message in the list.
+
+    Walks back from the tail to find a message with text content; assistant
+    messages that only carry tool_calls (no text) get skipped. Returns a new
+    list; the original is untouched.
+    """
+    out = list(messages)
+    for i in range(len(out) - 1, -1, -1):
+        content = out[i].get("content")
+        has_text = (isinstance(content, str) and content) or (
+            isinstance(content, list) and content
+        )
+        if has_text:
+            out[i] = _with_cache_breakpoint(out[i])
+            break
+    return out
+
+
 def _describe_interrupted(completed_items: list) -> list[dict]:
     """Build structured descriptions of what the model had generated before interruption."""
     parts = []
@@ -682,8 +723,17 @@ class SessionOrchestrator:
             })
 
         # History translated once — it's stable across iterations, no point
-        # re-rendering each loop pass.
-        history_chat = _to_chat_messages(history)
+        # re-rendering each loop pass. Two cache breakpoints land on the
+        # stable parts of the prefix:
+        #   - instructions: pinned, identical every turn, ~system prompt size
+        #   - last history message: slides forward each user turn as new
+        #     persisted content accumulates
+        # 1h TTL so the cache survives idle stretches between conversations.
+        history_chat = _cache_last_msg(_to_chat_messages(history))
+        instructions_msg = _with_cache_breakpoint({
+            "role": "system",
+            "content": self._build_instructions(),
+        })
 
         # Base config + tools.
         base_kwargs: dict[str, Any] = dict(self.call_config)
@@ -691,7 +741,6 @@ class SessionOrchestrator:
         base_kwargs.setdefault("max_tokens", 65536)
         chat_tools = [_tool_def_for_chat(t) for t in self.openai_tools]
 
-        instructions_msg = {"role": "system", "content": self._build_instructions()}
         logger.info("Calling LLM: %d history items, %d new items, %d tools, %d event(s)",
                     len(history), len(new_items), len(chat_tools), len(events))
 
