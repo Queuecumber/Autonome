@@ -736,20 +736,24 @@ class SessionOrchestrator:
             "content": self._build_instructions(),
         })
 
-        # Diagnostic: SHA of instructions + the bytes-form of history_chat
-        # without cache_control markers (those are metadata, ignored by the
-        # cache lookup per the sliding-marker probe). If consecutive turns
-        # produce the same hash for the overlapping prefix, byte stability
-        # is fine. If it drifts, something non-deterministic is sneaking in.
+        # Diagnostic: SHA of history_chat at several prefix lengths so we
+        # can compare across turns. If a given prefix-N hash matches between
+        # turn M and turn M+1, the byte prefix is stable and the cache
+        # should extend at that length. Drift at small N localizes a
+        # non-deterministic field in early history.
         import hashlib
-        instructions_hash = hashlib.sha256(
-            json.dumps(instructions_msg, sort_keys=False, ensure_ascii=False).encode()
-        ).hexdigest()[:12]
-        history_hash = hashlib.sha256(
-            json.dumps(history_chat_raw, sort_keys=False, ensure_ascii=False).encode()
-        ).hexdigest()[:12]
-        logger.info("cache prefix sha: instructions=%s history=%s (%d msgs)",
-                    instructions_hash, history_hash, len(history_chat_raw))
+
+        def _h(obj: Any) -> str:
+            return hashlib.sha256(
+                json.dumps(obj, sort_keys=False, ensure_ascii=False).encode()
+            ).hexdigest()[:12]
+
+        n = len(history_chat_raw)
+        sample_lens = sorted({1, 10, 100, 1000, n // 4, n // 2, n - 10, n}) if n else [0]
+        sample_lens = [k for k in sample_lens if 0 < k <= n]
+        prefix_hashes = " ".join(f"{k}={_h(history_chat_raw[:k])}" for k in sample_lens)
+        logger.info("cache prefix sha: instructions=%s history@[%s] (%d msgs)",
+                    _h(instructions_msg), prefix_hashes, n)
 
         # Base config + tools.
         base_kwargs: dict[str, Any] = dict(self.call_config)
