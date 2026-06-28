@@ -499,6 +499,7 @@ class SessionOrchestrator:
             were collected before cancel)
         """
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_calls_by_idx: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
         usage: Any = None
@@ -508,6 +509,7 @@ class SessionOrchestrator:
                 logger.info("Stream interrupted by new message")
                 return None, {
                     "content": "".join(content_parts),
+                    "reasoning": "".join(reasoning_parts),
                     "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
                 }
 
@@ -522,8 +524,15 @@ class SessionOrchestrator:
             choice = chunk.choices[0]
             delta = choice.delta
 
-            if getattr(delta, "content", None):
-                content_parts.append(delta.content)
+            content = getattr(delta, "content", None)
+            if isinstance(content, str) and content:
+                content_parts.append(content)
+
+            # Extended-thinking text — non-standard chat completions field
+            # surfaced by some providers (mapped from Anthropic thinking blocks).
+            reasoning = getattr(delta, "reasoning_content", None)
+            if isinstance(reasoning, str) and reasoning:
+                reasoning_parts.append(reasoning)
 
             for tc_delta in getattr(delta, "tool_calls", None) or []:
                 idx = getattr(tc_delta, "index", 0) or 0
@@ -546,6 +555,7 @@ class SessionOrchestrator:
 
         return {
             "content": "".join(content_parts),
+            "reasoning": "".join(reasoning_parts),
             "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
             "finish_reason": finish_reason,
             "usage": usage,
@@ -711,6 +721,10 @@ class SessionOrchestrator:
 
             assistant_text = response["content"]
             tool_calls = response["tool_calls"]
+            reasoning_text = response.get("reasoning") or ""
+
+            if reasoning_text:
+                all_new_messages.append({"type": "reasoning", "content": reasoning_text})
 
             if tool_calls:
                 # Save the assistant's text (if any) before the function_calls
