@@ -858,13 +858,18 @@ class SessionOrchestrator:
                     })
 
                 # Build the assistant message we'll send back on the next
-                # iteration. thinking_blocks ride along so the model can
-                # resume its reasoning chain across tool calls — they're
-                # post-marker (cache_control sits on the last history msg,
-                # not on in_turn content) so they don't affect the cached
-                # prefix, and they get dropped at end-of-turn since
-                # in_turn_chat is in-memory only.
+                # iteration. Reasoning rides along in both normalized forms
+                # so the model can resume its chain across tool calls —
+                # `thinking_blocks` is what the Anthropic paths consume
+                # (signature round-trip), `reasoning_content` is the
+                # cross-provider field others require on tool-call assistant
+                # messages (Kimi-style models reject or degrade without it).
+                # Each attaches only when non-empty, so providers that emit
+                # neither (GPT) see a plain assistant message. All of it is
+                # post-marker and in-memory only — dropped at end-of-turn.
                 assistant_chat: dict[str, Any] = {"role": "assistant"}
+                if reasoning_text:
+                    assistant_chat["reasoning_content"] = reasoning_text
                 if thinking_blocks:
                     assistant_chat["thinking_blocks"] = thinking_blocks
                 assistant_chat["content"] = assistant_text or None
