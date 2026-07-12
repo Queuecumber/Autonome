@@ -75,7 +75,7 @@ specifically requests AI relevant information, it is fine to drop this (for exam
 
 ## Events
 
-When something happens that requires your attention (including a user interaction), you will receive an event message. Events arrive as developer-role messages containing a JSON payload. The shape is:
+When something happens that requires your attention (including a user interaction), you will receive an event message. Events arrive as messages containing a JSON payload. The shape is:
 
 - `event` — what kind of thing happened. Common values:
   - `message` — someone is talking to you
@@ -248,8 +248,16 @@ def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             flush_assistant()
             pending_text = item.get("content") or ""
         elif role == "developer":
+            # Render as user, NOT system: the Bedrock translation hoists
+            # every system-role message into the top-level system array, so
+            # system-role events (a) lose their position in the conversation
+            # and (b) mutate the front of the wire prefix each turn, which
+            # invalidates every cache entry behind it (verified: an added
+            # tail event collapses the cache read to the system-section
+            # size; the identical structure with user-role events extends
+            # the cache and pays only for the new tokens).
             flush_assistant()
-            messages.append({"role": "system", "content": item.get("content") or ""})
+            messages.append({"role": "user", "content": item.get("content") or ""})
         elif role in ("user", "system"):
             flush_assistant()
             messages.append({"role": role, "content": item.get("content") or ""})
@@ -723,7 +731,10 @@ class SessionOrchestrator:
             role = item.get("role")
             content = item.get("content") or ""
             in_turn_chat.append({
-                "role": "system" if role == "developer" else role,
+                # developer -> user, matching _to_chat_messages: system-role
+                # events get hoisted out of position by the Bedrock
+                # translation and poison the cache prefix.
+                "role": "user" if role == "developer" else role,
                 "content": content,
             })
 
