@@ -386,6 +386,9 @@ class SessionOrchestrator:
         self._seen_since_boot: set[str] = set()
 
         self._sessions: dict[str, _SessionState] = {}
+        # Per-session (instructions_hash, per-message hashes) from the
+        # previous turn — cross-turn byte-stability diagnostic.
+        self._prefix_hashes: dict[str, tuple[str, list[str]]] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
         self.openai_tools: list[dict] = []
@@ -771,11 +774,11 @@ class SessionOrchestrator:
         logger.info("cache markers: boundary_raw_idx=%s history_marks=%s of %d chat msgs",
                     boundary, marked, len(history_chat))
 
-        # Diagnostic: SHA of history_chat at several prefix lengths so we
-        # can compare across turns. If a given prefix-N hash matches between
-        # turn M and turn M+1, the byte prefix is stable and the cache
-        # should extend at that length. Drift at small N localizes a
-        # non-deterministic field in early history.
+        # Diagnostic: per-message hashes compared against the previous turn
+        # (in-memory). If any position in the shared prefix differs, log
+        # exactly where and what — that's byte drift, our bug. If every
+        # shared position matches and the cache still misses, the problem
+        # is on the gateway side.
         import hashlib
 
         def _h(obj: Any) -> str:
@@ -783,12 +786,25 @@ class SessionOrchestrator:
                 json.dumps(obj, sort_keys=False, ensure_ascii=False).encode()
             ).hexdigest()[:12]
 
-        n = len(history_chat_raw)
-        sample_lens = sorted({1, 10, 100, 1000, n // 4, n // 2, n - 10, n}) if n else [0]
-        sample_lens = [k for k in sample_lens if 0 < k <= n]
-        prefix_hashes = " ".join(f"{k}={_h(history_chat_raw[:k])}" for k in sample_lens)
-        logger.info("cache prefix sha: instructions=%s history@[%s] (%d msgs)",
-                    _h(instructions_msg), prefix_hashes, n)
+        per_msg = [_h(m) for m in history_chat_raw]
+        instructions_hash = _h(instructions_msg)
+        prev = self._prefix_hashes.get(session_id)
+        if prev is not None:
+            prev_instructions, prev_msgs = prev
+            if prev_instructions != instructions_hash:
+                logger.warning("prefix drift: instructions hash changed %s -> %s",
+                               prev_instructions, instructions_hash)
+            common = min(len(prev_msgs), len(per_msg))
+            diffs = [i for i in range(common) if prev_msgs[i] != per_msg[i]]
+            if diffs:
+                logger.warning(
+                    "prefix drift: %d/%d shared positions differ vs last turn, "
+                    "first at %d: %.400r",
+                    len(diffs), common, diffs[0], history_chat_raw[diffs[0]])
+            else:
+                logger.info("prefix stable vs last turn: %d shared msgs identical "
+                            "(prev %d, now %d)", common, len(prev_msgs), len(per_msg))
+        self._prefix_hashes[session_id] = (instructions_hash, per_msg)
 
         # Base config + tools.
         base_kwargs: dict[str, Any] = dict(self.call_config)
