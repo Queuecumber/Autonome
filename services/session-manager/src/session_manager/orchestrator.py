@@ -705,14 +705,16 @@ class SessionOrchestrator:
         # Two parallel records of this turn's content:
         #   - all_new_messages: persistence shape (function_call,
         #     function_call_output, role messages, reasoning, comments).
-        #     Saved to the session file at end-of-turn.
+        #     Saved to the session file at end-of-turn. Leads with a
+        #     turn_start comment so the next turn can locate this turn's
+        #     boundary for the rolling cache markers.
         #   - in_turn_chat: chat-completions shape (assistant w/ tool_calls,
         #     tool messages). Held in memory only so we can attach
         #     thinking_blocks for in-turn reasoning continuity without
         #     polluting persisted history (Anthropic doesn't replay thinking
         #     across user turns anyway).
-        history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
-        all_new_messages: list[dict[str, Any]] = list(new_items)
+        all_new_messages: list[dict[str, Any]] = [
+            {"type": "comment", "kind": "turn_start"}, *new_items]
         in_turn_chat: list[dict[str, Any]] = []
         for item in new_items:
             role = item.get("role")
@@ -722,19 +724,46 @@ class SessionOrchestrator:
                 "content": content,
             })
 
-        # History translated once — it's stable across iterations, no point
-        # re-rendering each loop pass. No explicit cache_control markers for
-        # now: the gateway auto-caches Claude on chat completions, and our
-        # sliding tail marker interacted badly with the bounded boundary
-        # lookup (turns append more blocks than the lookup scans, so every
-        # turn re-created the full prefix). Observing auto-cache behavior in
-        # production before deciding between rolling markers or no markers.
-        history_chat_raw = _to_chat_messages(history)
-        history_chat = history_chat_raw
-        instructions_msg = {
+        # Rolling cache markers. The cache lookup only scans a bounded
+        # number of content-block boundaries behind each breakpoint, and a
+        # turn appends more blocks than that — so a single tail marker
+        # never finds the previous turn's entry and re-creates the whole
+        # prefix every turn. Instead, keep the marker at the PREVIOUS
+        # turn's boundary (byte-identical to where the last turn's tail
+        # marker sat -> cache read hits) and add one at the new tail
+        # (writes this turn's delta; becomes next turn's read point).
+        # The boundary is the last turn_start comment in the raw history.
+        # Sessions without one (pre-rolling-markers) fall back to a single
+        # tail marker: one full re-create, then self-heals.
+        boundary = next(
+            (i for i in range(len(raw_history) - 1, -1, -1)
+             if raw_history[i].get("type") == "comment"
+             and raw_history[i].get("kind") == "turn_start"),
+            None,
+        )
+
+        def _filt(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [m for m in items if m.get("type") not in ("reasoning", "comment")]
+
+        if boundary is None:
+            history = _filt(raw_history)
+            history_chat_raw = _to_chat_messages(history)
+            history_chat = _cache_last_msg(history_chat_raw)
+        else:
+            # Rendering the two segments separately is safe: a turn's block
+            # always starts with a developer event, so no assistant/tool_call
+            # merge in _to_chat_messages can span the boundary.
+            prev_items = _filt(raw_history[:boundary])
+            recent_items = _filt(raw_history[boundary:])
+            history = prev_items + recent_items
+            prev_chat = _to_chat_messages(prev_items)
+            recent_chat = _to_chat_messages(recent_items)
+            history_chat_raw = prev_chat + recent_chat
+            history_chat = _cache_last_msg(prev_chat) + _cache_last_msg(recent_chat)
+        instructions_msg = _with_cache_breakpoint({
             "role": "system",
             "content": self._build_instructions(),
-        }
+        })
 
         # Diagnostic: SHA of history_chat at several prefix lengths so we
         # can compare across turns. If a given prefix-N hash matches between

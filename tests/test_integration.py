@@ -93,6 +93,64 @@ async def test_event_flows_to_response_and_persists(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rolling_cache_markers(tmp_path):
+    """Each turn persists a turn_start comment, and the next turn places
+    cache_control markers at the previous turn's boundary and the new tail
+    (plus the pinned instructions marker)."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    config = {
+        "model": {"name": "test-model"},
+        "session": {"max_history_tokens": 100000},
+        "binaries": {"store": str(tmp_path / "binaries"), "retention_days": 30},
+    }
+    orch = SessionOrchestrator(config=config, session_dir=sessions_dir)
+
+    captured: dict = {}
+
+    async def fake_create(**kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return _stream("reply")
+    orch.llm = MagicMock()
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
+
+    # Turn 1 — no boundary yet: markers on instructions + history tail only.
+    await orch.handle_event(Event(source="matrix", text="first", metadata={}))
+    history = SessionManager(store_dir=sessions_dir, max_history_tokens=100000).load("main")
+    assert history[0] == {"type": "comment", "kind": "turn_start"}
+
+    # Turn 2 — history now holds turn 1's block behind a turn_start comment.
+    await orch.handle_event(Event(source="matrix", text="second", metadata={}))
+    messages = captured["messages"]
+
+    def has_marker(msg):
+        content = msg.get("content")
+        return isinstance(content, list) and any(
+            isinstance(b, dict) and "cache_control" in b for b in content
+        )
+
+    marked = [i for i, m in enumerate(messages) if has_marker(m)]
+    # Instructions is message 0. The boot-event turn is turn 1's block, so
+    # there is exactly one boundary: prev segment is empty, and the recent
+    # segment (turn 1) gets a tail marker.
+    assert 0 in marked
+    # Exactly one history marker on turn 1's last message (the assistant
+    # reply), placed before this turn's new event messages.
+    history_marks = [i for i in marked if i > 0]
+    assert len(history_marks) == 1
+    assert messages[history_marks[0]].get("role") == "assistant"
+
+    # Turn 3 — now a real prev segment exists; expect two history markers.
+    await orch.handle_event(Event(source="matrix", text="third", metadata={}))
+    messages = captured["messages"]
+    history_marks = [i for i, m in enumerate(messages) if has_marker(m) and i > 0]
+    assert len(history_marks) == 2
+
+
+@pytest.mark.asyncio
 async def test_explicit_session_id_routes(tmp_path):
     """An event with an explicit session_id lands there, not in main."""
     sessions_dir = tmp_path / "sessions"
