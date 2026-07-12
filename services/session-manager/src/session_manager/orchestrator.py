@@ -723,18 +723,18 @@ class SessionOrchestrator:
             })
 
         # History translated once — it's stable across iterations, no point
-        # re-rendering each loop pass. Two cache breakpoints land on the
-        # stable parts of the prefix:
-        #   - instructions: pinned, identical every turn, ~system prompt size
-        #   - last history message: slides forward each user turn as new
-        #     persisted content accumulates
-        # 1h TTL so the cache survives idle stretches between conversations.
+        # re-rendering each loop pass. No explicit cache_control markers for
+        # now: the gateway auto-caches Claude on chat completions, and our
+        # sliding tail marker interacted badly with the bounded boundary
+        # lookup (turns append more blocks than the lookup scans, so every
+        # turn re-created the full prefix). Observing auto-cache behavior in
+        # production before deciding between rolling markers or no markers.
         history_chat_raw = _to_chat_messages(history)
-        history_chat = _cache_last_msg(history_chat_raw)
-        instructions_msg = _with_cache_breakpoint({
+        history_chat = history_chat_raw
+        instructions_msg = {
             "role": "system",
             "content": self._build_instructions(),
-        })
+        }
 
         # Diagnostic: SHA of history_chat at several prefix lengths so we
         # can compare across turns. If a given prefix-N hash matches between
