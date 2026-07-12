@@ -764,6 +764,12 @@ class SessionOrchestrator:
             "role": "system",
             "content": self._build_instructions(),
         })
+        marked = [i for i, m in enumerate(history_chat)
+                  if isinstance(m.get("content"), list)
+                  and any(isinstance(b, dict) and "cache_control" in b
+                          for b in m["content"])]
+        logger.info("cache markers: boundary_raw_idx=%s history_marks=%s of %d chat msgs",
+                    boundary, marked, len(history_chat))
 
         # Diagnostic: SHA of history_chat at several prefix lengths so we
         # can compare across turns. If a given prefix-N hash matches between
