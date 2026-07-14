@@ -266,6 +266,29 @@ def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return messages
 
 
+def _image_user_message(image_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Build a chat-completions user message carrying tool-result images.
+
+    `image_items` are Responses-shape user messages from _execute_tool_call
+    ({"role": "user", "content": [{"type": "input_image", "image_url": "data:..."}]}).
+    Images can't ride inside a tool-role message (string content only), so
+    the convention is a follow-up user message after the tool results.
+    Translates input_image -> chat-completions image_url. Returns None if
+    there are no images.
+    """
+    parts: list[dict[str, Any]] = []
+    for msg in image_items:
+        for part in msg.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "input_image":
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": part["image_url"]},
+                })
+    if not parts:
+        return None
+    return {"role": "user", "content": parts}
+
+
 def _tool_def_for_chat(tool: dict[str, Any]) -> dict[str, Any]:
     """Wrap a Responses-shape function tool into Chat Completions shape."""
     return {
@@ -957,6 +980,7 @@ class SessionOrchestrator:
                     })
 
                 # Execute tool calls, checking for interruption between each
+                turn_images: list[dict[str, Any]] = []
                 for tc in tool_calls:
                     if cancel.is_set():
                         pending = []
@@ -972,7 +996,7 @@ class SessionOrchestrator:
                         return None
 
                     logger.info("  Tool call: %s(%s)", tc["function"]["name"], tc["function"]["arguments"][:100])
-                    result, _images = await self._execute_tool_call(
+                    result, images = await self._execute_tool_call(
                         tc["id"], tc["function"]["name"], tc["function"]["arguments"]
                     )
                     logger.debug("  Result: %s", result["output"][:200])
@@ -982,10 +1006,16 @@ class SessionOrchestrator:
                         "tool_call_id": tc["id"],
                         "content": result.get("output") or "",
                     })
-                    # TODO: image tool results don't flow through chat completions
-                    # as cleanly as Responses (they'd need a follow-up user-role
-                    # image message). Skipped for now; pointer URIs in the tool
-                    # output text remain accessible to the agent.
+                    turn_images.extend(images)
+
+                # Images can't ride inside a tool-role message (string content
+                # only), so after all tool results are in, surface them as one
+                # follow-up user message. Not persisted — the pointer JSON in
+                # the tool output text is the durable reference; the bytes are
+                # re-fetchable via URI on a later turn.
+                image_msg = _image_user_message(turn_images)
+                if image_msg is not None:
+                    in_turn_chat.append(image_msg)
 
                 continue
 

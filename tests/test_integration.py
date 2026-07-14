@@ -10,8 +10,30 @@ from unittest.mock import MagicMock
 import pytest
 
 from session_manager.event import Event
-from session_manager.orchestrator import SessionOrchestrator
+from session_manager.orchestrator import SessionOrchestrator, _image_user_message
 from session_manager.session import SessionManager
+
+
+def test_image_user_message_translates_input_image():
+    """Responses-shape input_image parts become chat-completions image_url
+    parts in a single follow-up user message."""
+    image_items = [
+        {"role": "user", "content": [
+            {"type": "input_image", "image_url": "data:image/png;base64,AAA"}]},
+        {"role": "user", "content": [
+            {"type": "input_image", "image_url": "data:image/jpeg;base64,BBB"}]},
+    ]
+    msg = _image_user_message(image_items)
+    assert msg == {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBB"}},
+    ]}
+
+
+def test_image_user_message_none_when_no_images():
+    assert _image_user_message([]) is None
+    assert _image_user_message([{"role": "user", "content": [
+        {"type": "input_text", "text": "not an image"}]}]) is None
 
 
 def _text_chunk(text: str, finish: str | None = None):
