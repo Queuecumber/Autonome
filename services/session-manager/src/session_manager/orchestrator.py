@@ -897,6 +897,11 @@ class SessionOrchestrator:
                     _int_or_none(getattr(input_details, "cached_tokens", None))
                     if input_details else None
                 )
+                output_details = getattr(usage, "completion_tokens_details", None)
+                reasoning_tokens = (
+                    _int_or_none(getattr(output_details, "reasoning_tokens", None)) or 0
+                    if output_details else 0
+                )
                 cache_read = _int_or_none(getattr(usage, "cache_read_input_tokens", None))
                 cache_creation = _int_or_none(getattr(usage, "cache_creation_input_tokens", None))
                 comment = {
@@ -905,6 +910,7 @@ class SessionOrchestrator:
                     "iteration": iteration,
                     "input_tokens": _int_or_none(getattr(usage, "prompt_tokens", None)),
                     "output_tokens": _int_or_none(getattr(usage, "completion_tokens", None)),
+                    "reasoning_tokens": reasoning_tokens,
                     "total_tokens": _int_or_none(getattr(usage, "total_tokens", None)),
                     "cached_tokens": cached,
                     "cache_read_input_tokens": cache_read,
@@ -912,9 +918,9 @@ class SessionOrchestrator:
                 }
                 all_new_messages.append(comment)
                 logger.info(
-                    "  usage: in=%s out=%s total=%s cached=%s cache_read=%s cache_create=%s",
-                    comment["input_tokens"], comment["output_tokens"], comment["total_tokens"],
-                    cached, cache_read, cache_creation,
+                    "  usage: in=%s out=%s reasoning=%d total=%s cached=%s cache_read=%s cache_create=%s",
+                    comment["input_tokens"], comment["output_tokens"], reasoning_tokens,
+                    comment["total_tokens"], cached, cache_read, cache_creation,
                 )
 
             assistant_text = response["content"]
