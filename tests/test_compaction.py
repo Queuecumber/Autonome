@@ -21,15 +21,23 @@ def _api_key(monkeypatch):
 
 
 def _mock_summary_response(text: str) -> MagicMock:
-    """A non-streaming Responses-API response containing a single message."""
-    block = MagicMock()
-    block.text = text
-    item = MagicMock()
-    item.type = "message"
-    item.content = [block]
+    """A non-streaming chat-completions response containing a text message."""
+    msg = MagicMock()
+    msg.content = text
+    msg.tool_calls = None
+    choice = MagicMock()
+    choice.message = msg
     resp = MagicMock()
-    resp.output = [item]
+    resp.choices = [choice]
     return resp
+
+
+def _bind_llm(orch, create_fn) -> None:
+    """Point the orchestrator at a fake chat.completions.create."""
+    orch.llm = MagicMock()
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = create_fn
 
 
 def _orchestrator(tmp_path, *, trigger: int = 1000, recency: int = 800) -> SessionOrchestrator:
@@ -52,10 +60,8 @@ async def test_no_compaction_when_no_usage_data(tmp_path):
     orch = _orchestrator(tmp_path)
     orch.session.append("main", [{"role": "user", "content": "hi"}])
 
-    orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
     create_mock = MagicMock()
-    orch.llm.responses.create = create_mock
+    _bind_llm(orch, create_mock)
 
     await orch._compact_session_if_needed("main")
 
@@ -73,13 +79,12 @@ async def test_no_compaction_when_under_trigger(tmp_path):
         {"type": "comment", "kind": "usage", "input_tokens": 500},
     ])
 
-    orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = MagicMock()
+    create_mock = MagicMock()
+    _bind_llm(orch, create_mock)
 
     await orch._compact_session_if_needed("main")
 
-    orch.llm.responses.create.assert_not_called()
+    create_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -105,9 +110,7 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
         captured.update(kwargs)
         return _mock_summary_response("MY STRUCTURED SUMMARY")
 
-    orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = fake_create
+    _bind_llm(orch, fake_create)
 
     await orch._compact_session_if_needed("main")
 
@@ -132,26 +135,32 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     # Summary call carried our instructions and no tools.
     assert "tools" not in captured
     assert captured["model"] == "test-model"
-    inputs = captured["input"]
-    # Last two items: developer-event + user-content pair carrying the
-    # summarize directive (same shape as a normal event arrival).
-    prompt_msg = inputs[-2]
-    content_msg = inputs[-1]
-    assert prompt_msg["role"] == "developer"
+    messages = captured["messages"]
+    # System prompt first, then a user-role framing line — Anthropic requires
+    # the first message after system to be user, and an arbitrary fold
+    # boundary can't guarantee that.
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    # Last two: the summarize event payload + the instruction, both user-role
+    # (system-role events get hoisted out of position by Bedrock).
+    prompt_msg = messages[-2]
+    content_msg = messages[-1]
+    assert prompt_msg["role"] == "user"
     prompt_payload = json.loads(prompt_msg["content"])
     assert prompt_payload["event"] == "summarize"
     assert prompt_payload["fold_count"] == 6
     assert prompt_payload["keep_count"] == 2
     assert content_msg["role"] == "user"
     assert "structured summary" in content_msg["content"]
-    # Fold messages ride as direct input items (not JSON-wrapped) so the
-    # tokenizer sees them natively. Comments and reasoning are filtered.
-    fold_items = inputs[:-2]
-    assert {"role": "user", "content": "very old"} in fold_items
-    assert {"role": "user", "content": "new"} not in fold_items
+    # Fold messages ride as flattened chat messages. Comments and reasoning
+    # are filtered out.
+    fold_msgs = messages[2:-2]
+    assert {"role": "user", "content": "very old"} in fold_msgs
+    assert all(m["role"] in ("user", "assistant") for m in fold_msgs)
+    assert {"role": "user", "content": "new"} not in fold_msgs
     assert all(
         not (m.get("type") == "comment" and m.get("kind") == "usage")
-        for m in fold_items
+        for m in fold_msgs
     )
 
 
@@ -168,9 +177,7 @@ async def test_compaction_skips_when_recency_split_is_zero(tmp_path):
     ])
 
     create_mock = MagicMock()
-    orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = create_mock
+    _bind_llm(orch, create_mock)
 
     await orch._compact_session_if_needed("main")
 
@@ -192,9 +199,7 @@ async def test_compaction_failure_leaves_session_unchanged(tmp_path):
     async def fake_create(**kwargs):
         raise RuntimeError("model exploded")
 
-    orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = fake_create
+    _bind_llm(orch, fake_create)
 
     await orch._compact_session_if_needed("main")
 
@@ -209,14 +214,20 @@ async def test_summary_call_runs_tool_loop_then_emits_text(tmp_path):
     her final summary text."""
     orch = _orchestrator(tmp_path)
 
-    tool_call_item = MagicMock()
-    tool_call_item.type = "function_call"
-    tool_call_item.call_id = "call-1"
-    tool_call_item.name = "memory_write"
-    tool_call_item.arguments = '{"note": "something important"}'
+    tool_call = MagicMock()
+    tool_call.id = "call-1"
+    tool_call.function = MagicMock()
+    tool_call.function.name = "memory_write"
+    tool_call.function.arguments = '{"note": "something important"}'
 
+    first_msg = MagicMock()
+    first_msg.content = None
+    first_msg.tool_calls = [tool_call]
+    first_choice = MagicMock()
+    first_choice.message = first_msg
     first_resp = MagicMock()
-    first_resp.output = [tool_call_item]
+    first_resp.choices = [first_choice]
+
     second_resp = _mock_summary_response("FINAL SUMMARY")
 
     responses_iter = iter([first_resp, second_resp])
@@ -224,9 +235,7 @@ async def test_summary_call_runs_tool_loop_then_emits_text(tmp_path):
     async def fake_create(**kwargs):
         return next(responses_iter)
 
-    orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = fake_create
+    _bind_llm(orch, fake_create)
 
     tool_outputs = []
 
@@ -251,15 +260,18 @@ async def test_summary_call_raises_when_response_empty(tmp_path):
     than silently writing an empty summary."""
     orch = _orchestrator(tmp_path)
 
+    empty_msg = MagicMock()
+    empty_msg.content = ""
+    empty_msg.tool_calls = None
+    empty_choice = MagicMock()
+    empty_choice.message = empty_msg
     empty_resp = MagicMock()
-    empty_resp.output = []
+    empty_resp.choices = [empty_choice]
 
     async def fake_create(**kwargs):
         return empty_resp
 
-    orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = fake_create
+    _bind_llm(orch, fake_create)
 
     with pytest.raises(RuntimeError, match="no text content"):
         await orch._summarize(

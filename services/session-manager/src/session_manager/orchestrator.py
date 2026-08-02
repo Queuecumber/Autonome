@@ -592,58 +592,103 @@ class SessionOrchestrator:
         the session — only the final summary lands in the next version's
         first message).
         """
-        # Fold rides as native input items (NOT JSON-dumped into a user
-        # message — that form inflates the call by 2-3x). Keep isn't sent
-        # here — the agent's next turn has it as recency. Filter reasoning
-        # and comment items to match _process_events.
+        # Runs on chat completions, not the Responses API: the gateway's
+        # Responses->Chat translator mangles tool round-trips on Claude
+        # models, which surfaces here as "This model does not support
+        # assistant message prefill".
+        #
+        # The fold is flattened to plain chat messages rather than the
+        # structured tool_call/tool_result shape. The fold is an arbitrary
+        # slice of history, so it routinely begins or ends mid-tool-exchange,
+        # and chat completions rejects an orphaned call or result. For a
+        # summarization pass the model only needs to read what happened, so
+        # tool activity renders as text and the pairing rules stop applying.
+        # Keep isn't sent — the agent's next turn has it as recency.
+        def _flatten(item: dict) -> dict[str, Any] | None:
+            item_type = item.get("type")
+            if item_type in ("reasoning", "comment"):
+                return None
+            if item_type == "function_call":
+                return {"role": "assistant",
+                        "content": f"[tool call] {item.get('name') or ''}"
+                                   f"({item.get('arguments') or ''})"}
+            if item_type == "function_call_output":
+                return {"role": "user",
+                        "content": f"[tool result] {item.get('output') or ''}"}
+            role = item.get("role")
+            if role in ("user", "assistant"):
+                return {"role": role, "content": item.get("content") or ""}
+            if role in ("developer", "system"):
+                # Events ride as user: the Bedrock translation hoists
+                # system-role messages out of conversation order.
+                return {"role": "user", "content": item.get("content") or ""}
+            return None
+
+        fold_chat = [m for m in (_flatten(i) for i in fold_messages) if m]
+
         # The summarize directive sits at the *end* as a regular event
-        # (developer-event + user-content pair, same shape as every other
-        # event the agent handles) — putting it at the front gets ignored
-        # after the model wades through the fold.
-        fold_input = [
-            m for m in fold_messages
-            if m.get("type") not in ("reasoning", "comment")
+        # (event payload + user content, same shape as every other event the
+        # agent handles) — at the front it gets ignored after the model wades
+        # through the fold. The leading framing line guarantees the first
+        # message after the system prompt is user-role, which Anthropic
+        # requires and an arbitrary fold boundary can't promise.
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._build_instructions()},
+            {"role": "user",
+             "content": "Older conversation context to be summarized follows."},
+            *fold_chat,
+            {"role": "user", "content": _developer_event(
+                "summarize",
+                fold_count=len(fold_messages),
+                keep_count=len(keep_messages),
+            )["content"]},
+            {"role": "user", "content": SUMMARIZE_INSTRUCTION},
         ]
-        prompt_msg = _developer_event(
-            "summarize",
-            fold_count=len(fold_messages),
-            keep_count=len(keep_messages),
-        )
-        content_msg = {"role": "user", "content": SUMMARIZE_INSTRUCTION}
-        input_items: list[Any] = [*fold_input, prompt_msg, content_msg]
 
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
-        call_kwargs["instructions"] = self._build_instructions()
+        # Responses-shaped config key; chat completions rejects it.
+        if "max_output_tokens" in call_kwargs:
+            call_kwargs["max_tokens"] = call_kwargs.pop("max_output_tokens")
         # Match the main turn's output budget — when reasoning effort is on,
         # the model's thinking budget can exceed a tight cap and the provider
         # rejects with `max_tokens must be greater than thinking.budget_tokens`.
-        call_kwargs.setdefault("max_output_tokens", 65536)
+        call_kwargs.setdefault("max_tokens", 65536)
         if self.openai_tools:
-            call_kwargs["tools"] = self.openai_tools
+            call_kwargs["tools"] = [
+                {"type": "function",
+                 "function": {"name": t["name"],
+                              "description": t.get("description") or "",
+                              "parameters": t.get("parameters") or {}}}
+                for t in self.openai_tools
+            ]
 
         for _ in range(self.max_tool_iterations):
-            call_kwargs["input"] = input_items
-            response = await self.llm.responses.create(**call_kwargs)
+            call_kwargs["messages"] = messages
+            response = await self.llm.chat.completions.create(**call_kwargs)
 
-            tool_calls = [i for i in response.output if getattr(i, "type", None) == "function_call"]
+            msg = response.choices[0].message
+            tool_calls = getattr(msg, "tool_calls", None) or []
             if tool_calls:
-                tool_results = []
-                image_items = []
+                messages = messages + [{
+                    "role": "assistant",
+                    "content": getattr(msg, "content", None),
+                    "tool_calls": [
+                        {"id": tc.id, "type": "function",
+                         "function": {"name": tc.function.name,
+                                      "arguments": tc.function.arguments}}
+                        for tc in tool_calls
+                    ],
+                }]
                 for tc in tool_calls:
-                    result, images = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
-                    tool_results.append(result)
-                    image_items.extend(images)
-                input_items = input_items + list(response.output) + tool_results + image_items
+                    result, _images = await self._execute_tool_call(
+                        tc.id, tc.function.name, tc.function.arguments
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tc.id,
+                                     "content": result.get("output") or ""})
                 continue
 
-            parts: list[str] = []
-            for item in response.output:
-                if getattr(item, "type", None) == "message":
-                    for block in item.content or []:
-                        if hasattr(block, "text") and block.text:
-                            parts.append(block.text)
-            text = "\n".join(parts).strip()
+            text = (getattr(msg, "content", None) or "").strip()
             if not text:
                 raise RuntimeError("summary call returned no text content")
             return text
