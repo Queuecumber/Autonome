@@ -187,7 +187,24 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
-def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _is_anthropic_model(model: str) -> bool:
+    """Is this an Anthropic model reached through a translating gateway?
+
+    The Bedrock translation hoists every system-role message into the
+    top-level system array, so developer events have to ride as user
+    messages to keep their position in the conversation (and to keep the
+    front of the wire prefix stable). Backends that take `developer`
+    natively get it.
+    """
+    m = model.lower()
+    return "anthropic" in m or "claude" in m
+
+
+def _to_chat_messages(
+    items: list[dict[str, Any]],
+    *,
+    developer_role: str = "user",
+) -> list[dict[str, Any]]:
     """Translate persisted session items (Responses-API shape) to Chat
     Completions messages.
 
@@ -203,7 +220,7 @@ def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         items are merged into one assistant message so all tool_use blocks
         appear together (matches Anthropic's requirement)
       - function_call_output → {role: tool, tool_call_id, content}
-      - developer-role events → system messages
+      - developer-role events → `developer_role` messages
     """
     messages: list[dict[str, Any]] = []
     pending_calls: list[dict[str, Any]] = []
@@ -249,16 +266,18 @@ def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             flush_assistant()
             pending_text = item.get("content") or ""
         elif role == "developer":
-            # Render as user, NOT system: the Bedrock translation hoists
-            # every system-role message into the top-level system array, so
-            # system-role events (a) lose their position in the conversation
-            # and (b) mutate the front of the wire prefix each turn, which
-            # invalidates every cache entry behind it (verified: an added
-            # tail event collapses the cache read to the system-section
-            # size; the identical structure with user-role events extends
-            # the cache and pays only for the new tokens).
+            # On the Anthropic paths this is "user", not "developer": the
+            # Bedrock translation hoists every system-role message into the
+            # top-level system array, so system-role events (a) lose their
+            # position in the conversation and (b) mutate the front of the
+            # wire prefix each turn, which invalidates every cache entry
+            # behind it (verified: an added tail event collapses the cache
+            # read to the system-section size; the identical structure with
+            # user-role events extends the cache and pays only for the new
+            # tokens). Backends that take `developer` natively get it.
             flush_assistant()
-            messages.append({"role": "user", "content": item.get("content") or ""})
+            messages.append(
+                {"role": developer_role, "content": item.get("content") or ""})
         elif role in ("user", "system"):
             flush_assistant()
             messages.append({"role": role, "content": item.get("content") or ""})
@@ -750,15 +769,19 @@ class SessionOrchestrator:
         #     across user turns anyway).
         all_new_messages: list[dict[str, Any]] = [
             {"type": "comment", "kind": "turn_start"}, *new_items]
+        # Anthropic-on-Bedrock needs developer events rendered as user (the
+        # translation hoists system-role messages out of position); other
+        # backends take `developer` natively.
+        developer_role = "user" if _is_anthropic_model(self.model) else "developer"
+
         in_turn_chat: list[dict[str, Any]] = []
         for item in new_items:
             role = item.get("role")
             content = item.get("content") or ""
             in_turn_chat.append({
-                # developer -> user, matching _to_chat_messages: system-role
-                # events get hoisted out of position by the Bedrock
-                # translation and poison the cache prefix.
-                "role": "user" if role == "developer" else role,
+                # Same developer-role rule as _to_chat_messages, so the
+                # in-turn shape matches what the next turn rebuilds.
+                "role": developer_role if role == "developer" else role,
                 "content": content,
             })
 
@@ -783,9 +806,12 @@ class SessionOrchestrator:
         def _filt(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [m for m in items if m.get("type") not in ("reasoning", "comment")]
 
+        def _to_chat(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return _to_chat_messages(items, developer_role=developer_role)
+
         if boundary is None:
             history = _filt(raw_history)
-            history_chat_raw = _to_chat_messages(history)
+            history_chat_raw = _to_chat(history)
             history_chat = _cache_last_msg(history_chat_raw)
         else:
             # Rendering the two segments separately is safe: a turn's block
@@ -794,8 +820,8 @@ class SessionOrchestrator:
             prev_items = _filt(raw_history[:boundary])
             recent_items = _filt(raw_history[boundary:])
             history = prev_items + recent_items
-            prev_chat = _to_chat_messages(prev_items)
-            recent_chat = _to_chat_messages(recent_items)
+            prev_chat = _to_chat(prev_items)
+            recent_chat = _to_chat(recent_items)
             history_chat_raw = prev_chat + recent_chat
             history_chat = _cache_last_msg(prev_chat) + _cache_last_msg(recent_chat)
         instructions_msg = _with_cache_breakpoint({

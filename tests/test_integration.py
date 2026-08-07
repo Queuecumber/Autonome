@@ -10,8 +10,40 @@ from unittest.mock import MagicMock
 import pytest
 
 from session_manager.event import Event
-from session_manager.orchestrator import SessionOrchestrator, _image_user_message
+from session_manager.orchestrator import (
+    SessionOrchestrator,
+    _image_user_message,
+    _is_anthropic_model,
+    _to_chat_messages,
+)
 from session_manager.session import SessionManager
+
+# One turn: an event, a reasoning block before a tool call, the tool result,
+# then a second reasoning block before the final text.
+_TURN = [
+    {"role": "developer", "content": '{"event": "message"}'},
+    {"role": "user", "content": "what time is it?"},
+    {"type": "comment", "kind": "usage", "input_tokens": 10},
+    {"type": "reasoning", "content": "I should check the clock."},
+    {"type": "function_call", "call_id": "c1", "name": "get_time", "arguments": "{}"},
+    {"type": "function_call_output", "call_id": "c1", "output": "13:00"},
+    {"type": "reasoning", "content": "Now answer."},
+    {"role": "assistant", "content": "It's 13:00."},
+]
+
+
+def test_to_chat_messages_developer_role_is_configurable():
+    """Default folds developer into user for the Bedrock translation;
+    backends that take `developer` natively get it verbatim."""
+    assert _to_chat_messages(_TURN)[0]["role"] == "user"
+    assert _to_chat_messages(_TURN, developer_role="developer")[0] == {
+        "role": "developer", "content": '{"event": "message"}'}
+
+
+def test_is_anthropic_model():
+    assert _is_anthropic_model("aws/anthropic/bedrock-claude-opus-4-6")
+    assert _is_anthropic_model("azure/anthropic/claude-opus-5")
+    assert not _is_anthropic_model("moonshotai/kimi-k3")
 
 
 def test_image_user_message_translates_input_image():
