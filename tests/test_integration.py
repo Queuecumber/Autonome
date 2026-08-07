@@ -32,12 +32,41 @@ _TURN = [
 ]
 
 
+def test_to_chat_messages_drops_reasoning_by_default():
+    """Anthropic can't replay unsigned reasoning, so it stays dropped."""
+    msgs = _to_chat_messages(_TURN)
+    assert not any("reasoning_content" in m for m in msgs)
+    assert [m["role"] for m in msgs] == ["user", "user", "assistant", "tool", "assistant"]
+
+
+def test_to_chat_messages_preserves_reasoning():
+    """Each reasoning item rides back on the assistant message it preceded —
+    the tool-call one and the final-text one alike."""
+    msgs = _to_chat_messages(_TURN, preserve_reasoning=True)
+    tool_call_msg = next(m for m in msgs if m.get("tool_calls"))
+    assert tool_call_msg["reasoning_content"] == "I should check the clock."
+    assert msgs[-1] == {
+        "role": "assistant",
+        "reasoning_content": "Now answer.",
+        "content": "It's 13:00.",
+    }
+
+
 def test_to_chat_messages_developer_role_is_configurable():
     """Default folds developer into user for the Bedrock translation;
     backends that take `developer` natively get it verbatim."""
     assert _to_chat_messages(_TURN)[0]["role"] == "user"
     assert _to_chat_messages(_TURN, developer_role="developer")[0] == {
         "role": "developer", "content": '{"event": "message"}'}
+
+
+def test_to_chat_messages_reasoning_never_orphans_a_message():
+    """Reasoning with no assistant message behind it is discarded rather
+    than emitted as a content-less assistant turn."""
+    items = [{"type": "reasoning", "content": "thinking..."},
+             {"role": "user", "content": "hi"}]
+    assert _to_chat_messages(items, preserve_reasoning=True) == [
+        {"role": "user", "content": "hi"}]
 
 
 def test_is_anthropic_model():

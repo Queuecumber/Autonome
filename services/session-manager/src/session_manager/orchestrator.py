@@ -190,11 +190,13 @@ def _prepare_for_history(item: dict) -> dict:
 def _is_anthropic_model(model: str) -> bool:
     """Is this an Anthropic model reached through a translating gateway?
 
-    The Bedrock translation hoists every system-role message into the
-    top-level system array, so developer events have to ride as user
-    messages to keep their position in the conversation (and to keep the
-    front of the wire prefix stable). Backends that take `developer`
-    natively get it.
+    Two behaviors key off this. The Bedrock translation hoists every
+    system-role message into the top-level system array, so developer
+    events have to ride as user messages to keep their position in the
+    conversation (and to keep the front of the wire prefix stable).
+    Anthropic also replays thinking in-turn via signed `thinking_blocks`
+    rather than by echoing reasoning text back, so persisted reasoning —
+    which has no signature — stays dropped there.
     """
     m = model.lower()
     return "anthropic" in m or "claude" in m
@@ -204,6 +206,7 @@ def _to_chat_messages(
     items: list[dict[str, Any]],
     *,
     developer_role: str = "user",
+    preserve_reasoning: bool = False,
 ) -> list[dict[str, Any]]:
     """Translate persisted session items (Responses-API shape) to Chat
     Completions messages.
@@ -212,7 +215,8 @@ def _to_chat_messages(
       - role-based: {role: user/assistant/developer, content: str}
       - function_call: {type, call_id, name, arguments}
       - function_call_output: {type, call_id, output}
-      - reasoning: {type, content} — dropped (not replayable)
+      - reasoning: {type, content} — replayed as `reasoning_content` on the
+        assistant message it preceded when `preserve_reasoning`, else dropped
       - comment: {type: comment, ...} — dropped (telemetry)
 
     Output is the chat-completions form Anthropic expects on the wire:
@@ -221,16 +225,27 @@ def _to_chat_messages(
         appear together (matches Anthropic's requirement)
       - function_call_output → {role: tool, tool_call_id, content}
       - developer-role events → `developer_role` messages
+
+    `preserve_reasoning` is for models trained with preserved thinking
+    history (Kimi K3), which expect the whole assistant message — reasoning
+    and tool_calls, not just content — handed back verbatim on every
+    subsequent turn. Without it they stop emitting thinking altogether, and
+    since nothing then gets persisted the next turn is equally bare.
     """
     messages: list[dict[str, Any]] = []
     pending_calls: list[dict[str, Any]] = []
     pending_text = ""
+    pending_reasoning = ""
 
     def flush_assistant() -> None:
-        nonlocal pending_text, pending_calls
+        nonlocal pending_text, pending_calls, pending_reasoning
         if not pending_calls and not pending_text:
+            # Reasoning arrives before the message it belongs to, so hold it
+            # rather than emitting a content-less assistant message.
             return
         msg: dict[str, Any] = {"role": "assistant"}
+        if pending_reasoning:
+            msg["reasoning_content"] = pending_reasoning
         if pending_calls:
             msg["tool_calls"] = pending_calls
             msg["content"] = pending_text or None
@@ -239,6 +254,7 @@ def _to_chat_messages(
         messages.append(msg)
         pending_calls = []
         pending_text = ""
+        pending_reasoning = ""
 
     for item in items:
         item_type = item.get("type")
@@ -260,7 +276,10 @@ def _to_chat_messages(
                 "tool_call_id": item["call_id"],
                 "content": item.get("output") or "",
             })
-        elif item_type in ("reasoning", "comment"):
+        elif item_type == "reasoning":
+            if preserve_reasoning:
+                pending_reasoning = item.get("content") or ""
+        elif item_type == "comment":
             continue
         elif role == "assistant":
             flush_assistant()
@@ -276,10 +295,12 @@ def _to_chat_messages(
             # user-role events extends the cache and pays only for the new
             # tokens). Backends that take `developer` natively get it.
             flush_assistant()
+            pending_reasoning = ""
             messages.append(
                 {"role": developer_role, "content": item.get("content") or ""})
         elif role in ("user", "system"):
             flush_assistant()
+            pending_reasoning = ""
             messages.append({"role": role, "content": item.get("content") or ""})
 
     flush_assistant()
@@ -770,9 +791,12 @@ class SessionOrchestrator:
         all_new_messages: list[dict[str, Any]] = [
             {"type": "comment", "kind": "turn_start"}, *new_items]
         # Anthropic-on-Bedrock needs developer events rendered as user (the
-        # translation hoists system-role messages out of position); other
-        # backends take `developer` natively.
-        developer_role = "user" if _is_anthropic_model(self.model) else "developer"
+        # translation hoists system-role messages out of position) and can't
+        # replay unsigned reasoning; other backends take `developer`
+        # natively, and Kimi-style models need reasoning handed back.
+        anthropic = _is_anthropic_model(self.model)
+        developer_role = "user" if anthropic else "developer"
+        preserve_reasoning = not anthropic
 
         in_turn_chat: list[dict[str, Any]] = []
         for item in new_items:
@@ -803,11 +827,19 @@ class SessionOrchestrator:
             None,
         )
 
+        # Reasoning items survive the filter only when we're going to replay
+        # them; comments are telemetry and never go on the wire.
+        dropped = ("comment",) if preserve_reasoning else ("reasoning", "comment")
+
         def _filt(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return [m for m in items if m.get("type") not in ("reasoning", "comment")]
+            return [m for m in items if m.get("type") not in dropped]
 
         def _to_chat(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return _to_chat_messages(items, developer_role=developer_role)
+            return _to_chat_messages(
+                items,
+                developer_role=developer_role,
+                preserve_reasoning=preserve_reasoning,
+            )
 
         if boundary is None:
             history = _filt(raw_history)
