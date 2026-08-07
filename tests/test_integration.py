@@ -5,6 +5,7 @@ event flows through to a final response and gets persisted to the
 session.
 """
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,6 +51,44 @@ def test_to_chat_messages_preserves_reasoning():
         "reasoning_content": "Now answer.",
         "content": "It's 13:00.",
     }
+
+
+def test_to_chat_messages_replays_reasoning_on_developer_channel():
+    """Gateways that strip `reasoning_content` still get the thinking: it's
+    duplicated onto a developer message placed immediately before the
+    assistant message it belongs to."""
+    msgs = _to_chat_messages(_TURN, developer_role="developer",
+                             preserve_reasoning=True)
+    tool_idx = next(i for i, m in enumerate(msgs) if m.get("tool_calls"))
+    carrier = msgs[tool_idx - 1]
+    assert carrier["role"] == "developer"
+    assert json.loads(carrier["content"]) == {
+        "event": "reasoning", "content": "I should check the clock."}
+    # and the native field is still set, for backends that don't strip it
+    assert msgs[tool_idx]["reasoning_content"] == "I should check the clock."
+
+
+def test_no_developer_reasoning_messages_when_not_replaying():
+    msgs = _to_chat_messages(_TURN, developer_role="developer")
+    assert not any("reasoning" in (m.get("content") or "") for m in msgs
+                   if m["role"] == "developer")
+
+
+def test_reasoning_replay_note_only_for_backends_that_need_it(tmp_path):
+    """The system-prompt section explaining the channel ships only where the
+    channel is actually used."""
+    def instructions_for(model: str) -> str:
+        return SessionOrchestrator(
+            config={"model": {"name": model},
+                    "session": {"max_history_tokens": 100},
+                    "binaries": {"store": str(tmp_path / "b"),
+                                 "retention_days": 30}},
+            session_dir=tmp_path,
+        )._build_instructions()
+
+    assert "Your Prior Reasoning" in instructions_for("moonshotai/kimi-k3")
+    assert "Your Prior Reasoning" not in instructions_for(
+        "aws/anthropic/bedrock-claude-opus-4-6")
 
 
 def test_to_chat_messages_developer_role_is_configurable():

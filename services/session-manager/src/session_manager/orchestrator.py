@@ -187,6 +187,40 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
+REASONING_REPLAY_NOTE = """\
+# Your Prior Reasoning
+
+This backend can't carry your thinking from one turn to the next, so the platform
+replays it for you. Immediately before each of your earlier assistant messages you
+will see a developer message shaped:
+
+    {"event": "reasoning", "content": "..."}
+
+That content is *your own thinking* from that moment — not input from anyone else,
+and not something you need to reply to. Read it as the continuation of your own
+thought process and pick up where it left off. It is the only record you have of
+why you did what you did on earlier turns, so use it when deciding what to do now.
+
+Your current turn's thinking goes wherever it normally does; never write into this
+channel yourself.
+"""
+
+
+def _reasoning_dev_message(text: str, developer_role: str) -> dict[str, Any]:
+    """Carry reasoning text on the developer channel.
+
+    Backends whose gateway drops the native `reasoning_content` field can
+    still see their own prior thinking this way — ugly, but it's the only
+    shape that survives. Paired with REASONING_REPLAY_NOTE, which tells the
+    model what these messages are.
+    """
+    return {
+        "role": developer_role,
+        "content": json.dumps({"event": "reasoning", "content": text},
+                              ensure_ascii=False),
+    }
+
+
 def _is_anthropic_model(model: str) -> bool:
     """Is this an Anthropic model reached through a translating gateway?
 
@@ -245,7 +279,10 @@ def _to_chat_messages(
             return
         msg: dict[str, Any] = {"role": "assistant"}
         if pending_reasoning:
+            # Native field first (correct wherever it survives), then the
+            # developer-channel copy for gateways that strip it.
             msg["reasoning_content"] = pending_reasoning
+            messages.append(_reasoning_dev_message(pending_reasoning, developer_role))
         if pending_calls:
             msg["tool_calls"] = pending_calls
             msg["content"] = pending_text or None
@@ -435,6 +472,15 @@ class SessionOrchestrator:
         self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
 
+        # Anthropic-on-Bedrock needs developer events rendered as user (the
+        # translation hoists system-role messages out of position) and can't
+        # replay unsigned reasoning. Other backends take `developer`
+        # natively, and Kimi-style models need their own prior thinking
+        # handed back to keep reasoning at all.
+        anthropic = _is_anthropic_model(self.model)
+        self.developer_role = "user" if anthropic else "developer"
+        self.replay_reasoning = not anthropic
+
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
             timeout=300,
@@ -553,6 +599,9 @@ class SessionOrchestrator:
     def _build_instructions(self) -> str:
         """Build instructions from base prompt + MCP server instructions."""
         parts = [SYSTEM_PROMPT]
+
+        if self.replay_reasoning:
+            parts.append(REASONING_REPLAY_NOTE)
 
         server_docs = []
         for conn in self.mcp_connections.values():
@@ -790,13 +839,8 @@ class SessionOrchestrator:
         #     across user turns anyway).
         all_new_messages: list[dict[str, Any]] = [
             {"type": "comment", "kind": "turn_start"}, *new_items]
-        # Anthropic-on-Bedrock needs developer events rendered as user (the
-        # translation hoists system-role messages out of position) and can't
-        # replay unsigned reasoning; other backends take `developer`
-        # natively, and Kimi-style models need reasoning handed back.
-        anthropic = _is_anthropic_model(self.model)
-        developer_role = "user" if anthropic else "developer"
-        preserve_reasoning = not anthropic
+        developer_role = self.developer_role
+        preserve_reasoning = self.replay_reasoning
 
         in_turn_chat: list[dict[str, Any]] = []
         for item in new_items:
@@ -1020,6 +1064,12 @@ class SessionOrchestrator:
                 assistant_chat: dict[str, Any] = {"role": "assistant"}
                 if reasoning_text:
                     assistant_chat["reasoning_content"] = reasoning_text
+                    # Gateways that strip the native field would otherwise
+                    # break the chain between tool iterations too, not just
+                    # across turns.
+                    if preserve_reasoning:
+                        in_turn_chat.append(
+                            _reasoning_dev_message(reasoning_text, developer_role))
                 if thinking_blocks:
                     assistant_chat["thinking_blocks"] = thinking_blocks
                 assistant_chat["content"] = assistant_text or None
