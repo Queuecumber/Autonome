@@ -43,7 +43,7 @@ def test_to_chat_messages_drops_reasoning_by_default():
 def test_to_chat_messages_preserves_reasoning():
     """Each reasoning item rides back on the assistant message it preceded —
     the tool-call one and the final-text one alike."""
-    msgs = _to_chat_messages(_TURN, preserve_reasoning=True)
+    msgs = _to_chat_messages(_TURN, reasoning_replay="native")
     tool_call_msg = next(m for m in msgs if m.get("tool_calls"))
     assert tool_call_msg["reasoning_content"] == "I should check the clock."
     assert msgs[-1] == {
@@ -58,7 +58,7 @@ def test_to_chat_messages_replays_reasoning_on_developer_channel():
     duplicated onto a developer message placed immediately before the
     assistant message it belongs to."""
     msgs = _to_chat_messages(_TURN, developer_role="developer",
-                             preserve_reasoning=True)
+                             reasoning_replay="developer")
     tool_idx = next(i for i, m in enumerate(msgs) if m.get("tool_calls"))
     carrier = msgs[tool_idx - 1]
     assert carrier["role"] == "developer"
@@ -68,27 +68,44 @@ def test_to_chat_messages_replays_reasoning_on_developer_channel():
     assert msgs[tool_idx]["reasoning_content"] == "I should check the clock."
 
 
-def test_no_developer_reasoning_messages_when_not_replaying():
-    msgs = _to_chat_messages(_TURN, developer_role="developer")
-    assert not any("reasoning" in (m.get("content") or "") for m in msgs
-                   if m["role"] == "developer")
+def test_native_replay_leaves_the_developer_channel_alone():
+    """"native" is the default for non-Anthropic: the field is set, but no
+    extra developer messages are spent on it."""
+    msgs = _to_chat_messages(_TURN, developer_role="developer",
+                             reasoning_replay="native")
+    assert all("reasoning" not in (m.get("content") or "")
+               for m in msgs if m["role"] == "developer")
+    assert any("reasoning_content" in m for m in msgs)
 
 
-def test_reasoning_replay_note_only_for_backends_that_need_it(tmp_path):
+def _orch(tmp_path, model: str, **model_cfg):
+    return SessionOrchestrator(
+        config={"model": {"name": model, **model_cfg},
+                "session": {"max_history_tokens": 100},
+                "binaries": {"store": str(tmp_path / "b"), "retention_days": 30}},
+        session_dir=tmp_path,
+    )
+
+
+def test_reasoning_replay_defaults_by_model_family(tmp_path):
+    """Anthropic drops it (no signature to replay); everyone else gets the
+    native field. The developer-channel workaround is never automatic."""
+    assert _orch(tmp_path, "aws/anthropic/bedrock-claude-opus-4-6").reasoning_replay == "none"
+    assert _orch(tmp_path, "moonshotai/kimi-k3").reasoning_replay == "native"
+
+
+def test_reasoning_replay_note_ships_only_when_opted_in(tmp_path):
     """The system-prompt section explaining the channel ships only where the
     channel is actually used."""
-    def instructions_for(model: str) -> str:
-        return SessionOrchestrator(
-            config={"model": {"name": model},
-                    "session": {"max_history_tokens": 100},
-                    "binaries": {"store": str(tmp_path / "b"),
-                                 "retention_days": 30}},
-            session_dir=tmp_path,
-        )._build_instructions()
+    assert "Your Prior Reasoning" not in _orch(
+        tmp_path, "moonshotai/kimi-k3")._build_instructions()
+    assert "Your Prior Reasoning" in _orch(
+        tmp_path, "moonshotai/kimi-k3", reasoning_replay="developer")._build_instructions()
 
-    assert "Your Prior Reasoning" in instructions_for("moonshotai/kimi-k3")
-    assert "Your Prior Reasoning" not in instructions_for(
-        "aws/anthropic/bedrock-claude-opus-4-6")
+
+def test_reasoning_replay_rejects_unknown_mode(tmp_path):
+    with pytest.raises(ValueError, match="reasoning_replay"):
+        _orch(tmp_path, "moonshotai/kimi-k3", reasoning_replay="yes-please")
 
 
 def test_to_chat_messages_developer_role_is_configurable():
@@ -104,7 +121,7 @@ def test_to_chat_messages_reasoning_never_orphans_a_message():
     than emitted as a content-less assistant turn."""
     items = [{"type": "reasoning", "content": "thinking..."},
              {"role": "user", "content": "hi"}]
-    assert _to_chat_messages(items, preserve_reasoning=True) == [
+    assert _to_chat_messages(items, reasoning_replay="native") == [
         {"role": "user", "content": "hi"}]
 
 

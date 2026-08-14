@@ -240,7 +240,7 @@ def _to_chat_messages(
     items: list[dict[str, Any]],
     *,
     developer_role: str = "user",
-    preserve_reasoning: bool = False,
+    reasoning_replay: str = "none",
 ) -> list[dict[str, Any]]:
     """Translate persisted session items (Responses-API shape) to Chat
     Completions messages.
@@ -250,7 +250,7 @@ def _to_chat_messages(
       - function_call: {type, call_id, name, arguments}
       - function_call_output: {type, call_id, output}
       - reasoning: {type, content} — replayed as `reasoning_content` on the
-        assistant message it preceded when `preserve_reasoning`, else dropped
+        assistant message it preceded unless `reasoning_replay` is "none"
       - comment: {type: comment, ...} — dropped (telemetry)
 
     Output is the chat-completions form Anthropic expects on the wire:
@@ -260,11 +260,12 @@ def _to_chat_messages(
       - function_call_output → {role: tool, tool_call_id, content}
       - developer-role events → `developer_role` messages
 
-    `preserve_reasoning` is for models trained with preserved thinking
-    history (Kimi K3), which expect the whole assistant message — reasoning
-    and tool_calls, not just content — handed back verbatim on every
-    subsequent turn. Without it they stop emitting thinking altogether, and
-    since nothing then gets persisted the next turn is equally bare.
+    `reasoning_replay` is for models trained with preserved thinking history
+    (Kimi K3), which expect the whole assistant message — reasoning and
+    tool_calls, not just content — handed back verbatim on every subsequent
+    turn. "native" puts it on `reasoning_content`; "developer" additionally
+    copies it onto the developer channel for gateways that strip that field
+    inbound; "none" drops it.
     """
     messages: list[dict[str, Any]] = []
     pending_calls: list[dict[str, Any]] = []
@@ -282,7 +283,9 @@ def _to_chat_messages(
             # Native field first (correct wherever it survives), then the
             # developer-channel copy for gateways that strip it.
             msg["reasoning_content"] = pending_reasoning
-            messages.append(_reasoning_dev_message(pending_reasoning, developer_role))
+            if reasoning_replay == "developer":
+                messages.append(
+                    _reasoning_dev_message(pending_reasoning, developer_role))
         if pending_calls:
             msg["tool_calls"] = pending_calls
             msg["content"] = pending_text or None
@@ -314,7 +317,7 @@ def _to_chat_messages(
                 "content": item.get("output") or "",
             })
         elif item_type == "reasoning":
-            if preserve_reasoning:
+            if reasoning_replay != "none":
                 pending_reasoning = item.get("content") or ""
         elif item_type == "comment":
             continue
@@ -472,14 +475,30 @@ class SessionOrchestrator:
         self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
 
-        # Anthropic-on-Bedrock needs developer events rendered as user (the
-        # translation hoists system-role messages out of position) and can't
-        # replay unsigned reasoning. Other backends take `developer`
-        # natively, and Kimi-style models need their own prior thinking
-        # handed back to keep reasoning at all.
+        # Anthropic-on-Bedrock needs developer events rendered as user: the
+        # translation hoists system-role messages out of position. Other
+        # backends take `developer` natively.
         anthropic = _is_anthropic_model(self.model)
         self.developer_role = "user" if anthropic else "developer"
-        self.replay_reasoning = not anthropic
+
+        # How prior reasoning gets back to the model:
+        #   none      — dropped. Anthropic replays thinking in-turn via
+        #               signed thinking_blocks, and persisted reasoning has
+        #               no signature.
+        #   native    — `reasoning_content` on the assistant message, which
+        #               is what preserved-thinking models expect.
+        #   developer — native plus a copy on the developer channel, for
+        #               gateways that strip `reasoning_content` off inbound
+        #               messages. Costs context every turn and the model has
+        #               to be told what the messages are, so it's opt-in.
+        # Whether a gateway strips the field isn't derivable from the model
+        # name, so this is explicit rather than sniffed.
+        default = "none" if anthropic else "native"
+        self.reasoning_replay = model_config.get("reasoning_replay") or default
+        if self.reasoning_replay not in ("none", "native", "developer"):
+            raise ValueError(
+                "model.reasoning_replay must be one of none/native/developer, "
+                f"got {self.reasoning_replay!r}")
 
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
@@ -600,7 +619,7 @@ class SessionOrchestrator:
         """Build instructions from base prompt + MCP server instructions."""
         parts = [SYSTEM_PROMPT]
 
-        if self.replay_reasoning:
+        if self.reasoning_replay == "developer":
             parts.append(REASONING_REPLAY_NOTE)
 
         server_docs = []
@@ -840,7 +859,7 @@ class SessionOrchestrator:
         all_new_messages: list[dict[str, Any]] = [
             {"type": "comment", "kind": "turn_start"}, *new_items]
         developer_role = self.developer_role
-        preserve_reasoning = self.replay_reasoning
+        reasoning_replay = self.reasoning_replay
 
         in_turn_chat: list[dict[str, Any]] = []
         for item in new_items:
@@ -873,7 +892,8 @@ class SessionOrchestrator:
 
         # Reasoning items survive the filter only when we're going to replay
         # them; comments are telemetry and never go on the wire.
-        dropped = ("comment",) if preserve_reasoning else ("reasoning", "comment")
+        dropped = (("reasoning", "comment") if reasoning_replay == "none"
+                   else ("comment",))
 
         def _filt(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [m for m in items if m.get("type") not in dropped]
@@ -882,7 +902,7 @@ class SessionOrchestrator:
             return _to_chat_messages(
                 items,
                 developer_role=developer_role,
-                preserve_reasoning=preserve_reasoning,
+                reasoning_replay=reasoning_replay,
             )
 
         if boundary is None:
@@ -1067,7 +1087,7 @@ class SessionOrchestrator:
                     # Gateways that strip the native field would otherwise
                     # break the chain between tool iterations too, not just
                     # across turns.
-                    if preserve_reasoning:
+                    if reasoning_replay == "developer":
                         in_turn_chat.append(
                             _reasoning_dev_message(reasoning_text, developer_role))
                 if thinking_blocks:
