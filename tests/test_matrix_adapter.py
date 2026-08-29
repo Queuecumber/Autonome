@@ -1236,3 +1236,49 @@ async def test_forward_events_retries_on_failure(monkeypatch):
         pass
 
     assert calls == 3
+
+
+# ── Media event coverage ─────────────────────────────────
+
+
+def test_every_dispatched_event_type_has_a_callback():
+    """nio drops events whose class was never registered via
+    add_event_callback, so a handler in the dispatch table with no matching
+    registration is dead code that silently loses messages."""
+    import inspect
+    import re
+
+    import matrix_adapter.model as model
+
+    src = inspect.getsource(model)
+    table = re.search(
+        r"self\._handlers: dict\[type, Callable\] = \{(.*?)\n        \}", src, re.S
+    ).group(1)
+    dispatched = {cls for cls, _ in re.findall(r"(\w+): self\.(\w+)", table)}
+    registered = set(
+        re.findall(r"add_event_callback\(self\._handle_event, (\w+)\)", src)
+    )
+    assert dispatched - registered == set()
+
+
+def test_media_events_cover_audio_and_video():
+    """Voice notes arrive as RoomEncryptedAudio in an encrypted room; before
+    these were registered the event matched no callback and never became an
+    event at all."""
+    import matrix_adapter.model as model
+
+    for name in ("RoomMessageAudio", "RoomEncryptedAudio",
+                 "RoomMessageVideo", "RoomEncryptedVideo"):
+        cls = getattr(model, name)
+        assert model.MatrixClient.__init__ is not None
+        assert cls in _handler_types(model), f"{name} not dispatched to a handler"
+
+
+def _handler_types(model):
+    import inspect
+    import re
+    src = inspect.getsource(model)
+    table = re.search(
+        r"self\._handlers: dict\[type, Callable\] = \{(.*?)\n        \}", src, re.S
+    ).group(1)
+    return {getattr(model, cls) for cls, _ in re.findall(r"(\w+): self\.(\w+)", table)}

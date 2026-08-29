@@ -24,12 +24,18 @@ from nio import (
     MegolmEvent,
     ProfileGetResponse,
     ReactionEvent,
+    RoomEncryptedAudio,
     RoomEncryptedFile,
     RoomEncryptedImage,
+    RoomEncryptedMedia,
+    RoomEncryptedVideo,
     RoomGetStateEventResponse,
+    RoomMessageAudio,
     RoomMessageFile,
     RoomMessageImage,
+    RoomMessageMedia,
     RoomMessageText,
+    RoomMessageVideo,
     RoomPutStateResponse,
     RoomRedactResponse,
     RoomSendResponse,
@@ -130,7 +136,7 @@ class Attachment:
     @classmethod
     def from_nio_event(
         cls,
-        event: RoomMessageImage | RoomMessageFile | RoomEncryptedImage | RoomEncryptedFile,
+        event: RoomMessageMedia | RoomEncryptedMedia,
     ) -> Self:
         """Build from a nio media event. MSC2530: body is the caption,
         filename lives in a top-level `filename` field. Legacy: body is the
@@ -229,7 +235,7 @@ class Message:
     def from_nio(
         cls,
         room: MatrixRoom,
-        event: RoomMessageText | RoomMessageImage | RoomMessageFile | RoomEncryptedImage | RoomEncryptedFile,
+        event: RoomMessageText | RoomMessageMedia | RoomEncryptedMedia,
     ) -> Self:
         """Build from a nio text or media room-message event."""
         if isinstance(event, RoomMessageText):
@@ -415,6 +421,10 @@ class MatrixClient:
             RoomEncryptedImage: self._on_media,
             RoomMessageFile: self._on_media,
             RoomEncryptedFile: self._on_media,
+            RoomMessageAudio: self._on_media,
+            RoomEncryptedAudio: self._on_media,
+            RoomMessageVideo: self._on_media,
+            RoomEncryptedVideo: self._on_media,
             ReactionEvent: self._on_reaction,
             RedactionEvent: self._on_redaction,
             UnknownEvent: self._on_unknown,
@@ -466,6 +476,10 @@ class MatrixClient:
         self._client.add_event_callback(self._handle_event, RoomEncryptedImage)
         self._client.add_event_callback(self._handle_event, RoomMessageFile)
         self._client.add_event_callback(self._handle_event, RoomEncryptedFile)
+        self._client.add_event_callback(self._handle_event, RoomMessageAudio)
+        self._client.add_event_callback(self._handle_event, RoomEncryptedAudio)
+        self._client.add_event_callback(self._handle_event, RoomMessageVideo)
+        self._client.add_event_callback(self._handle_event, RoomEncryptedVideo)
         self._client.add_event_callback(self._handle_event, ReactionEvent)
         self._client.add_event_callback(self._handle_event, RedactionEvent)
         self._client.add_event_callback(self._handle_event, UnknownEvent)
