@@ -234,6 +234,10 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
 
         elif block.type == "audio":
             parts.append(_describe_binary(block.data, block.mimeType, store))
+            parts.append({
+                "type": "input_audio",
+                "audio_url": f"data:{block.mimeType};base64,{block.data}",
+            })
 
         elif block.type == "resource":
             resource = getattr(block, "resource", None)
@@ -249,6 +253,12 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                     parts.append({
                         "type": "input_image",
                         "image_url": f"data:{mime};base64,{blob}",
+                    })
+                elif mime.startswith("audio/"):
+                    parts.append(_describe_binary(blob, mime, store))
+                    parts.append({
+                        "type": "input_audio",
+                        "audio_url": f"data:{mime};base64,{blob}",
                     })
                 elif _is_text_type(mime):
                     raw = base64.b64decode(blob)

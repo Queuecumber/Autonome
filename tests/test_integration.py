@@ -13,7 +13,7 @@ import pytest
 from session_manager.event import Event
 from session_manager.orchestrator import (
     SessionOrchestrator,
-    _image_user_message,
+    _media_user_message,
     _is_anthropic_model,
     _to_chat_messages,
 )
@@ -131,7 +131,7 @@ def test_is_anthropic_model():
     assert not _is_anthropic_model("moonshotai/kimi-k3")
 
 
-def test_image_user_message_translates_input_image():
+def test_media_user_message_translates_input_image():
     """Responses-shape input_image parts become chat-completions image_url
     parts in a single follow-up user message."""
     image_items = [
@@ -140,17 +140,39 @@ def test_image_user_message_translates_input_image():
         {"role": "user", "content": [
             {"type": "input_image", "image_url": "data:image/jpeg;base64,BBB"}]},
     ]
-    msg = _image_user_message(image_items)
+    msg = _media_user_message(image_items)
     assert msg == {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBB"}},
     ]}
 
 
-def test_image_user_message_none_when_no_images():
-    assert _image_user_message([]) is None
-    assert _image_user_message([{"role": "user", "content": [
+def test_media_user_message_none_when_no_media():
+    assert _media_user_message([]) is None
+    assert _media_user_message([{"role": "user", "content": [
         {"type": "input_text", "text": "not an image"}]}]) is None
+
+
+def test_media_user_message_translates_input_audio():
+    """Audio rides as a data URI, not a format enum — the enum only accepts
+    wav/mp3, while the data URI takes ogg/opus voice notes untranscoded."""
+    msg = _media_user_message([
+        {"role": "user", "content": [
+            {"type": "input_audio", "audio_url": "data:audio/ogg;base64,AAA"}]},
+    ])
+    assert msg == {"role": "user", "content": [
+        {"type": "audio_url", "audio_url": {"url": "data:audio/ogg;base64,AAA"}},
+    ]}
+
+
+def test_media_user_message_mixes_image_and_audio_in_order():
+    msg = _media_user_message([
+        {"role": "user", "content": [
+            {"type": "input_image", "image_url": "data:image/png;base64,IMG"}]},
+        {"role": "user", "content": [
+            {"type": "input_audio", "audio_url": "data:audio/ogg;base64,AUD"}]},
+    ])
+    assert [p["type"] for p in msg["content"]] == ["image_url", "audio_url"]
 
 
 def _text_chunk(text: str, finish: str | None = None):

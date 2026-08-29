@@ -177,6 +177,8 @@ def _prepare_for_history(item: dict) -> dict:
     for block in content:
         if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
             texts.append("[image]")
+        elif isinstance(block, dict) and block.get("type") in ("audio_url", "input_audio"):
+            texts.append("[audio]")
         elif isinstance(block, dict) and block.get("type") == "input_text":
             texts.append(block["text"])
         elif isinstance(block, dict) and block.get("type") == "text":
@@ -347,23 +349,34 @@ def _to_chat_messages(
     return messages
 
 
-def _image_user_message(image_items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Build a chat-completions user message carrying tool-result images.
+def _media_user_message(media_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Build a chat-completions user message carrying tool-result media.
 
-    `image_items` are Responses-shape user messages from _execute_tool_call
-    ({"role": "user", "content": [{"type": "input_image", "image_url": "data:..."}]}).
-    Images can't ride inside a tool-role message (string content only), so
-    the convention is a follow-up user message after the tool results.
-    Translates input_image -> chat-completions image_url. Returns None if
-    there are no images.
+    `media_items` are Responses-shape user messages from _execute_tool_call
+    ({"role": "user", "content": [{"type": "input_image", "image_url": "data:..."}]},
+    or the input_audio equivalent). Binaries can't ride inside a tool-role
+    message (string content only), so the convention is a follow-up user
+    message after the tool results.
+
+    Both carry a data URI rather than a format enum: the audio `format`
+    field only accepts wav/mp3, while the data-URI form takes the container
+    the file already is (ogg/opus voice notes included), so nothing has to
+    be transcoded. Returns None if there is no media.
     """
     parts: list[dict[str, Any]] = []
-    for msg in image_items:
+    for msg in media_items:
         for part in msg.get("content") or []:
-            if isinstance(part, dict) and part.get("type") == "input_image":
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "input_image":
                 parts.append({
                     "type": "image_url",
                     "image_url": {"url": part["image_url"]},
+                })
+            elif part.get("type") == "input_audio":
+                parts.append({
+                    "type": "audio_url",
+                    "audio_url": {"url": part["audio_url"]},
                 })
     if not parts:
         return None
@@ -638,9 +651,9 @@ class SessionOrchestrator:
     async def _execute_tool_call(self, call_id: str, name: str, arguments: str) -> tuple[dict, list[dict]]:
         """Execute a tool call.
 
-        Returns (function_call_output, image_items):
+        Returns (function_call_output, media_items):
           - function_call_output: the output item with text content
-          - image_items: user messages with image_url content for the model to see
+          - media_items: user messages with image/audio content for the model
         """
         conn = self._tool_to_mcp.get(name)
 
@@ -662,16 +675,17 @@ class SessionOrchestrator:
         openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
 
         # input_text → function_call_output.output (a single string)
-        # input_image → separate user-role message (images can't ride inside
-        # function_call_output.output, which is string-only)
+        # input_image/input_audio → separate user-role message (binaries can't
+        # ride inside function_call_output.output, which is string-only)
         text_parts = [p["text"] for p in openai_parts if p.get("type") == "input_text"]
-        image_items = [
+        media_items = [
             {"role": "user", "content": [p]}
-            for p in openai_parts if p.get("type") == "input_image"
+            for p in openai_parts
+            if p.get("type") in ("input_image", "input_audio")
         ]
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
-        return output, image_items
+        return output, media_items
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
         """Stream a chat completion and aggregate deltas into a single
@@ -1115,7 +1129,7 @@ class SessionOrchestrator:
                     })
 
                 # Execute tool calls, checking for interruption between each
-                turn_images: list[dict[str, Any]] = []
+                turn_media: list[dict[str, Any]] = []
                 for tc in tool_calls:
                     if cancel.is_set():
                         pending = []
@@ -1131,7 +1145,7 @@ class SessionOrchestrator:
                         return None
 
                     logger.info("  Tool call: %s(%s)", tc["function"]["name"], tc["function"]["arguments"][:100])
-                    result, images = await self._execute_tool_call(
+                    result, media = await self._execute_tool_call(
                         tc["id"], tc["function"]["name"], tc["function"]["arguments"]
                     )
                     logger.debug("  Result: %s", result["output"][:200])
@@ -1141,16 +1155,16 @@ class SessionOrchestrator:
                         "tool_call_id": tc["id"],
                         "content": result.get("output") or "",
                     })
-                    turn_images.extend(images)
+                    turn_media.extend(media)
 
-                # Images can't ride inside a tool-role message (string content
-                # only), so after all tool results are in, surface them as one
-                # follow-up user message. Not persisted — the pointer JSON in
-                # the tool output text is the durable reference; the bytes are
-                # re-fetchable via URI on a later turn.
-                image_msg = _image_user_message(turn_images)
-                if image_msg is not None:
-                    in_turn_chat.append(image_msg)
+                # Binaries can't ride inside a tool-role message (string
+                # content only), so after all tool results are in, surface them
+                # as one follow-up user message. Not persisted — the pointer
+                # JSON in the tool output text is the durable reference; the
+                # bytes are re-fetchable via URI on a later turn.
+                media_msg = _media_user_message(turn_media)
+                if media_msg is not None:
+                    in_turn_chat.append(media_msg)
 
                 continue
 
