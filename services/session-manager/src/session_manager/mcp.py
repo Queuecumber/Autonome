@@ -254,6 +254,11 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                         "type": "input_image",
                         "image_url": f"data:{mime};base64,{blob}",
                     })
+                elif mime.startswith("video/"):
+                    # No model host we target accepts video, so hand back the
+                    # pointer rather than the bytes — she still learns a video
+                    # arrived and can re-fetch it by URI.
+                    parts.append(_describe_binary(blob, mime, store))
                 elif mime.startswith("audio/"):
                     parts.append(_describe_binary(blob, mime, store))
                     parts.append({

@@ -6,7 +6,7 @@ session.
 """
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -338,3 +338,22 @@ async def test_explicit_session_id_routes(tmp_path):
     mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
     assert mgr.load("cron-target") != []
     assert mgr.load("main") == []
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_becomes_output_not_a_dead_turn(tmp_path):
+    """handle_event runs in a bare create_task, so an exception escaping a
+    tool call would kill the turn and discard everything collected for it.
+    Failures have to come back as tool output instead."""
+    orch = _orch(tmp_path, "test-model")
+
+    conn = MagicMock()
+    conn.call_tool = AsyncMock(side_effect=ValueError("Cannot inline resource of type 'video/mp4'"))
+    conn.binary_params = {}
+    orch._tool_to_mcp = {"read_thing": conn}
+
+    result, media = await orch._execute_tool_call("c1", "read_thing", "{}")
+    assert result["type"] == "function_call_output"
+    assert result["call_id"] == "c1"
+    assert "video/mp4" in result["output"]
+    assert media == []

@@ -669,10 +669,19 @@ class SessionOrchestrator:
                 return {"type": "function_call_output", "call_id": call_id,
                         "output": f"Error resolving resource URI: {e}"}, []
 
-        content_blocks = await conn.call_tool(name, args)
-        logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),
-                     [getattr(b, "type", type(b).__name__) for b in content_blocks])
-        openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
+        # Any failure here — the MCP server erroring, or content we can't
+        # render — has to come back as tool output. handle_event runs in a
+        # bare create_task, so an exception escaping this would kill the turn
+        # and discard everything accumulated for it.
+        try:
+            content_blocks = await conn.call_tool(name, args)
+            logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),
+                         [getattr(b, "type", type(b).__name__) for b in content_blocks])
+            openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
+        except Exception as e:
+            logger.error("Tool %s failed: %s: %s", name, type(e).__name__, e, exc_info=True)
+            return {"type": "function_call_output", "call_id": call_id,
+                    "output": f"Error calling tool '{name}': {e}"}, []
 
         # input_text → function_call_output.output (a single string)
         # input_image/input_audio → separate user-role message (binaries can't
