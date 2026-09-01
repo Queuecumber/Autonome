@@ -20,27 +20,24 @@ def _api_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
 
-def _message_item(text: str) -> MagicMock:
-    item = MagicMock()
-    item.type = "message"
-    content = MagicMock()
-    content.text = text
-    item.content = [content]
-    return item
-
-
 def _mock_summary_response(text: str) -> MagicMock:
-    """A non-streaming Responses result containing a text message item."""
+    """A non-streaming chat-completions response containing a text message."""
+    msg = MagicMock()
+    msg.content = text
+    msg.tool_calls = None
+    choice = MagicMock()
+    choice.message = msg
     resp = MagicMock()
-    resp.output = [_message_item(text)]
+    resp.choices = [choice]
     return resp
 
 
 def _bind_llm(orch, create_fn) -> None:
-    """Point the orchestrator at a fake responses.create."""
+    """Point the orchestrator at a fake chat.completions.create."""
     orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = create_fn
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = create_fn
 
 
 def _orchestrator(tmp_path, *, trigger: int = 1000, recency: int = 800) -> SessionOrchestrator:
@@ -138,13 +135,13 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     # Summary call carried our instructions and no tools.
     assert "tools" not in captured
     assert captured["model"] == "test-model"
-    # Instructions ride in their own field, not as a leading system message.
-    assert isinstance(captured["instructions"], str)
-    assert "messages" not in captured
-    input_items = captured["input"]
-    # A user-role framing line leads, so the fold doesn't start on whatever
-    # role the slice boundary happened to land on.
-    assert input_items[0]["role"] == "user"
+    messages = captured["messages"]
+    assert "input" not in captured
+    # System prompt first, then a user-role framing line so the fold doesn't
+    # start on whatever role the slice boundary happened to land on.
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    input_items = messages
     # Last two: the summarize event payload + the instruction.
     prompt_msg = input_items[-2]
     content_msg = input_items[-1]
@@ -157,7 +154,7 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     assert "structured summary" in content_msg["content"]
     # Fold messages ride as flattened items. Comments and reasoning are
     # filtered out.
-    fold_msgs = input_items[1:-2]
+    fold_msgs = input_items[2:-2]
     assert {"role": "user", "content": "very old"} in fold_msgs
     assert all(m["role"] in ("user", "assistant") for m in fold_msgs)
     assert {"role": "user", "content": "new"} not in fold_msgs
@@ -218,13 +215,18 @@ async def test_summary_call_runs_tool_loop_then_emits_text(tmp_path):
     orch = _orchestrator(tmp_path)
 
     tool_call = MagicMock()
-    tool_call.type = "function_call"
-    tool_call.call_id = "call-1"
-    tool_call.name = "memory_write"
-    tool_call.arguments = '{"note": "something important"}'
+    tool_call.id = "call-1"
+    tool_call.function = MagicMock()
+    tool_call.function.name = "memory_write"
+    tool_call.function.arguments = '{"note": "something important"}'
 
+    first_msg = MagicMock()
+    first_msg.content = None
+    first_msg.tool_calls = [tool_call]
+    first_choice = MagicMock()
+    first_choice.message = first_msg
     first_resp = MagicMock()
-    first_resp.output = [tool_call]
+    first_resp.choices = [first_choice]
 
     second_resp = _mock_summary_response("FINAL SUMMARY")
 
@@ -258,8 +260,7 @@ async def test_summary_call_raises_when_response_empty(tmp_path):
     than silently writing an empty summary."""
     orch = _orchestrator(tmp_path)
 
-    empty_resp = MagicMock()
-    empty_resp.output = [_message_item("")]
+    empty_resp = _mock_summary_response("")
 
     async def fake_create(**kwargs):
         return empty_resp
