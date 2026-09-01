@@ -592,18 +592,13 @@ class SessionOrchestrator:
         the session — only the final summary lands in the next version's
         first message).
         """
-        # Runs on chat completions, not the Responses API: the gateway's
-        # Responses->Chat translator mangles tool round-trips on Claude
-        # models, which surfaces here as "This model does not support
-        # assistant message prefill".
-        #
-        # The fold is flattened to plain chat messages rather than the
-        # structured tool_call/tool_result shape. The fold is an arbitrary
+        # The fold is flattened to plain messages rather than the structured
+        # function_call/function_call_output shape. The fold is an arbitrary
         # slice of history, so it routinely begins or ends mid-tool-exchange,
-        # and chat completions rejects an orphaned call or result. For a
-        # summarization pass the model only needs to read what happened, so
-        # tool activity renders as text and the pairing rules stop applying.
-        # Keep isn't sent — the agent's next turn has it as recency.
+        # and an orphaned call or result is rejected. For a summarization
+        # pass the model only needs to read what happened, so tool activity
+        # renders as text and the pairing rules stop applying. Keep isn't
+        # sent — the agent's next turn has it as recency.
         def _flatten(item: dict) -> dict[str, Any] | None:
             item_type = item.get("type")
             if item_type in ("reasoning", "comment"):
@@ -619,24 +614,22 @@ class SessionOrchestrator:
             if role in ("user", "assistant"):
                 return {"role": role, "content": item.get("content") or ""}
             if role in ("developer", "system"):
-                # Events ride as user: the Bedrock translation hoists
-                # system-role messages out of conversation order.
+                # Flattened to user like everything else here — the fold is
+                # reading material, not a conversation to be replayed.
                 return {"role": "user", "content": item.get("content") or ""}
             return None
 
-        fold_chat = [m for m in (_flatten(i) for i in fold_messages) if m]
+        fold_input = [m for m in (_flatten(i) for i in fold_messages) if m]
 
         # The summarize directive sits at the *end* as a regular event
         # (event payload + user content, same shape as every other event the
         # agent handles) — at the front it gets ignored after the model wades
-        # through the fold. The leading framing line guarantees the first
-        # message after the system prompt is user-role, which Anthropic
-        # requires and an arbitrary fold boundary can't promise.
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._build_instructions()},
+        # through the fold. The leading framing line keeps the fold from
+        # starting on whatever role the slice boundary happened to land on.
+        input_items: list[dict[str, Any]] = [
             {"role": "user",
              "content": "Older conversation context to be summarized follows."},
-            *fold_chat,
+            *fold_input,
             {"role": "user", "content": _developer_event(
                 "summarize",
                 fold_count=len(fold_messages),
@@ -647,48 +640,35 @@ class SessionOrchestrator:
 
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
-        # Responses-shaped config key; chat completions rejects it.
-        if "max_output_tokens" in call_kwargs:
-            call_kwargs["max_tokens"] = call_kwargs.pop("max_output_tokens")
+        call_kwargs["instructions"] = self._build_instructions()
         # Match the main turn's output budget — when reasoning effort is on,
-        # the model's thinking budget can exceed a tight cap and the provider
-        # rejects with `max_tokens must be greater than thinking.budget_tokens`.
-        call_kwargs.setdefault("max_tokens", 65536)
+        # the model's thinking budget can exceed a tight cap.
+        call_kwargs.setdefault("max_output_tokens", 65536)
         if self.openai_tools:
-            call_kwargs["tools"] = [
-                {"type": "function",
-                 "function": {"name": t["name"],
-                              "description": t.get("description") or "",
-                              "parameters": t.get("parameters") or {}}}
-                for t in self.openai_tools
-            ]
+            call_kwargs["tools"] = self.openai_tools
 
         for _ in range(self.max_tool_iterations):
-            call_kwargs["messages"] = messages
-            response = await self.llm.chat.completions.create(**call_kwargs)
+            call_kwargs["input"] = input_items
+            response = await self.llm.responses.create(**call_kwargs)
 
-            msg = response.choices[0].message
-            tool_calls = getattr(msg, "tool_calls", None) or []
+            output = list(response.output or [])
+            tool_calls = [i for i in output if getattr(i, "type", None) == "function_call"]
             if tool_calls:
-                messages = messages + [{
-                    "role": "assistant",
-                    "content": getattr(msg, "content", None),
-                    "tool_calls": [
-                        {"id": tc.id, "type": "function",
-                         "function": {"name": tc.function.name,
-                                      "arguments": tc.function.arguments}}
-                        for tc in tool_calls
-                    ],
-                }]
+                tool_results = []
                 for tc in tool_calls:
-                    result, _images = await self._execute_tool_call(
-                        tc.id, tc.function.name, tc.function.arguments
-                    )
-                    messages.append({"role": "tool", "tool_call_id": tc.id,
-                                     "content": result.get("output") or ""})
+                    result, _media = await self._execute_tool_call(
+                        tc.call_id, tc.name, tc.arguments)
+                    tool_results.append(result)
+                # Feed this call's own output items back verbatim, same as a
+                # normal turn — that carries the reasoning across iterations.
+                input_items = input_items + output + tool_results
                 continue
 
-            text = (getattr(msg, "content", None) or "").strip()
+            text = "".join(
+                getattr(content, "text", "") or ""
+                for item in output if getattr(item, "type", None) == "message"
+                for content in (getattr(item, "content", None) or [])
+            ).strip()
             if not text:
                 raise RuntimeError("summary call returned no text content")
             return text
