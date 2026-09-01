@@ -150,6 +150,25 @@ require any special actions.
 By default, all events are delivered to the main session, however, some events may be delivered to sub-sessions if they
 request it. Make sure you know what session you're in (visible in the boot message) and plan accordingly.
 
+## Context Summaries
+
+When a session grows past the working-memory budget, older context is folded into a structured summary
+written by you, in your own voice. That summary lands at the top of context as a developer message with
+`event` of `context_summary`. Treat it as your own past notes — the canonical record of what happened before
+the recency window.
+
+If the current conversation references something from before the summary and that detail isn't in your
+summary, the original messages are no longer in your working memory (they live in the on-disk audit trail
+you can't directly read). Check long-term memory (via the Memory MCP) before assuming you don't have it.
+
+When you receive a developer message asking you to produce a summary (event `summarize`), the user message
+that follows is the older context to fold. Before emitting your summary, save anything important from that
+older context to long-term memory via the Memory MCP — after this turn, the raw content is gone from your
+working memory; only your summary and whatever you persisted survive. Then produce a structured summary
+that preserves whatever you think will matter going forward: identity, relationships, in-flight commitments,
+decisions, open threads, anything emotionally load-bearing. You choose the structure. Be terse and specific —
+this is your memory of older context, not a transcript.
+
 ## Safety and Accuracy
 
 Some of your interactions may be in a group setting or with an unfamiliar person. Always check who you are talking to,
@@ -210,6 +229,35 @@ def _developer_event(event_type: str, **fields) -> dict:
     return {"role": "developer", "content": json.dumps(payload, ensure_ascii=False)}
 
 
+SUMMARIZE_INSTRUCTION = (
+    "The user content below contains older session messages that are about "
+    "to leave your working memory — summarize them. The recency window "
+    "(more recent messages) stays in your context after this compaction "
+    "and is not shown here, so anything in it doesn't need to be in your "
+    "summary; it remains available verbatim. "
+    "First, save anything important from the messages below to long-term "
+    "memory via the Memory MCP — after this turn, the raw content is gone "
+    "from your working memory and only your summary plus whatever you "
+    "persisted survives. "
+    "If the first item in the to-summarize block is itself a prior summary "
+    "(a `context_summary` developer event), treat it as your existing "
+    "notes — preserve still-true facts, drop stale ones, integrate the new "
+    "content into a single updated summary rather than appending a new layer. "
+    "Then produce a structured summary in your own voice that preserves "
+    "whatever you think will matter going forward — relationships, in-flight "
+    "commitments, decisions, open threads, anything emotionally load-bearing. "
+    "You choose the structure. Be terse and specific; this is memory, not "
+    "transcript. Your identity, personality, and standing context are already "
+    "in your system prompt — don't restate them; focus the summary on what's "
+    "specific to this conversation. "
+    "Don't narrate the act of summarizing or refer to the compaction process. "
+    "Write facts as notes for your future self (\"Booted at 18:20 EDT\"), not "
+    "as a report about what the older context contained (\"Aged-out context "
+    "had a boot at 18:20\") — otherwise the narration compounds across "
+    "successive compactions."
+)
+
+
 def _log_exception_tree(e: BaseException, depth: int = 0) -> None:
     """Recursively log a BaseExceptionGroup tree so TaskGroup wrappers don't
     swallow the real cause."""
@@ -244,8 +292,17 @@ class SessionOrchestrator:
         )
 
         session_config = config.get("session", {})
-        max_tokens = session_config.get("max_history_tokens", 100000)
-        self.session = SessionManager(store_dir=session_dir, max_history_tokens=max_tokens)
+        self.compaction_trigger_tokens = int(
+            session_config.get("compaction_trigger_tokens",
+                               session_config.get("max_history_tokens", 100_000))
+        )
+        # Recency floor defaults to ~89% of the trigger — yields a fold of
+        # roughly 10% of the trigger per compaction event. Override to taste.
+        self.recency_tokens = int(
+            session_config.get("recency_tokens",
+                               int(self.compaction_trigger_tokens * 8 / 9))
+        )
+        self.session = SessionManager(store_dir=session_dir)
 
         binaries_config = config.get("binaries", {})
         binary_dir = Path(binaries_config.get("store", "/data/binaries"))
@@ -478,6 +535,146 @@ class SessionOrchestrator:
 
         return result
 
+    async def _compact_session_if_needed(self, session_id: str) -> None:
+        """If the last call's reported `input_tokens` exceeded the trigger,
+        ask the agent to fold older context into a structured summary and
+        write a new version of the session file.
+
+        Silently no-ops when there's no usage data yet (fresh sessions) or
+        when the latest call is under threshold. Failures fall back to the
+        existing (un-compacted) version so a flaky compaction call doesn't
+        block the next turn.
+        """
+        history = self.session.load(session_id)
+        last_tokens = SessionManager.latest_input_tokens(history)
+        if last_tokens is None or last_tokens <= self.compaction_trigger_tokens:
+            return
+
+        split = SessionManager.recency_split(history, self.recency_tokens)
+        if split <= 0:
+            logger.info("compaction: no recency cutoff identified, skipping")
+            return
+
+        fold_messages = history[:split]
+        keep_messages = history[split:]
+        logger.info(
+            "compaction: input_tokens=%d > trigger=%d; folding %d msgs, keeping %d",
+            last_tokens, self.compaction_trigger_tokens,
+            len(fold_messages), len(keep_messages),
+        )
+
+        try:
+            summary_text = await self._summarize(fold_messages, keep_messages)
+        except Exception as e:
+            logger.error("compaction: summary call failed, leaving session as-is: %r", e)
+            return
+
+        summary_msg = _developer_event("context_summary", content=summary_text)
+        clean_keep = SessionManager.strip_usage_comments(keep_messages)
+        new_path = self.session.bump_version(session_id, [summary_msg, *clean_keep])
+        logger.info("compaction: wrote %s (%d msgs)", new_path.name, 1 + len(clean_keep))
+
+    async def _summarize(self, fold_messages: list[dict], keep_messages: list[dict]) -> str:
+        """Run an LLM call asking the agent to summarize `fold_messages`.
+
+        `keep_messages` is the recency window that will stay in context
+        after compaction — passed so the agent knows the boundary and
+        doesn't summarize what's still available verbatim.
+
+        Uses the same instructions (system prompt + personality + tool docs)
+        as a normal turn so the summary lands in her voice, and exposes the
+        same tools so she can persist anything important to long-term memory
+        (via the Memory MCP) before emitting the summary — the raw content
+        is about to leave her working memory.
+
+        Loops on tool calls like `_process_events`, but non-streaming and
+        without history persistence (this call's outputs aren't appended to
+        the session — only the final summary lands in the next version's
+        first message).
+        """
+        # The fold is flattened to plain messages rather than the structured
+        # function_call/function_call_output shape. The fold is an arbitrary
+        # slice of history, so it routinely begins or ends mid-tool-exchange,
+        # and an orphaned call or result is rejected. For a summarization
+        # pass the model only needs to read what happened, so tool activity
+        # renders as text and the pairing rules stop applying. Keep isn't
+        # sent — the agent's next turn has it as recency.
+        def _flatten(item: dict) -> dict[str, Any] | None:
+            item_type = item.get("type")
+            if item_type in ("reasoning", "comment"):
+                return None
+            if item_type == "function_call":
+                return {"role": "assistant",
+                        "content": f"[tool call] {item.get('name') or ''}"
+                                   f"({item.get('arguments') or ''})"}
+            if item_type == "function_call_output":
+                return {"role": "user",
+                        "content": f"[tool result] {item.get('output') or ''}"}
+            role = item.get("role")
+            if role in ("user", "assistant"):
+                return {"role": role, "content": item.get("content") or ""}
+            if role in ("developer", "system"):
+                # Flattened to user like everything else here — the fold is
+                # reading material, not a conversation to be replayed.
+                return {"role": "user", "content": item.get("content") or ""}
+            return None
+
+        fold_input = [m for m in (_flatten(i) for i in fold_messages) if m]
+
+        # The summarize directive sits at the *end* as a regular event
+        # (event payload + user content, same shape as every other event the
+        # agent handles) — at the front it gets ignored after the model wades
+        # through the fold. The leading framing line keeps the fold from
+        # starting on whatever role the slice boundary happened to land on.
+        input_items: list[dict[str, Any]] = [
+            {"role": "user",
+             "content": "Older conversation context to be summarized follows."},
+            *fold_input,
+            {"role": "user", "content": _developer_event(
+                "summarize",
+                fold_count=len(fold_messages),
+                keep_count=len(keep_messages),
+            )["content"]},
+            {"role": "user", "content": SUMMARIZE_INSTRUCTION},
+        ]
+
+        call_kwargs: dict[str, Any] = dict(self.call_config)
+        call_kwargs["model"] = self.model
+        call_kwargs["instructions"] = self._build_instructions()
+        # Match the main turn's output budget — when reasoning effort is on,
+        # the model's thinking budget can exceed a tight cap.
+        call_kwargs.setdefault("max_output_tokens", 65536)
+        if self.openai_tools:
+            call_kwargs["tools"] = self.openai_tools
+
+        for _ in range(self.max_tool_iterations):
+            call_kwargs["input"] = input_items
+            response = await self.llm.responses.create(**call_kwargs)
+
+            output = list(response.output or [])
+            tool_calls = [i for i in output if getattr(i, "type", None) == "function_call"]
+            if tool_calls:
+                tool_results = []
+                for tc in tool_calls:
+                    result, _media = await self._execute_tool_call(
+                        tc.call_id, tc.name, tc.arguments)
+                    tool_results.append(result)
+                # Feed this call's own output items back verbatim, same as a
+                # normal turn — that carries the reasoning across iterations.
+                input_items = input_items + output + tool_results
+                continue
+
+            text = "".join(
+                getattr(content, "text", "") or ""
+                for item in output if getattr(item, "type", None) == "message"
+                for content in (getattr(item, "content", None) or [])
+            ).strip()
+            if not text:
+                raise RuntimeError("summary call returned no text content")
+            return text
+
+        raise RuntimeError(f"summary call exceeded {self.max_tool_iterations} tool iterations")
+
     async def _process_events(
         self,
         session_id: str,
@@ -493,8 +690,12 @@ class SessionOrchestrator:
         if boot_event is not None:
             events = [boot_event] + list(events)
 
-        # Load session history
-        raw_history = self.session.load_truncated(session_id)
+        # Compaction runs before history load: if the last call's reported
+        # input_tokens exceeded the trigger, fold older context into a
+        # summary and write a new versioned file.
+        await self._compact_session_if_needed(session_id)
+
+        raw_history = self.session.load(session_id)
 
         # Build a developer+user pair for each event
         now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%A)")

@@ -89,7 +89,7 @@ async def test_event_flows_to_response_and_persists(tmp_path):
     assert result == "hello back"
 
     # Persisted to "main" by default.
-    mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
+    mgr = SessionManager(store_dir=sessions_dir)
     history = mgr.load("main")
     contents = [m.get("content") for m in history if m.get("role") == "assistant"]
     assert "hello back" in contents
@@ -118,6 +118,6 @@ async def test_explicit_session_id_routes(tmp_path):
     event = Event(session_id="cron-target", source="time", text="tick")
     await orch.handle_event(event)
 
-    mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
+    mgr = SessionManager(store_dir=sessions_dir)
     assert mgr.load("cron-target") != []
     assert mgr.load("main") == []

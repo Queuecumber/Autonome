@@ -36,7 +36,8 @@ def sample_config(tmp_path, tmp_workspace):
         },
         "session": {
             "store": str(tmp_path / "sessions"),
-            "max_history_tokens": 100000,
+            "compaction_trigger_tokens": 100000,
+            "recency_tokens": 80000,
         },
         "heartbeat": {
             "interval": "20m",
