@@ -16,7 +16,12 @@ import exifread.utils
 import jsonpath
 import jsonref
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+try:  # renamed in newer SDKs; the old spelling is gone in recent releases
+    from mcp.client.streamable_http import streamable_http_client
+except ImportError:  # pragma: no cover - older SDKs only have the old name
+    from mcp.client.streamable_http import (  # type: ignore[attr-defined]
+        streamablehttp_client as streamable_http_client,
+    )
 
 from session_manager.binaries import BinaryStore
 
@@ -306,7 +311,7 @@ class MCPConnection:
     async def _run(self) -> None:
         """Run the connection lifecycle in an isolated task."""
         try:
-            async with streamablehttp_client(self.url) as transport:
+            async with streamable_http_client(self.url) as transport:
                 read, write = transport[0], transport[1]
                 async with ClientSession(read, write) as session:
                     self.session = session
