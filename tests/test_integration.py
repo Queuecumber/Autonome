@@ -59,7 +59,6 @@ def test_to_input_items_can_remap_the_developer_role():
 def _orch(tmp_path, model: str = "test-model", **model_cfg):
     return SessionOrchestrator(
         config={"model": {"name": model, **model_cfg},
-                "session": {"max_history_tokens": 100000},
                 "binaries": {"store": str(tmp_path / "b"), "retention_days": 30}},
         session_dir=tmp_path,
     )
@@ -149,7 +148,7 @@ async def test_event_flows_to_response_and_persists(tmp_path):
         Event(source="matrix", text="hi", metadata={"room_id": "!r"}))
     assert result == "hello back"
 
-    history = SessionManager(store_dir=sessions_dir, max_history_tokens=100000).load("main")
+    history = SessionManager(store_dir=sessions_dir).load("main")
     assert "hello back" in [m.get("content") for m in history if m.get("role") == "assistant"]
 
 
@@ -178,7 +177,7 @@ async def test_usage_comment_uses_responses_token_fields(tmp_path):
     _mock_llm(orch, "hi")
 
     await orch.handle_event(Event(source="matrix", text="hi", metadata={}))
-    history = SessionManager(store_dir=sessions_dir, max_history_tokens=100000).load("main")
+    history = SessionManager(store_dir=sessions_dir).load("main")
     usage = [m for m in history if m.get("kind") == "usage"]
     assert usage and usage[0]["input_tokens"] == 100 and usage[0]["output_tokens"] == 50
 
@@ -193,7 +192,7 @@ async def test_explicit_session_id_routes(tmp_path):
 
     await orch.handle_event(Event(session_id="cron-target", source="time", text="tick"))
 
-    mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
+    mgr = SessionManager(store_dir=sessions_dir)
     assert mgr.load("cron-target") != []
     assert mgr.load("main") == []
 
