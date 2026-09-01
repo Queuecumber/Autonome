@@ -208,7 +208,11 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
-def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _to_chat_messages(
+    items: list[dict[str, Any]],
+    *,
+    replay_reasoning: bool = True,
+) -> list[dict[str, Any]]:
     """Translate persisted session items into Chat Completions messages.
 
     Event context and its accompanying text are stored as separate items but
@@ -228,11 +232,15 @@ def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     outright by strict templates, and worth nothing on permissive ones. The
     role is kept in the session file as an internal marker only.
 
-    Reasoning is dropped: it goes back on the assistant message as
-    `reasoning_content`, not as a standalone item.
+    Persisted reasoning rides back on the assistant message it preceded, as
+    `reasoning_content`. Models trained with preserved thinking history read
+    a transcript where no prior turn reasoned as a cue to stop reasoning
+    themselves — which then persists nothing, so the next turn is equally
+    bare. Kept configurable because it costs context on every turn.
     """
     messages: list[dict[str, Any]] = []
     pending_parts: list[dict[str, Any]] = []
+    pending_reasoning = ""
 
     def flush_user() -> None:
         nonlocal pending_parts
@@ -244,7 +252,11 @@ def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         item_type = item.get("type")
         role = item.get("role")
 
-        if item_type in ("comment", "reasoning"):
+        if item_type == "comment":
+            continue
+        if item_type == "reasoning":
+            if replay_reasoning:
+                pending_reasoning = item.get("content") or ""
             continue
 
         # Event context and user text both become text parts of the same
@@ -260,22 +272,27 @@ def _to_chat_messages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         flush_user()
 
         if item_type == "function_call":
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": item["call_id"],
-                    "type": "function",
-                    "function": {"name": item.get("name", ""),
-                                 "arguments": item.get("arguments") or ""},
-                }],
-            })
+            msg: dict[str, Any] = {"role": "assistant", "content": None}
+            if pending_reasoning:
+                msg["reasoning_content"] = pending_reasoning
+                pending_reasoning = ""
+            msg["tool_calls"] = [{
+                "id": item["call_id"],
+                "type": "function",
+                "function": {"name": item.get("name", ""),
+                             "arguments": item.get("arguments") or ""},
+            }]
+            messages.append(msg)
         elif item_type == "function_call_output":
             messages.append({"role": "tool",
                              "tool_call_id": item["call_id"],
                              "content": item.get("output") or ""})
         elif role == "assistant":
-            messages.append({"role": "assistant", "content": item.get("content") or ""})
+            msg = {"role": "assistant", "content": item.get("content") or ""}
+            if pending_reasoning:
+                msg["reasoning_content"] = pending_reasoning
+                pending_reasoning = ""
+            messages.append(msg)
 
     flush_user()
     return _merge_adjacent_tool_calls(messages)
@@ -410,6 +427,11 @@ class SessionOrchestrator:
         model_config = config.get("model", {})
         self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
+
+        # Feed persisted reasoning back on assistant messages. On by default:
+        # models trained with preserved thinking history stop reasoning when
+        # the transcript shows none. Costs context, so it can be turned off.
+        self.replay_reasoning = bool(model_config.get("replay_reasoning", True))
 
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
@@ -897,7 +919,8 @@ class SessionOrchestrator:
         # Persistence shape, written to the session file at end-of-turn.
         all_new_messages: list[dict[str, Any]] = list(new_items)
 
-        history_messages = _to_chat_messages(raw_history + new_items)
+        history_messages = _to_chat_messages(
+            raw_history + new_items, replay_reasoning=self.replay_reasoning)
         instructions_msg = {"role": "system", "content": self._build_instructions()}
         in_turn: list[dict[str, Any]] = []
 

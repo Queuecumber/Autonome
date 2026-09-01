@@ -62,12 +62,29 @@ def test_nothing_rides_as_developer_on_the_wire():
     assert all(m["role"] != "developer" for m in _to_chat_messages(_TURN))
 
 
-def test_comments_and_reasoning_are_not_sent():
-    """Comments are telemetry; reasoning goes back on the assistant message
-    as reasoning_content, not as a standalone item."""
-    dumped = json.dumps(_to_chat_messages(_TURN))
-    assert "usage" not in dumped
-    assert "I should check the clock" not in dumped
+def test_comments_are_never_sent():
+    """Comments are telemetry — usage counts and boundaries."""
+    assert "usage" not in json.dumps(_to_chat_messages(_TURN))
+
+
+def test_reasoning_rides_back_on_the_assistant_message():
+    """Models trained with preserved thinking history read a transcript
+    where no prior turn reasoned as a cue to stop reasoning themselves,
+    which then persists nothing and makes the next turn equally bare."""
+    call = next(m for m in _to_chat_messages(_TURN) if m.get("tool_calls"))
+    assert call["reasoning_content"] == "I should check the clock."
+    # never as a standalone item — it belongs to the assistant turn
+    assert all(m["role"] != "reasoning" for m in _to_chat_messages(_TURN))
+
+
+def test_reasoning_replay_can_be_disabled():
+    msgs = _to_chat_messages(_TURN, replay_reasoning=False)
+    assert "I should check the clock" not in json.dumps(msgs)
+
+
+def test_replay_reasoning_defaults_on(tmp_path):
+    assert _orch(tmp_path).replay_reasoning is True
+    assert _orch(tmp_path, replay_reasoning=False).replay_reasoning is False
 
 
 def test_tool_calls_and_results_round_trip():
