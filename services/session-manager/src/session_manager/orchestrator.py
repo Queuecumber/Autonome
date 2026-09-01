@@ -4,11 +4,13 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 from openai import AsyncOpenAI
 
 from session_manager.binaries import BinaryStore
@@ -183,6 +185,42 @@ cooperatively, but accomplish nothing if the AI hallucinates. If you say you did
 fails or a capability doesn't exist, say so plainly.
 
 """
+
+
+def _request_dump_client(dump_dir: str) -> httpx.AsyncClient:
+    """An httpx client that writes every outgoing request body to disk.
+
+    Hooked at the transport layer rather than logging call_kwargs, so what
+    lands on disk is exactly what the SDK serialized — no reconstruction.
+    Opt-in via LLM_REQUEST_DUMP; off costs nothing.
+    """
+    target = Path(dump_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    counter = {"n": 0}
+
+    async def on_request(request: httpx.Request) -> None:
+        counter["n"] += 1
+        seq = counter["n"]
+        try:
+            raw = request.content or b""
+            path = target / f"req-{seq:04d}.json"
+            path.write_bytes(raw)
+            body = json.loads(raw or b"{}")
+            msgs = body.get("messages") or []
+            roles = [m.get("role") for m in msgs]
+            with_reasoning = sum(1 for m in msgs if m.get("reasoning_content"))
+            multipart = sum(1 for m in msgs if isinstance(m.get("content"), list))
+            top_level = sorted(k for k in body if k != "messages")
+            logger.info(
+                "  REQ #%d -> %s bytes=%d msgs=%d roles=%s multipart=%d "
+                "with_reasoning_content=%d keys=%s",
+                seq, path, len(raw), len(msgs),
+                "/".join(f"{r}x{roles.count(r)}" for r in dict.fromkeys(roles)),
+                multipart, with_reasoning, top_level)
+        except Exception as e:  # pragma: no cover - never break a turn
+            logger.warning("request dump failed: %s", e)
+
+    return httpx.AsyncClient(event_hooks={"request": [on_request]}, timeout=300)
 
 
 def _prepare_for_history(item: dict) -> dict:
@@ -433,9 +471,13 @@ class SessionOrchestrator:
         # the transcript shows none. Costs context, so it can be turned off.
         self.replay_reasoning = bool(model_config.get("replay_reasoning", True))
 
+        # Opt-in: LLM_REQUEST_DUMP=/some/dir writes every outgoing request
+        # body verbatim, for confirming what is actually on the wire.
+        dump_dir = os.environ.get("LLM_REQUEST_DUMP")
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
             timeout=300,
+            http_client=_request_dump_client(dump_dir) if dump_dir else None,
         )
 
         session_config = config.get("session", {})
