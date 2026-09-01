@@ -44,6 +44,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "autonome.secretName" . }}
                   key: OPENAI_API_KEY
+            {{- range $key, $_ := .Values.mcp.secretEnv }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "autonome.secretName" $ }}
+                  key: {{ $key }}
+            {{- end }}
           volumeMounts:
             - { name: config,   mountPath: /app/agent.yaml,      subPath: agent.yaml,     readOnly: true }
             - { name: config,   mountPath: /app/PERSONALITY.md,  subPath: PERSONALITY.md, readOnly: true }
