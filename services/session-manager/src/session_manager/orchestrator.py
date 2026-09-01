@@ -189,250 +189,31 @@ def _prepare_for_history(item: dict) -> dict:
     return item
 
 
-REASONING_REPLAY_NOTE = """\
-# Your Prior Reasoning
-
-This backend can't carry your thinking from one turn to the next, so the platform
-replays it for you. Immediately before each of your earlier assistant messages you
-will see a developer message shaped:
-
-    {"event": "reasoning", "content": "..."}
-
-That content is *your own thinking* from that moment — not input from anyone else,
-and not something you need to reply to. Read it as the continuation of your own
-thought process and pick up where it left off. It is the only record you have of
-why you did what you did on earlier turns, so use it when deciding what to do now.
-
-Your current turn's thinking goes wherever it normally does; never write into this
-channel yourself.
-"""
-
-
-def _reasoning_dev_message(text: str, developer_role: str) -> dict[str, Any]:
-    """Carry reasoning text on the developer channel.
-
-    Backends whose gateway drops the native `reasoning_content` field can
-    still see their own prior thinking this way — ugly, but it's the only
-    shape that survives. Paired with REASONING_REPLAY_NOTE, which tells the
-    model what these messages are.
-    """
-    return {
-        "role": developer_role,
-        "content": json.dumps({"event": "reasoning", "content": text},
-                              ensure_ascii=False),
-    }
-
-
-def _is_anthropic_model(model: str) -> bool:
-    """Is this an Anthropic model reached through a translating gateway?
-
-    Two behaviors key off this. The Bedrock translation hoists every
-    system-role message into the top-level system array, so developer
-    events have to ride as user messages to keep their position in the
-    conversation (and to keep the front of the wire prefix stable).
-    Anthropic also replays thinking in-turn via signed `thinking_blocks`
-    rather than by echoing reasoning text back, so persisted reasoning —
-    which has no signature — stays dropped there.
-    """
-    m = model.lower()
-    return "anthropic" in m or "claude" in m
-
-
-def _to_chat_messages(
+def _to_input_items(
     items: list[dict[str, Any]],
     *,
-    developer_role: str = "user",
-    reasoning_replay: str = "none",
+    developer_role: str = "developer",
 ) -> list[dict[str, Any]]:
-    """Translate persisted session items (Responses-API shape) to Chat
-    Completions messages.
+    """Filter persisted session items down to Responses input.
 
-    Persisted items come in these flavors:
-      - role-based: {role: user/assistant/developer, content: str}
-      - function_call: {type, call_id, name, arguments}
-      - function_call_output: {type, call_id, output}
-      - reasoning: {type, content} — replayed as `reasoning_content` on the
-        assistant message it preceded unless `reasoning_replay` is "none"
-      - comment: {type: comment, ...} — dropped (telemetry)
+    The session format *is* the Responses format — function_call,
+    function_call_output and role messages all go back on the wire as they
+    were stored, which is why no translation layer is needed here.
 
-    Output is the chat-completions form Anthropic expects on the wire:
-      - assistant messages may carry `tool_calls`; adjacent function_call
-        items are merged into one assistant message so all tool_use blocks
-        appear together (matches Anthropic's requirement)
-      - function_call_output → {role: tool, tool_call_id, content}
-      - developer-role events → `developer_role` messages
-
-    `reasoning_replay` is for models trained with preserved thinking history
-    (Kimi K3), which expect the whole assistant message — reasoning and
-    tool_calls, not just content — handed back verbatim on every subsequent
-    turn. "native" puts it on `reasoning_content`; "developer" additionally
-    copies it onto the developer channel for gateways that strip that field
-    inbound; "none" drops it.
+    Two things are dropped:
+      - comment: telemetry (usage, boundaries), never sent
+      - reasoning: we persist it as flat text for the transcript, not in the
+        item shape the API returns, so it can't be replayed verbatim. Models
+        here emit fresh reasoning each turn, so nothing is lost by omitting it.
     """
-    messages: list[dict[str, Any]] = []
-    pending_calls: list[dict[str, Any]] = []
-    pending_text = ""
-    pending_reasoning = ""
-
-    def flush_assistant() -> None:
-        nonlocal pending_text, pending_calls, pending_reasoning
-        if not pending_calls and not pending_text:
-            # Reasoning arrives before the message it belongs to, so hold it
-            # rather than emitting a content-less assistant message.
-            return
-        msg: dict[str, Any] = {"role": "assistant"}
-        if pending_reasoning:
-            # Native field first (correct wherever it survives), then the
-            # developer-channel copy for gateways that strip it.
-            msg["reasoning_content"] = pending_reasoning
-            if reasoning_replay == "developer":
-                messages.append(
-                    _reasoning_dev_message(pending_reasoning, developer_role))
-        if pending_calls:
-            msg["tool_calls"] = pending_calls
-            msg["content"] = pending_text or None
-        else:
-            msg["content"] = pending_text
-        messages.append(msg)
-        pending_calls = []
-        pending_text = ""
-        pending_reasoning = ""
-
+    out: list[dict[str, Any]] = []
     for item in items:
-        item_type = item.get("type")
-        role = item.get("role")
-
-        if item_type == "function_call":
-            pending_calls.append({
-                "id": item["call_id"],
-                "type": "function",
-                "function": {
-                    "name": item.get("name", ""),
-                    "arguments": item.get("arguments") or "",
-                },
-            })
-        elif item_type == "function_call_output":
-            flush_assistant()
-            messages.append({
-                "role": "tool",
-                "tool_call_id": item["call_id"],
-                "content": item.get("output") or "",
-            })
-        elif item_type == "reasoning":
-            if reasoning_replay != "none":
-                pending_reasoning = item.get("content") or ""
-        elif item_type == "comment":
+        if item.get("type") in ("reasoning", "comment"):
             continue
-        elif role == "assistant":
-            flush_assistant()
-            pending_text = item.get("content") or ""
-        elif role == "developer":
-            # On the Anthropic paths this is "user", not "developer": the
-            # Bedrock translation hoists every system-role message into the
-            # top-level system array, so system-role events (a) lose their
-            # position in the conversation and (b) mutate the front of the
-            # wire prefix each turn, which invalidates every cache entry
-            # behind it (verified: an added tail event collapses the cache
-            # read to the system-section size; the identical structure with
-            # user-role events extends the cache and pays only for the new
-            # tokens). Backends that take `developer` natively get it.
-            flush_assistant()
-            pending_reasoning = ""
-            messages.append(
-                {"role": developer_role, "content": item.get("content") or ""})
-        elif role in ("user", "system"):
-            flush_assistant()
-            pending_reasoning = ""
-            messages.append({"role": role, "content": item.get("content") or ""})
-
-    flush_assistant()
-    return messages
-
-
-def _media_user_message(media_items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Build a chat-completions user message carrying tool-result media.
-
-    `media_items` are Responses-shape user messages from _execute_tool_call
-    ({"role": "user", "content": [{"type": "input_image", "image_url": "data:..."}]},
-    or the input_audio equivalent). Binaries can't ride inside a tool-role
-    message (string content only), so the convention is a follow-up user
-    message after the tool results.
-
-    Both carry a data URI rather than a format enum: the audio `format`
-    field only accepts wav/mp3, while the data-URI form takes the container
-    the file already is (ogg/opus voice notes included), so nothing has to
-    be transcoded. Returns None if there is no media.
-    """
-    parts: list[dict[str, Any]] = []
-    for msg in media_items:
-        for part in msg.get("content") or []:
-            if not isinstance(part, dict):
-                continue
-            if part.get("type") == "input_image":
-                parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": part["image_url"]},
-                })
-            elif part.get("type") == "input_audio":
-                parts.append({
-                    "type": "audio_url",
-                    "audio_url": {"url": part["audio_url"]},
-                })
-    if not parts:
-        return None
-    return {"role": "user", "content": parts}
-
-
-def _tool_def_for_chat(tool: dict[str, Any]) -> dict[str, Any]:
-    """Wrap a Responses-shape function tool into Chat Completions shape."""
-    return {
-        "type": "function",
-        "function": {
-            "name": tool["name"],
-            "description": tool.get("description") or "",
-            "parameters": tool.get("parameters") or {},
-        },
-    }
-
-
-_CACHE_DIRECTIVE: dict[str, Any] = {"type": "ephemeral", "ttl": "1h"}
-
-
-def _with_cache_breakpoint(msg: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of msg with cache_control attached to its last text block.
-
-    String content gets promoted to a single-block list with the directive.
-    List content gets the directive added to its last block. Messages that
-    don't carry cacheable text (e.g. an assistant message with only
-    tool_calls) are returned unchanged.
-    """
-    content = msg.get("content")
-    if isinstance(content, str) and content:
-        return {**msg, "content": [{"type": "text", "text": content, "cache_control": _CACHE_DIRECTIVE}]}
-    if isinstance(content, list) and content:
-        new_content = [dict(b) if isinstance(b, dict) else b for b in content]
-        if isinstance(new_content[-1], dict):
-            new_content[-1] = {**new_content[-1], "cache_control": _CACHE_DIRECTIVE}
-            return {**msg, "content": new_content}
-    return msg
-
-
-def _cache_last_msg(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach a cache breakpoint to the last cacheable message in the list.
-
-    Walks back from the tail to find a message with text content; assistant
-    messages that only carry tool_calls (no text) get skipped. Returns a new
-    list; the original is untouched.
-    """
-    out = list(messages)
-    for i in range(len(out) - 1, -1, -1):
-        content = out[i].get("content")
-        has_text = (isinstance(content, str) and content) or (
-            isinstance(content, list) and content
-        )
-        if has_text:
-            out[i] = _with_cache_breakpoint(out[i])
-            break
+        if item.get("role") == "developer" and developer_role != "developer":
+            out.append({**item, "role": developer_role})
+        else:
+            out.append(item)
     return out
 
 
@@ -488,43 +269,16 @@ class SessionOrchestrator:
         self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
 
-        anthropic = _is_anthropic_model(self.model)
-
-        # Which role carries developer events. Chat completions coerces
-        # `developer` to `system` — the role is a Responses-API concept, and
-        # the two are indistinguishable on the wire here (same token counts,
-        # same acceptance, same errors). So asking for `developer` really
-        # asks for a system message mid-conversation: the exact thing the
-        # user-role rendering exists to avoid. Strict templates reject it
-        # outright ("System message must be at the beginning"), and every
-        # turn past the first puts an event mid-conversation, so those
-        # backends fail on every turn. Permissive templates accept it but
-        # give nothing back for it. Hence "user" by default; `developer`
-        # only earns its keep on the Responses API.
-        self.developer_role = model_config.get("developer_role") or "user"
+        # Which role carries developer events. `developer` is native here —
+        # it is a Responses-API concept, and the API keeps it distinct and in
+        # position rather than folding it into system the way chat
+        # completions does. Configurable because a backend that rejects it
+        # shouldn't need a code change.
+        self.developer_role = model_config.get("developer_role") or "developer"
         if self.developer_role not in ("user", "developer"):
             raise ValueError(
                 "model.developer_role must be 'user' or 'developer', "
                 f"got {self.developer_role!r}")
-
-        # How prior reasoning gets back to the model:
-        #   none      — dropped. Anthropic replays thinking in-turn via
-        #               signed thinking_blocks, and persisted reasoning has
-        #               no signature.
-        #   native    — `reasoning_content` on the assistant message, which
-        #               is what preserved-thinking models expect.
-        #   developer — native plus a copy on the developer channel, for
-        #               gateways that strip `reasoning_content` off inbound
-        #               messages. Costs context every turn and the model has
-        #               to be told what the messages are, so it's opt-in.
-        # Whether a gateway strips the field isn't derivable from the model
-        # name, so this is explicit rather than sniffed.
-        default = "none" if anthropic else "native"
-        self.reasoning_replay = model_config.get("reasoning_replay") or default
-        if self.reasoning_replay not in ("none", "native", "developer"):
-            raise ValueError(
-                "model.reasoning_replay must be one of none/native/developer, "
-                f"got {self.reasoning_replay!r}")
 
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
@@ -551,7 +305,6 @@ class SessionOrchestrator:
         self._sessions: dict[str, _SessionState] = {}
         # Per-session (instructions_hash, per-message hashes) from the
         # previous turn — cross-turn byte-stability diagnostic.
-        self._prefix_hashes: dict[str, tuple[str, list[str]]] = {}
 
         self.mcp_connections: dict[str, MCPConnection] = {}
         self.openai_tools: list[dict] = []
@@ -645,9 +398,6 @@ class SessionOrchestrator:
         """Build instructions from base prompt + MCP server instructions."""
         parts = [SYSTEM_PROMPT]
 
-        if self.reasoning_replay == "developer":
-            parts.append(REASONING_REPLAY_NOTE)
-
         server_docs = []
         for conn in self.mcp_connections.values():
             if conn.instructions:
@@ -710,99 +460,41 @@ class SessionOrchestrator:
         return output, media_items
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
-        """Stream a chat completion and aggregate deltas into a single
-        completed response.
+        """Stream a Responses call, collecting completed output items.
 
-        Returns (response, partial):
-          - On normal completion: (dict with content/tool_calls/usage/finish_reason, None)
-          - On interruption: (None, dict with whatever content/tool_calls
-            were collected before cancel)
+        Responses streams whole items rather than deltas we have to
+        reassemble: each `response.output_item.done` carries a finished
+        message / reasoning / function_call, and `response.completed` carries
+        the final Response with usage.
+
+        Returns (response, completed_items):
+          - normal completion: (Response, [output items])
+          - interruption or failure: (None, [items finished before we stopped])
         """
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        thinking_blocks: list[dict[str, Any]] = []  # by position, accumulated across chunks
-        tool_calls_by_idx: dict[int, dict[str, Any]] = {}
-        finish_reason: str | None = None
-        usage: Any = None
+        completed_items: list[Any] = []
+        response = None
 
-        async for chunk in await self.llm.chat.completions.create(**call_kwargs, stream=True):
+        async for event in await self.llm.responses.create(**call_kwargs, stream=True):
             if cancel.is_set():
                 logger.info("Stream interrupted by new message")
-                return None, {
-                    "content": "".join(content_parts),
-                    "reasoning": "".join(reasoning_parts),
-                    "thinking_blocks": [b for b in thinking_blocks if b.get("thinking") or b.get("signature")],
-                    "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
-                }
+                return None, completed_items
 
-            # Usage typically rides on the final chunk (some providers send
-            # it as a stand-alone chunk with empty choices).
-            if getattr(chunk, "usage", None) is not None:
-                usage = chunk.usage
+            event_type = getattr(event, "type", None)
+            if event_type == "response.output_item.done":
+                completed_items.append(event.item)
+            elif event_type == "response.completed":
+                response = event.response
+            elif event_type == "response.failed":
+                resp = getattr(event, "response", None)
+                logger.error(
+                    "LLM stream failed: status=%s model=%s error=%s",
+                    getattr(resp, "status", "unknown"),
+                    getattr(resp, "model", "unknown"),
+                    getattr(resp, "error", None),
+                )
+                return None, completed_items
 
-            if not chunk.choices:
-                continue
-
-            choice = chunk.choices[0]
-            delta = choice.delta
-
-            content = getattr(delta, "content", None)
-            if isinstance(content, str) and content:
-                content_parts.append(content)
-
-            # Extended-thinking text — non-standard chat completions field
-            # surfaced by some providers (mapped from Anthropic thinking blocks).
-            reasoning = getattr(delta, "reasoning_content", None)
-            if isinstance(reasoning, str) and reasoning:
-                reasoning_parts.append(reasoning)
-
-            # Structured thinking blocks with signatures — needed for in-turn
-            # replay so the model can resume its reasoning chain across tool
-            # calls. Accumulate by position; each delta may carry partial
-            # thinking text and a final signature.
-            tbs_delta = getattr(delta, "thinking_blocks", None)
-            if isinstance(tbs_delta, list):
-                for i, tb in enumerate(tbs_delta):
-                    while len(thinking_blocks) <= i:
-                        thinking_blocks.append({"type": "thinking", "thinking": ""})
-                    block = thinking_blocks[i]
-                    tb_type = tb.get("type") if isinstance(tb, dict) else getattr(tb, "type", None)
-                    if isinstance(tb_type, str):
-                        block["type"] = tb_type
-                    tb_thinking = tb.get("thinking") if isinstance(tb, dict) else getattr(tb, "thinking", None)
-                    if isinstance(tb_thinking, str) and tb_thinking:
-                        block["thinking"] += tb_thinking
-                    tb_signature = tb.get("signature") if isinstance(tb, dict) else getattr(tb, "signature", None)
-                    if isinstance(tb_signature, str) and tb_signature:
-                        block["signature"] = tb_signature
-
-            for tc_delta in getattr(delta, "tool_calls", None) or []:
-                idx = getattr(tc_delta, "index", 0) or 0
-                tc = tool_calls_by_idx.setdefault(idx, {
-                    "id": "",
-                    "type": "function",
-                    "function": {"name": "", "arguments": ""},
-                })
-                if getattr(tc_delta, "id", None):
-                    tc["id"] = tc_delta.id
-                func_delta = getattr(tc_delta, "function", None)
-                if func_delta is not None:
-                    if getattr(func_delta, "name", None):
-                        tc["function"]["name"] += func_delta.name
-                    if getattr(func_delta, "arguments", None):
-                        tc["function"]["arguments"] += func_delta.arguments
-
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-        return {
-            "content": "".join(content_parts),
-            "reasoning": "".join(reasoning_parts),
-            "thinking_blocks": [b for b in thinking_blocks if b.get("thinking") or b.get("signature")],
-            "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
-            "finish_reason": finish_reason,
-            "usage": usage,
-        }, None
+        return response, completed_items
 
     async def handle_event(self, event: Event) -> str | None:
         """Process an inbound event from any adapter.
@@ -855,14 +547,12 @@ class SessionOrchestrator:
     ) -> str | None:
         """Process one or more events as a single turn with cancellation support."""
         # First time this session is seen since process start? Prepend a
-        # synthetic boot event so the agent learns when the system came
-        # up and what model is running. Rides alongside the real events
-        # in the same turn.
+        # synthetic boot event so the agent learns when the system came up
+        # and what model is running. Rides alongside the real events.
         boot_event = self._maybe_boot_event(session_id)
         if boot_event is not None:
             events = [boot_event] + list(events)
 
-        # Load session history
         raw_history = self.session.load_truncated(session_id)
 
         # Build a developer+user pair for each event
@@ -870,173 +560,47 @@ class SessionOrchestrator:
         new_items: list[dict[str, Any]] = []
         for event in events:
             text = event.text or "(attachment)"
-            context_msg = _developer_event(
+            new_items.append(_developer_event(
                 event.event_type,
                 source=event.source,
                 time=now,
                 energy=event.energy,
                 **event.metadata,
-            )
-            user_msg = {"role": "user", "content": text}
-            new_items.append(context_msg)
-            new_items.append(user_msg)
+            ))
+            new_items.append({"role": "user", "content": text})
 
-        # Two parallel records of this turn's content:
-        #   - all_new_messages: persistence shape (function_call,
-        #     function_call_output, role messages, reasoning, comments).
-        #     Saved to the session file at end-of-turn. Leads with a
-        #     turn_start comment so the next turn can locate this turn's
-        #     boundary for the rolling cache markers.
-        #   - in_turn_chat: chat-completions shape (assistant w/ tool_calls,
-        #     tool messages). Held in memory only so we can attach
-        #     thinking_blocks for in-turn reasoning continuity without
-        #     polluting persisted history (Anthropic doesn't replay thinking
-        #     across user turns anyway).
-        all_new_messages: list[dict[str, Any]] = [
-            {"type": "comment", "kind": "turn_start"}, *new_items]
-        developer_role = self.developer_role
-        reasoning_replay = self.reasoning_replay
+        # Persistence shape, written to the session file at end-of-turn.
+        all_new_messages: list[dict[str, Any]] = list(new_items)
 
-        in_turn_chat: list[dict[str, Any]] = []
-        for item in new_items:
-            role = item.get("role")
-            content = item.get("content") or ""
-            in_turn_chat.append({
-                # Same developer-role rule as _to_chat_messages, so the
-                # in-turn shape matches what the next turn rebuilds.
-                "role": developer_role if role == "developer" else role,
-                "content": content,
-            })
+        input_items = _to_input_items(
+            raw_history + new_items, developer_role=self.developer_role)
 
-        # Rolling cache markers. The cache lookup only scans a bounded
-        # number of content-block boundaries behind each breakpoint, and a
-        # turn appends more blocks than that — so a single tail marker
-        # never finds the previous turn's entry and re-creates the whole
-        # prefix every turn. Instead, keep the marker at the PREVIOUS
-        # turn's boundary (byte-identical to where the last turn's tail
-        # marker sat -> cache read hits) and add one at the new tail
-        # (writes this turn's delta; becomes next turn's read point).
-        # The boundary is the last turn_start comment in the raw history.
-        # Sessions without one (pre-rolling-markers) fall back to a single
-        # tail marker: one full re-create, then self-heals.
-        boundary = next(
-            (i for i in range(len(raw_history) - 1, -1, -1)
-             if raw_history[i].get("type") == "comment"
-             and raw_history[i].get("kind") == "turn_start"),
-            None,
-        )
+        # User config (reasoning effort, extra_body, ...) is the base;
+        # orchestrator-owned fields overwrite it. max_output_tokens uses
+        # setdefault so the user can override the fallback.
+        call_kwargs: dict[str, Any] = dict(self.call_config)
+        call_kwargs["model"] = self.model
+        call_kwargs["instructions"] = self._build_instructions()
+        call_kwargs["input"] = input_items
+        call_kwargs.setdefault("max_output_tokens", 65536)
+        if self.openai_tools:
+            call_kwargs["tools"] = self.openai_tools
 
-        # Reasoning items survive the filter only when we're going to replay
-        # them; comments are telemetry and never go on the wire.
-        dropped = (("reasoning", "comment") if reasoning_replay == "none"
-                   else ("comment",))
-
-        def _filt(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return [m for m in items if m.get("type") not in dropped]
-
-        def _to_chat(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return _to_chat_messages(
-                items,
-                developer_role=developer_role,
-                reasoning_replay=reasoning_replay,
-            )
-
-        if boundary is None:
-            history = _filt(raw_history)
-            history_chat_raw = _to_chat(history)
-            history_chat = _cache_last_msg(history_chat_raw)
-        else:
-            # Rendering the two segments separately is safe: a turn's block
-            # always starts with a developer event, so no assistant/tool_call
-            # merge in _to_chat_messages can span the boundary.
-            prev_items = _filt(raw_history[:boundary])
-            recent_items = _filt(raw_history[boundary:])
-            history = prev_items + recent_items
-            prev_chat = _to_chat(prev_items)
-            recent_chat = _to_chat(recent_items)
-            history_chat_raw = prev_chat + recent_chat
-            history_chat = _cache_last_msg(prev_chat) + _cache_last_msg(recent_chat)
-        instructions_msg = _with_cache_breakpoint({
-            "role": "system",
-            "content": self._build_instructions(),
-        })
-        marked = [i for i, m in enumerate(history_chat)
-                  if isinstance(m.get("content"), list)
-                  and any(isinstance(b, dict) and "cache_control" in b
-                          for b in m["content"])]
-        logger.info("cache markers: boundary_raw_idx=%s history_marks=%s of %d chat msgs",
-                    boundary, marked, len(history_chat))
-
-        # Diagnostic: per-message hashes compared against the previous turn
-        # (in-memory). If any position in the shared prefix differs, log
-        # exactly where and what — that's byte drift, our bug. If every
-        # shared position matches and the cache still misses, the problem
-        # is on the gateway side.
-        import hashlib
-
-        def _h(obj: Any) -> str:
-            return hashlib.sha256(
-                json.dumps(obj, sort_keys=False, ensure_ascii=False).encode()
-            ).hexdigest()[:12]
-
-        per_msg = [_h(m) for m in history_chat_raw]
-        instructions_hash = _h(instructions_msg)
-        prev = self._prefix_hashes.get(session_id)
-        if prev is not None:
-            prev_instructions, prev_msgs = prev
-            if prev_instructions != instructions_hash:
-                logger.warning("prefix drift: instructions hash changed %s -> %s",
-                               prev_instructions, instructions_hash)
-            common = min(len(prev_msgs), len(per_msg))
-            diffs = [i for i in range(common) if prev_msgs[i] != per_msg[i]]
-            if diffs:
-                logger.warning(
-                    "prefix drift: %d/%d shared positions differ vs last turn, "
-                    "first at %d: %.400r",
-                    len(diffs), common, diffs[0], history_chat_raw[diffs[0]])
-            else:
-                logger.info("prefix stable vs last turn: %d shared msgs identical "
-                            "(prev %d, now %d)", common, len(prev_msgs), len(per_msg))
-        self._prefix_hashes[session_id] = (instructions_hash, per_msg)
-
-        # Base config + tools.
-        base_kwargs: dict[str, Any] = dict(self.call_config)
-        base_kwargs["model"] = self.model
-        base_kwargs.setdefault("max_tokens", 65536)
-        # Chat completions doesn't include usage on stream by default; opt in.
-        base_kwargs.setdefault("stream_options", {"include_usage": True})
-        chat_tools = [_tool_def_for_chat(t) for t in self.openai_tools]
-
-        logger.info("Calling LLM: %d history items, %d new items, %d tools, %d event(s)",
-                    len(history), len(new_items), len(chat_tools), len(events))
+        logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
+                    len(input_items), len(self.openai_tools), len(events))
 
         for iteration in range(self.max_tool_iterations):
-            messages = [instructions_msg] + history_chat + in_turn_chat
-            call_kwargs = dict(base_kwargs)
-            call_kwargs["messages"] = messages
-            if chat_tools:
-                call_kwargs["tools"] = chat_tools
-
-            logger.debug("iter %d: %d messages", iteration, len(messages))
+            logger.debug("iter %d: %d input items", iteration, len(call_kwargs["input"]))
 
             try:
-                response, partial = await self._stream_response(call_kwargs, cancel)
+                response, completed_items = await self._stream_response(call_kwargs, cancel)
             except Exception as e:
                 logger.error("LLM call failed: %s: %r", type(e).__name__, e, exc_info=True)
                 return None
 
-            # --- Interrupted during streaming ---
+            # --- Interrupted or failed mid-stream ---
             if response is None:
-                parts: list[dict] = []
-                if partial:
-                    if partial.get("content"):
-                        parts.append({"text": partial["content"]})
-                    for tc in partial.get("tool_calls") or []:
-                        try:
-                            args = json.loads(tc["function"]["arguments"])
-                        except (json.JSONDecodeError, KeyError, ValueError):
-                            args = tc.get("function", {}).get("arguments", "")
-                        parts.append({"tool": tc["function"]["name"], "arguments": args})
+                parts = _describe_interrupted(completed_items)
                 if parts:
                     all_new_messages.append(_developer_event("interrupted", partial=parts))
                     logger.info("Interrupted, partial: %s", parts)
@@ -1045,149 +609,106 @@ class SessionOrchestrator:
                 self.session.append(session_id, all_new_messages)
                 return None
 
-            # Record token usage as a transcript comment — stripped from replay
-            # but preserved in the session log for cost/observability tracking.
-            usage = response.get("usage")
+            # Token usage as a transcript comment — stripped from replay but
+            # kept in the session log for cost/observability.
+            usage = getattr(response, "usage", None)
             if usage is not None:
                 def _int_or_none(v: Any) -> int | None:
                     return v if isinstance(v, int) else None
-                input_details = getattr(usage, "prompt_tokens_details", None)
-                cached = (
-                    _int_or_none(getattr(input_details, "cached_tokens", None))
-                    if input_details else None
-                )
-                output_details = getattr(usage, "completion_tokens_details", None)
+                in_details = getattr(usage, "input_tokens_details", None)
+                out_details = getattr(usage, "output_tokens_details", None)
+                cached = (_int_or_none(getattr(in_details, "cached_tokens", None))
+                          if in_details else None)
                 reasoning_tokens = (
-                    _int_or_none(getattr(output_details, "reasoning_tokens", None)) or 0
-                    if output_details else 0
+                    _int_or_none(getattr(out_details, "reasoning_tokens", None)) or 0
+                    if out_details else 0
                 )
-                cache_read = _int_or_none(getattr(usage, "cache_read_input_tokens", None))
-                cache_creation = _int_or_none(getattr(usage, "cache_creation_input_tokens", None))
                 comment = {
                     "type": "comment",
                     "kind": "usage",
                     "iteration": iteration,
-                    "input_tokens": _int_or_none(getattr(usage, "prompt_tokens", None)),
-                    "output_tokens": _int_or_none(getattr(usage, "completion_tokens", None)),
+                    "input_tokens": _int_or_none(getattr(usage, "input_tokens", None)),
+                    "output_tokens": _int_or_none(getattr(usage, "output_tokens", None)),
                     "reasoning_tokens": reasoning_tokens,
                     "total_tokens": _int_or_none(getattr(usage, "total_tokens", None)),
                     "cached_tokens": cached,
-                    "cache_read_input_tokens": cache_read,
-                    "cache_creation_input_tokens": cache_creation,
                 }
                 all_new_messages.append(comment)
-                logger.info(
-                    "  usage: in=%s out=%s reasoning=%d total=%s cached=%s cache_read=%s cache_create=%s",
-                    comment["input_tokens"], comment["output_tokens"], reasoning_tokens,
-                    comment["total_tokens"], cached, cache_read, cache_creation,
-                )
+                logger.info("  usage: in=%s out=%s reasoning=%d total=%s cached=%s",
+                            comment["input_tokens"], comment["output_tokens"],
+                            reasoning_tokens, comment["total_tokens"], cached)
 
-            assistant_text = response["content"]
-            tool_calls = response["tool_calls"]
-            reasoning_text = response.get("reasoning") or ""
-            thinking_blocks = response.get("thinking_blocks") or []
+            # Split this turn's output items by kind.
+            assistant_text = ""
+            reasoning_text = ""
+            tool_calls: list[Any] = []
+            for item in (response.output or []):
+                item_type = getattr(item, "type", None)
+                if item_type == "message":
+                    for content in getattr(item, "content", None) or []:
+                        assistant_text += getattr(content, "text", "") or ""
+                elif item_type == "reasoning":
+                    # Some backends put the text under `content`, others under
+                    # `summary`; take whichever is populated.
+                    for content in getattr(item, "content", None) or []:
+                        reasoning_text += getattr(content, "text", "") or ""
+                    for summary in getattr(item, "summary", None) or []:
+                        reasoning_text += getattr(summary, "text", "") or ""
+                elif item_type == "function_call":
+                    tool_calls.append(item)
 
             if reasoning_text:
                 all_new_messages.append({"type": "reasoning", "content": reasoning_text})
 
             if tool_calls:
-                # Normalize tool_call arguments once so the in-turn replay and
-                # the persisted form are byte-identical — if they diverge, the
-                # cache prefix in turn N (raw args) won't match turn N+1's
-                # rebuilt prefix (normalized args).
-                normalized_calls: list[dict[str, Any]] = []
+                if assistant_text:
+                    all_new_messages.append({"role": "assistant", "content": assistant_text})
                 for tc in tool_calls:
+                    # Re-encode arguments for proper unicode instead of \uXXXX
                     try:
-                        args_unicode = json.dumps(json.loads(tc["function"]["arguments"]), ensure_ascii=False)
-                    except (json.JSONDecodeError, ValueError):
-                        args_unicode = tc["function"].get("arguments") or "{}"
-                    normalized_calls.append({
-                        "id": tc["id"],
-                        "name": tc["function"]["name"],
+                        args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        args_unicode = tc.arguments or "{}"
+                    all_new_messages.append({
+                        "type": "function_call",
+                        "call_id": tc.call_id,
+                        "name": tc.name,
                         "arguments": args_unicode,
                     })
 
-                # Build the assistant message we'll send back on the next
-                # iteration. Reasoning rides along in both normalized forms
-                # so the model can resume its chain across tool calls —
-                # `thinking_blocks` is what the Anthropic paths consume
-                # (signature round-trip), `reasoning_content` is the
-                # cross-provider field others require on tool-call assistant
-                # messages (Kimi-style models reject or degrade without it).
-                # Each attaches only when non-empty, so providers that emit
-                # neither (GPT) see a plain assistant message. All of it is
-                # post-marker and in-memory only — dropped at end-of-turn.
-                assistant_chat: dict[str, Any] = {"role": "assistant"}
-                if reasoning_text:
-                    assistant_chat["reasoning_content"] = reasoning_text
-                    # Gateways that strip the native field would otherwise
-                    # break the chain between tool iterations too, not just
-                    # across turns.
-                    if reasoning_replay == "developer":
-                        in_turn_chat.append(
-                            _reasoning_dev_message(reasoning_text, developer_role))
-                if thinking_blocks:
-                    assistant_chat["thinking_blocks"] = thinking_blocks
-                assistant_chat["content"] = assistant_text or None
-                assistant_chat["tool_calls"] = [
-                    {
-                        "id": nc["id"],
-                        "type": "function",
-                        "function": {"name": nc["name"], "arguments": nc["arguments"]},
-                    }
-                    for nc in normalized_calls
-                ]
-                in_turn_chat.append(assistant_chat)
-
-                # Persist in our session shape (no thinking_blocks).
-                if assistant_text:
-                    all_new_messages.append({"role": "assistant", "content": assistant_text})
-                for nc in normalized_calls:
-                    all_new_messages.append({
-                        "type": "function_call",
-                        "call_id": nc["id"],
-                        "name": nc["name"],
-                        "arguments": nc["arguments"],
-                    })
-
                 # Execute tool calls, checking for interruption between each
+                tool_results: list[dict[str, Any]] = []
                 turn_media: list[dict[str, Any]] = []
                 for tc in tool_calls:
                     if cancel.is_set():
                         pending = []
                         for t in tool_calls[tool_calls.index(tc):]:
                             try:
-                                args = json.loads(t["function"]["arguments"])
-                            except (json.JSONDecodeError, KeyError, ValueError):
-                                args = t["function"].get("arguments", "")
-                            pending.append({"tool": t["function"]["name"], "arguments": args})
+                                args = json.loads(t.arguments)
+                            except (json.JSONDecodeError, ValueError, TypeError):
+                                args = t.arguments
+                            pending.append({"tool": t.name, "arguments": args})
                         logger.info("Interrupted between tool calls, pending: %s", pending)
                         all_new_messages.append(_developer_event("interrupted", pending=pending))
                         self.session.append(session_id, all_new_messages)
                         return None
 
-                    logger.info("  Tool call: %s(%s)", tc["function"]["name"], tc["function"]["arguments"][:100])
+                    logger.info("  Tool call: %s(%s)", tc.name, (tc.arguments or "")[:100])
                     result, media = await self._execute_tool_call(
-                        tc["id"], tc["function"]["name"], tc["function"]["arguments"]
-                    )
+                        tc.call_id, tc.name, tc.arguments)
                     logger.debug("  Result: %s", result["output"][:200])
+                    tool_results.append(result)
                     all_new_messages.append(_prepare_for_history(result))
-                    in_turn_chat.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result.get("output") or "",
-                    })
                     turn_media.extend(media)
 
-                # Binaries can't ride inside a tool-role message (string
-                # content only), so after all tool results are in, surface them
-                # as one follow-up user message. Not persisted — the pointer
-                # JSON in the tool output text is the durable reference; the
-                # bytes are re-fetchable via URI on a later turn.
-                media_msg = _media_user_message(turn_media)
-                if media_msg is not None:
-                    in_turn_chat.append(media_msg)
-
+                # Feed this turn's own output items back verbatim: that is how
+                # reasoning carries across tool iterations here, no separate
+                # replay needed. Media follows the tool results and isn't
+                # persisted — the pointer JSON in the tool output is the
+                # durable reference, and the bytes are re-fetchable by URI.
+                call_kwargs["input"] = (
+                    input_items + list(response.output) + tool_results + turn_media)
+                input_items = call_kwargs["input"]
                 continue
 
             # No tool calls — final response
@@ -1195,7 +716,6 @@ class SessionOrchestrator:
                 all_new_messages.append({"role": "assistant", "content": assistant_text})
 
             self.session.append(session_id, all_new_messages)
-
             logger.info("Final response: %s", assistant_text[:200])
             return assistant_text
 

@@ -1,8 +1,7 @@
 """Smoke test for the orchestrator's event-handling pipeline.
 
-Mocks the LLM (chat completions streaming) and verifies that an inbound
-event flows through to a final response and gets persisted to the
-session.
+Mocks the LLM (Responses streaming) and verifies that an inbound event
+flows through to a final response and gets persisted to the session.
 """
 
 import json
@@ -11,16 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from session_manager.event import Event
-from session_manager.orchestrator import (
-    SessionOrchestrator,
-    _media_user_message,
-    _is_anthropic_model,
-    _to_chat_messages,
-)
+from session_manager.orchestrator import SessionOrchestrator, _to_input_items
 from session_manager.session import SessionManager
 
-# One turn: an event, a reasoning block before a tool call, the tool result,
-# then a second reasoning block before the final text.
+# One turn as persisted: an event pair, reasoning before a tool call, the
+# tool result, then reasoning before the final text.
 _TURN = [
     {"role": "developer", "content": '{"event": "message"}'},
     {"role": "user", "content": "what time is it?"},
@@ -33,210 +27,113 @@ _TURN = [
 ]
 
 
-def test_to_chat_messages_drops_reasoning_by_default():
-    """Anthropic can't replay unsigned reasoning, so it stays dropped."""
-    msgs = _to_chat_messages(_TURN)
-    assert not any("reasoning_content" in m for m in msgs)
-    assert [m["role"] for m in msgs] == ["user", "user", "assistant", "tool", "assistant"]
+# ── Input construction ───────────────────────────────────
 
 
-def test_to_chat_messages_preserves_reasoning():
-    """Each reasoning item rides back on the assistant message it preceded —
-    the tool-call one and the final-text one alike."""
-    msgs = _to_chat_messages(_TURN, reasoning_replay="native")
-    tool_call_msg = next(m for m in msgs if m.get("tool_calls"))
-    assert tool_call_msg["reasoning_content"] == "I should check the clock."
-    assert msgs[-1] == {
-        "role": "assistant",
-        "reasoning_content": "Now answer.",
-        "content": "It's 13:00.",
-    }
+def test_to_input_items_passes_session_items_through():
+    """The session format is the Responses format: function_call and
+    function_call_output go back on the wire exactly as stored."""
+    items = _to_input_items(_TURN)
+    assert items == [
+        {"role": "developer", "content": '{"event": "message"}'},
+        {"role": "user", "content": "what time is it?"},
+        {"type": "function_call", "call_id": "c1", "name": "get_time", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "13:00"},
+        {"role": "assistant", "content": "It's 13:00."},
+    ]
 
 
-def test_to_chat_messages_replays_reasoning_on_developer_channel():
-    """Gateways that strip `reasoning_content` still get the thinking: it's
-    duplicated onto a developer message placed immediately before the
-    assistant message it belongs to."""
-    msgs = _to_chat_messages(_TURN, developer_role="developer",
-                             reasoning_replay="developer")
-    tool_idx = next(i for i, m in enumerate(msgs) if m.get("tool_calls"))
-    carrier = msgs[tool_idx - 1]
-    assert carrier["role"] == "developer"
-    assert json.loads(carrier["content"]) == {
-        "event": "reasoning", "content": "I should check the clock."}
-    # and the native field is still set, for backends that don't strip it
-    assert msgs[tool_idx]["reasoning_content"] == "I should check the clock."
+def test_to_input_items_drops_comments_and_reasoning():
+    """Comments are telemetry. Reasoning is persisted as flat text, not in
+    the item shape the API returns, so it can't be replayed verbatim."""
+    kept = _to_input_items(_TURN)
+    assert not any(i.get("type") in ("comment", "reasoning") for i in kept)
 
 
-def test_native_replay_leaves_the_developer_channel_alone():
-    """"native" is the default for non-Anthropic: the field is set, but no
-    extra developer messages are spent on it."""
-    msgs = _to_chat_messages(_TURN, developer_role="developer",
-                             reasoning_replay="native")
-    assert all("reasoning" not in (m.get("content") or "")
-               for m in msgs if m["role"] == "developer")
-    assert any("reasoning_content" in m for m in msgs)
+def test_to_input_items_can_remap_the_developer_role():
+    """Escape hatch for a backend that rejects developer items."""
+    assert _to_input_items(_TURN, developer_role="user")[0] == {
+        "role": "user", "content": '{"event": "message"}'}
 
 
-def _orch(tmp_path, model: str, **model_cfg):
+def _orch(tmp_path, model: str = "test-model", **model_cfg):
     return SessionOrchestrator(
         config={"model": {"name": model, **model_cfg},
-                "session": {"max_history_tokens": 100},
+                "session": {"max_history_tokens": 100000},
                 "binaries": {"store": str(tmp_path / "b"), "retention_days": 30}},
         session_dir=tmp_path,
     )
 
 
-def test_developer_role_defaults_to_user_everywhere(tmp_path):
-    """Templates that fold developer into system reject it anywhere but
-    position 0, and every turn past the first puts an event mid-conversation
-    — so the safe role is the default and `developer` is opt-in."""
-    assert _orch(tmp_path, "aws/anthropic/bedrock-claude-opus-4-6").developer_role == "user"
-    assert _orch(tmp_path, "moonshotai/kimi-k3").developer_role == "user"
-    assert _orch(tmp_path, "qwen/qwen3.8-27b").developer_role == "user"
-
-
-def test_developer_role_can_be_opted_in(tmp_path):
-    orch = _orch(tmp_path, "moonshotai/kimi-k3", developer_role="developer")
-    assert orch.developer_role == "developer"
-    assert _to_chat_messages(_TURN, developer_role=orch.developer_role)[0]["role"] == "developer"
+def test_developer_role_defaults_to_developer(tmp_path):
+    """Responses keeps developer distinct and in position, so it's the
+    default here — unlike chat completions, which folds it into system."""
+    assert _orch(tmp_path).developer_role == "developer"
+    assert _orch(tmp_path, developer_role="user").developer_role == "user"
 
 
 def test_developer_role_rejects_unknown_value(tmp_path):
     with pytest.raises(ValueError, match="developer_role"):
-        _orch(tmp_path, "moonshotai/kimi-k3", developer_role="system")
+        _orch(tmp_path, developer_role="system")
 
 
-def test_reasoning_replay_defaults_by_model_family(tmp_path):
-    """Anthropic drops it (no signature to replay); everyone else gets the
-    native field. The developer-channel workaround is never automatic."""
-    assert _orch(tmp_path, "aws/anthropic/bedrock-claude-opus-4-6").reasoning_replay == "none"
-    assert _orch(tmp_path, "moonshotai/kimi-k3").reasoning_replay == "native"
+# ── Responses stream mocks ───────────────────────────────
 
 
-def test_reasoning_replay_note_ships_only_when_opted_in(tmp_path):
-    """The system-prompt section explaining the channel ships only where the
-    channel is actually used."""
-    assert "Your Prior Reasoning" not in _orch(
-        tmp_path, "moonshotai/kimi-k3")._build_instructions()
-    assert "Your Prior Reasoning" in _orch(
-        tmp_path, "moonshotai/kimi-k3", reasoning_replay="developer")._build_instructions()
+def _message_item(text: str):
+    item = MagicMock()
+    item.type = "message"
+    content = MagicMock()
+    content.text = text
+    item.content = [content]
+    return item
 
 
-def test_reasoning_replay_rejects_unknown_mode(tmp_path):
-    with pytest.raises(ValueError, match="reasoning_replay"):
-        _orch(tmp_path, "moonshotai/kimi-k3", reasoning_replay="yes-please")
-
-
-def test_to_chat_messages_developer_role_is_configurable():
-    """Default folds developer into user for the Bedrock translation;
-    backends that take `developer` natively get it verbatim."""
-    assert _to_chat_messages(_TURN)[0]["role"] == "user"
-    assert _to_chat_messages(_TURN, developer_role="developer")[0] == {
-        "role": "developer", "content": '{"event": "message"}'}
-
-
-def test_to_chat_messages_reasoning_never_orphans_a_message():
-    """Reasoning with no assistant message behind it is discarded rather
-    than emitted as a content-less assistant turn."""
-    items = [{"type": "reasoning", "content": "thinking..."},
-             {"role": "user", "content": "hi"}]
-    assert _to_chat_messages(items, reasoning_replay="native") == [
-        {"role": "user", "content": "hi"}]
-
-
-def test_is_anthropic_model():
-    assert _is_anthropic_model("aws/anthropic/bedrock-claude-opus-4-6")
-    assert _is_anthropic_model("azure/anthropic/claude-opus-5")
-    assert not _is_anthropic_model("moonshotai/kimi-k3")
-
-
-def test_media_user_message_translates_input_image():
-    """Responses-shape input_image parts become chat-completions image_url
-    parts in a single follow-up user message."""
-    image_items = [
-        {"role": "user", "content": [
-            {"type": "input_image", "image_url": "data:image/png;base64,AAA"}]},
-        {"role": "user", "content": [
-            {"type": "input_image", "image_url": "data:image/jpeg;base64,BBB"}]},
-    ]
-    msg = _media_user_message(image_items)
-    assert msg == {"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBB"}},
-    ]}
-
-
-def test_media_user_message_none_when_no_media():
-    assert _media_user_message([]) is None
-    assert _media_user_message([{"role": "user", "content": [
-        {"type": "input_text", "text": "not an image"}]}]) is None
-
-
-def test_media_user_message_translates_input_audio():
-    """Audio rides as a data URI, not a format enum — the enum only accepts
-    wav/mp3, while the data URI takes ogg/opus voice notes untranscoded."""
-    msg = _media_user_message([
-        {"role": "user", "content": [
-            {"type": "input_audio", "audio_url": "data:audio/ogg;base64,AAA"}]},
-    ])
-    assert msg == {"role": "user", "content": [
-        {"type": "audio_url", "audio_url": {"url": "data:audio/ogg;base64,AAA"}},
-    ]}
-
-
-def test_media_user_message_mixes_image_and_audio_in_order():
-    msg = _media_user_message([
-        {"role": "user", "content": [
-            {"type": "input_image", "image_url": "data:image/png;base64,IMG"}]},
-        {"role": "user", "content": [
-            {"type": "input_audio", "audio_url": "data:audio/ogg;base64,AUD"}]},
-    ])
-    assert [p["type"] for p in msg["content"]] == ["image_url", "audio_url"]
-
-
-def _text_chunk(text: str, finish: str | None = None):
-    """One chat-completions streaming chunk carrying text content."""
-    chunk = MagicMock()
-    choice = MagicMock()
-    delta = MagicMock()
-    delta.content = text
-    delta.tool_calls = None
-    choice.delta = delta
-    choice.finish_reason = finish
-    chunk.choices = [choice]
-    chunk.usage = None
-    return chunk
-
-
-def _final_chunk():
-    """Final chunk that carries usage info and no content."""
-    chunk = MagicMock()
-    chunk.choices = []
-    chunk.usage = MagicMock()
-    chunk.usage.prompt_tokens = 100
-    chunk.usage.completion_tokens = 50
-    chunk.usage.total_tokens = 150
-    chunk.usage.prompt_tokens_details = MagicMock()
-    chunk.usage.prompt_tokens_details.cached_tokens = 0
-    chunk.usage.cache_read_input_tokens = None
-    chunk.usage.cache_creation_input_tokens = None
-    return chunk
+def _usage():
+    u = MagicMock()
+    u.input_tokens, u.output_tokens, u.total_tokens = 100, 50, 150
+    u.input_tokens_details = MagicMock(cached_tokens=0)
+    u.output_tokens_details = MagicMock(reasoning_tokens=0)
+    return u
 
 
 def _stream(text: str):
-    """Async iterator simulating a non-tool chat-completions stream."""
+    """Async iterator of Responses events for a plain text answer."""
+    item = _message_item(text)
+    response = MagicMock()
+    response.output = [item]
+    response.usage = _usage()
 
     async def _gen():
-        yield _text_chunk(text, finish="stop")
-        yield _final_chunk()
+        done = MagicMock()
+        done.type = "response.output_item.done"
+        done.item = item
+        yield done
+        completed = MagicMock()
+        completed.type = "response.completed"
+        completed.response = response
+        yield completed
 
     return _gen()
+
+
+def _mock_llm(orch, text: str, captured: dict | None = None):
+    async def fake_create(**kwargs):
+        if captured is not None:
+            captured.clear()
+            captured.update(kwargs)
+        return _stream(text)
+    orch.llm = MagicMock()
+    orch.llm.responses = MagicMock()
+    orch.llm.responses.create = fake_create
 
 
 @pytest.fixture(autouse=True)
 def _api_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+
+# ── End to end ───────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -245,90 +142,45 @@ async def test_event_flows_to_response_and_persists(tmp_path):
     response back, confirm it lands in the session file."""
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    binary_dir = tmp_path / "binaries"
+    orch = _orch(sessions_dir)
+    _mock_llm(orch, "hello back")
 
-    config = {
-        "model": {"name": "test-model"},
-        "session": {"max_history_tokens": 100000},
-        "binaries": {"store": str(binary_dir), "retention_days": 30},
-    }
-
-    orch = SessionOrchestrator(config=config, session_dir=sessions_dir)
-
-    async def fake_create(**kwargs):
-        return _stream("hello back")
-    orch.llm = MagicMock()
-    orch.llm.chat = MagicMock()
-    orch.llm.chat.completions = MagicMock()
-    orch.llm.chat.completions.create = fake_create
-
-    event = Event(source="matrix", text="hi", metadata={"room_id": "!r"})
-    result = await orch.handle_event(event)
+    result = await orch.handle_event(
+        Event(source="matrix", text="hi", metadata={"room_id": "!r"}))
     assert result == "hello back"
 
-    # Persisted to "main" by default.
-    mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
-    history = mgr.load("main")
-    contents = [m.get("content") for m in history if m.get("role") == "assistant"]
-    assert "hello back" in contents
+    history = SessionManager(store_dir=sessions_dir, max_history_tokens=100000).load("main")
+    assert "hello back" in [m.get("content") for m in history if m.get("role") == "assistant"]
 
 
 @pytest.mark.asyncio
-async def test_rolling_cache_markers(tmp_path):
-    """Each turn persists a turn_start comment, and the next turn places
-    cache_control markers at the previous turn's boundary and the new tail
-    (plus the pinned instructions marker)."""
+async def test_turn_is_sent_as_responses_input_not_messages(tmp_path):
+    """The call carries `input` + `instructions`, never chat `messages`, and
+    developer events keep their own role."""
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    config = {
-        "model": {"name": "test-model"},
-        "session": {"max_history_tokens": 100000},
-        "binaries": {"store": str(tmp_path / "binaries"), "retention_days": 30},
-    }
-    orch = SessionOrchestrator(config=config, session_dir=sessions_dir)
-
+    orch = _orch(sessions_dir)
     captured: dict = {}
+    _mock_llm(orch, "ok", captured)
 
-    async def fake_create(**kwargs):
-        captured.clear()
-        captured.update(kwargs)
-        return _stream("reply")
-    orch.llm = MagicMock()
-    orch.llm.chat = MagicMock()
-    orch.llm.chat.completions = MagicMock()
-    orch.llm.chat.completions.create = fake_create
-
-    # Turn 1 — no boundary yet: markers on instructions + history tail only.
     await orch.handle_event(Event(source="matrix", text="first", metadata={}))
+    assert "messages" not in captured
+    assert isinstance(captured["instructions"], str)
+    assert any(i.get("role") == "developer" for i in captured["input"])
+
+
+@pytest.mark.asyncio
+async def test_usage_comment_uses_responses_token_fields(tmp_path):
+    """Responses reports input_tokens/output_tokens, not prompt/completion."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    orch = _orch(sessions_dir)
+    _mock_llm(orch, "hi")
+
+    await orch.handle_event(Event(source="matrix", text="hi", metadata={}))
     history = SessionManager(store_dir=sessions_dir, max_history_tokens=100000).load("main")
-    assert history[0] == {"type": "comment", "kind": "turn_start"}
-
-    # Turn 2 — history now holds turn 1's block behind a turn_start comment.
-    await orch.handle_event(Event(source="matrix", text="second", metadata={}))
-    messages = captured["messages"]
-
-    def has_marker(msg):
-        content = msg.get("content")
-        return isinstance(content, list) and any(
-            isinstance(b, dict) and "cache_control" in b for b in content
-        )
-
-    marked = [i for i, m in enumerate(messages) if has_marker(m)]
-    # Instructions is message 0. The boot-event turn is turn 1's block, so
-    # there is exactly one boundary: prev segment is empty, and the recent
-    # segment (turn 1) gets a tail marker.
-    assert 0 in marked
-    # Exactly one history marker on turn 1's last message (the assistant
-    # reply), placed before this turn's new event messages.
-    history_marks = [i for i in marked if i > 0]
-    assert len(history_marks) == 1
-    assert messages[history_marks[0]].get("role") == "assistant"
-
-    # Turn 3 — now a real prev segment exists; expect two history markers.
-    await orch.handle_event(Event(source="matrix", text="third", metadata={}))
-    messages = captured["messages"]
-    history_marks = [i for i, m in enumerate(messages) if has_marker(m) and i > 0]
-    assert len(history_marks) == 2
+    usage = [m for m in history if m.get("kind") == "usage"]
+    assert usage and usage[0]["input_tokens"] == 100 and usage[0]["output_tokens"] == 50
 
 
 @pytest.mark.asyncio
@@ -336,24 +188,10 @@ async def test_explicit_session_id_routes(tmp_path):
     """An event with an explicit session_id lands there, not in main."""
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    binary_dir = tmp_path / "binaries"
+    orch = _orch(sessions_dir)
+    _mock_llm(orch, "ack")
 
-    config = {
-        "model": {"name": "test-model"},
-        "session": {"max_history_tokens": 100000},
-        "binaries": {"store": str(binary_dir), "retention_days": 30},
-    }
-    orch = SessionOrchestrator(config=config, session_dir=sessions_dir)
-
-    async def fake_create(**kwargs):
-        return _stream("ack")
-    orch.llm = MagicMock()
-    orch.llm.chat = MagicMock()
-    orch.llm.chat.completions = MagicMock()
-    orch.llm.chat.completions.create = fake_create
-
-    event = Event(session_id="cron-target", source="time", text="tick")
-    await orch.handle_event(event)
+    await orch.handle_event(Event(session_id="cron-target", source="time", text="tick"))
 
     mgr = SessionManager(store_dir=sessions_dir, max_history_tokens=100000)
     assert mgr.load("cron-target") != []
@@ -365,10 +203,10 @@ async def test_tool_failure_becomes_output_not_a_dead_turn(tmp_path):
     """handle_event runs in a bare create_task, so an exception escaping a
     tool call would kill the turn and discard everything collected for it.
     Failures have to come back as tool output instead."""
-    orch = _orch(tmp_path, "test-model")
-
+    orch = _orch(tmp_path)
     conn = MagicMock()
-    conn.call_tool = AsyncMock(side_effect=ValueError("Cannot inline resource of type 'video/mp4'"))
+    conn.call_tool = AsyncMock(
+        side_effect=ValueError("Cannot inline resource of type 'video/mp4'"))
     conn.binary_params = {}
     orch._tool_to_mcp = {"read_thing": conn}
 
