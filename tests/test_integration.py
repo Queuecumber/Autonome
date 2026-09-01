@@ -87,6 +87,26 @@ def _orch(tmp_path, model: str, **model_cfg):
     )
 
 
+def test_developer_role_defaults_to_user_everywhere(tmp_path):
+    """Templates that fold developer into system reject it anywhere but
+    position 0, and every turn past the first puts an event mid-conversation
+    — so the safe role is the default and `developer` is opt-in."""
+    assert _orch(tmp_path, "aws/anthropic/bedrock-claude-opus-4-6").developer_role == "user"
+    assert _orch(tmp_path, "moonshotai/kimi-k3").developer_role == "user"
+    assert _orch(tmp_path, "qwen/qwen3.8-27b").developer_role == "user"
+
+
+def test_developer_role_can_be_opted_in(tmp_path):
+    orch = _orch(tmp_path, "moonshotai/kimi-k3", developer_role="developer")
+    assert orch.developer_role == "developer"
+    assert _to_chat_messages(_TURN, developer_role=orch.developer_role)[0]["role"] == "developer"
+
+
+def test_developer_role_rejects_unknown_value(tmp_path):
+    with pytest.raises(ValueError, match="developer_role"):
+        _orch(tmp_path, "moonshotai/kimi-k3", developer_role="system")
+
+
 def test_reasoning_replay_defaults_by_model_family(tmp_path):
     """Anthropic drops it (no signature to replay); everyone else gets the
     native field. The developer-channel workaround is never automatic."""

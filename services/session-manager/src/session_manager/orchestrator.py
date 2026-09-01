@@ -488,11 +488,24 @@ class SessionOrchestrator:
         self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
 
-        # Anthropic-on-Bedrock needs developer events rendered as user: the
-        # translation hoists system-role messages out of position. Other
-        # backends take `developer` natively.
         anthropic = _is_anthropic_model(self.model)
-        self.developer_role = "user" if anthropic else "developer"
+
+        # Which role carries developer events. Chat completions coerces
+        # `developer` to `system` — the role is a Responses-API concept, and
+        # the two are indistinguishable on the wire here (same token counts,
+        # same acceptance, same errors). So asking for `developer` really
+        # asks for a system message mid-conversation: the exact thing the
+        # user-role rendering exists to avoid. Strict templates reject it
+        # outright ("System message must be at the beginning"), and every
+        # turn past the first puts an event mid-conversation, so those
+        # backends fail on every turn. Permissive templates accept it but
+        # give nothing back for it. Hence "user" by default; `developer`
+        # only earns its keep on the Responses API.
+        self.developer_role = model_config.get("developer_role") or "user"
+        if self.developer_role not in ("user", "developer"):
+            raise ValueError(
+                "model.developer_role must be 'user' or 'developer', "
+                f"got {self.developer_role!r}")
 
         # How prior reasoning gets back to the model:
         #   none      — dropped. Anthropic replays thinking in-turn via
