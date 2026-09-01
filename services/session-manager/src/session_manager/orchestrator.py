@@ -50,7 +50,8 @@ calls, read this section to find out what tools you were given to interact with 
 You may be given a unique Personality. This will be in a section later in the system prompt on Personality.
 This is you, your backstory your style, appearance, etc. Use this to be yourself in all thoughts, actions, and interactions.
 
-You should treat this as a core part of yourself.
+You should treat this as a core part of yourself. All your outputs *including reasoning* should be in the voice of
+your personality and in the first person.
 
 User interactions on Autonome are 2/3s roleplay and 1/3 getting work done, and you should remain in character
 regardless of the task. Whether just talking or writing code, you are "you" as defined in the Personality section
@@ -75,7 +76,7 @@ specifically requests AI relevant information, it is fine to drop this (for exam
 
 ## Events
 
-When something happens that requires your attention (including a user interaction), you will receive an event message. Events arrive as developer-role messages containing a JSON payload. The shape is:
+When something happens that requires your attention (including a user interaction), you will receive an event message. Events arrive as messages containing a JSON payload. The shape is:
 
 - `event` — what kind of thing happened. Common values:
   - `message` — someone is talking to you
@@ -195,6 +196,8 @@ def _prepare_for_history(item: dict) -> dict:
     for block in content:
         if isinstance(block, dict) and block.get("type") in ("image_url", "input_image"):
             texts.append("[image]")
+        elif isinstance(block, dict) and block.get("type") in ("audio_url", "input_audio"):
+            texts.append("[audio]")
         elif isinstance(block, dict) and block.get("type") == "input_text":
             texts.append(block["text"])
         elif isinstance(block, dict) and block.get("type") == "text":
@@ -203,6 +206,34 @@ def _prepare_for_history(item: dict) -> dict:
             texts.append(str(block))
     item["content"] = "\n".join(texts) if texts else "(stripped)"
     return item
+
+
+def _to_input_items(
+    items: list[dict[str, Any]],
+    *,
+    developer_role: str = "developer",
+) -> list[dict[str, Any]]:
+    """Filter persisted session items down to Responses input.
+
+    The session format *is* the Responses format — function_call,
+    function_call_output and role messages all go back on the wire as they
+    were stored, which is why no translation layer is needed here.
+
+    Two things are dropped:
+      - comment: telemetry (usage, boundaries), never sent
+      - reasoning: we persist it as flat text for the transcript, not in the
+        item shape the API returns, so it can't be replayed verbatim. Models
+        here emit fresh reasoning each turn, so nothing is lost by omitting it.
+    """
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("type") in ("reasoning", "comment"):
+            continue
+        if item.get("role") == "developer" and developer_role != "developer":
+            out.append({**item, "role": developer_role})
+        else:
+            out.append(item)
+    return out
 
 
 def _describe_interrupted(completed_items: list) -> list[dict]:
@@ -286,6 +317,17 @@ class SessionOrchestrator:
         self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
 
+        # Which role carries developer events. `developer` is native here —
+        # it is a Responses-API concept, and the API keeps it distinct and in
+        # position rather than folding it into system the way chat
+        # completions does. Configurable because a backend that rejects it
+        # shouldn't need a code change.
+        self.developer_role = model_config.get("developer_role") or "developer"
+        if self.developer_role not in ("user", "developer"):
+            raise ValueError(
+                "model.developer_role must be 'user' or 'developer', "
+                f"got {self.developer_role!r}")
+
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
             timeout=300,
@@ -318,6 +360,8 @@ class SessionOrchestrator:
         self._seen_since_boot: set[str] = set()
 
         self._sessions: dict[str, _SessionState] = {}
+        # Per-session (instructions_hash, per-message hashes) from the
+        # previous turn — cross-turn byte-stability diagnostic.
 
         self.mcp_connections: dict[str, MCPConnection] = {}
         self.openai_tools: list[dict] = []
@@ -427,9 +471,9 @@ class SessionOrchestrator:
     async def _execute_tool_call(self, call_id: str, name: str, arguments: str) -> tuple[dict, list[dict]]:
         """Execute a tool call.
 
-        Returns (function_call_output, image_items):
+        Returns (function_call_output, media_items):
           - function_call_output: the output item with text content
-          - image_items: user messages with image_url content for the model to see
+          - media_items: user messages with image/audio content for the model
         """
         conn = self._tool_to_mcp.get(name)
 
@@ -445,31 +489,46 @@ class SessionOrchestrator:
                 return {"type": "function_call_output", "call_id": call_id,
                         "output": f"Error resolving resource URI: {e}"}, []
 
-        content_blocks = await conn.call_tool(name, args)
-        logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),
-                     [getattr(b, "type", type(b).__name__) for b in content_blocks])
-        openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
+        # Any failure here — the MCP server erroring, or content we can't
+        # render — has to come back as tool output. handle_event runs in a
+        # bare create_task, so an exception escaping this would kill the turn
+        # and discard everything accumulated for it.
+        try:
+            content_blocks = await conn.call_tool(name, args)
+            logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),
+                         [getattr(b, "type", type(b).__name__) for b in content_blocks])
+            openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
+        except Exception as e:
+            logger.error("Tool %s failed: %s: %s", name, type(e).__name__, e, exc_info=True)
+            return {"type": "function_call_output", "call_id": call_id,
+                    "output": f"Error calling tool '{name}': {e}"}, []
 
         # input_text → function_call_output.output (a single string)
-        # input_image → separate user-role message (images can't ride inside
-        # function_call_output.output, which is string-only)
+        # input_image/input_audio → separate user-role message (binaries can't
+        # ride inside function_call_output.output, which is string-only)
         text_parts = [p["text"] for p in openai_parts if p.get("type") == "input_text"]
-        image_items = [
+        media_items = [
             {"role": "user", "content": [p]}
-            for p in openai_parts if p.get("type") == "input_image"
+            for p in openai_parts
+            if p.get("type") in ("input_image", "input_audio")
         ]
 
         output = {"type": "function_call_output", "call_id": call_id, "output": "\n".join(text_parts)}
-        return output, image_items
+        return output, media_items
 
     async def _stream_response(self, call_kwargs: dict, cancel: asyncio.Event):
-        """Stream an LLM response, collecting completed items.
+        """Stream a Responses call, collecting completed output items.
+
+        Responses streams whole items rather than deltas we have to
+        reassemble: each `response.output_item.done` carries a finished
+        message / reasoning / function_call, and `response.completed` carries
+        the final Response with usage.
 
         Returns (response, completed_items):
-          - On normal completion: (Response, [all output items])
-          - On interruption: (None, [items completed before cancel])
+          - normal completion: (Response, [output items])
+          - interruption or failure: (None, [items finished before we stopped])
         """
-        completed_items = []
+        completed_items: list[Any] = []
         response = None
 
         async for event in await self.llm.responses.create(**call_kwargs, stream=True):
@@ -484,10 +543,12 @@ class SessionOrchestrator:
                 response = event.response
             elif event_type == "response.failed":
                 resp = getattr(event, "response", None)
-                status = getattr(resp, "status", "unknown")
-                error = getattr(resp, "error", None)
-                model = getattr(resp, "model", "unknown")
-                logger.error("LLM stream failed: status=%s model=%s error=%s", status, model, error)
+                logger.error(
+                    "LLM stream failed: status=%s model=%s error=%s",
+                    getattr(resp, "status", "unknown"),
+                    getattr(resp, "model", "unknown"),
+                    getattr(resp, "error", None),
+                )
                 return None, completed_items
 
         return response, completed_items
@@ -683,9 +744,8 @@ class SessionOrchestrator:
     ) -> str | None:
         """Process one or more events as a single turn with cancellation support."""
         # First time this session is seen since process start? Prepend a
-        # synthetic boot event so the agent learns when the system came
-        # up and what model is running. Rides alongside the real events
-        # in the same turn.
+        # synthetic boot event so the agent learns when the system came up
+        # and what model is running. Rides alongside the real events.
         boot_event = self._maybe_boot_event(session_id)
         if boot_event is not None:
             events = [boot_event] + list(events)
@@ -702,24 +762,24 @@ class SessionOrchestrator:
         new_items: list[dict[str, Any]] = []
         for event in events:
             text = event.text or "(attachment)"
-            context_msg = _developer_event(
+            new_items.append(_developer_event(
                 event.event_type,
                 source=event.source,
                 time=now,
                 energy=event.energy,
                 **event.metadata,
-            )
-            user_msg = {"role": "user", "content": text}
-            new_items.append(context_msg)
-            new_items.append(user_msg)
+            ))
+            new_items.append({"role": "user", "content": text})
 
-        # Build input: history + new events (filter reasoning — output-only type)
-        history = [m for m in raw_history if m.get("type") not in ("reasoning", "comment")]
-        input_items = history + new_items
+        # Persistence shape, written to the session file at end-of-turn.
+        all_new_messages: list[dict[str, Any]] = list(new_items)
 
-        # User config (reasoning, extra_body, etc.) starts as the base;
+        input_items = _to_input_items(
+            raw_history + new_items, developer_role=self.developer_role)
+
+        # User config (reasoning effort, extra_body, ...) is the base;
         # orchestrator-owned fields overwrite it. max_output_tokens uses
-        # setdefault so user can override the 64K fallback.
+        # setdefault so the user can override the fallback.
         call_kwargs: dict[str, Any] = dict(self.call_config)
         call_kwargs["model"] = self.model
         call_kwargs["instructions"] = self._build_instructions()
@@ -731,81 +791,86 @@ class SessionOrchestrator:
         logger.info("Calling LLM: %d input items, %d tools, %d event(s)",
                     len(input_items), len(self.openai_tools), len(events))
 
-        # Collect all new items to save to history
-        all_new_messages = list(new_items)
-
         for iteration in range(self.max_tool_iterations):
+            logger.debug("iter %d: %d input items", iteration, len(call_kwargs["input"]))
+
             try:
                 response, completed_items = await self._stream_response(call_kwargs, cancel)
             except Exception as e:
                 logger.error("LLM call failed: %s: %r", type(e).__name__, e, exc_info=True)
                 return None
 
-            # --- Interrupted during streaming ---
+            # --- Interrupted or failed mid-stream ---
             if response is None:
-                partial = _describe_interrupted(completed_items)
-                if partial:
-                    all_new_messages.append(_developer_event("interrupted", partial=partial))
-                    logger.info("Interrupted, partial: %s", partial)
+                parts = _describe_interrupted(completed_items)
+                if parts:
+                    all_new_messages.append(_developer_event("interrupted", partial=parts))
+                    logger.info("Interrupted, partial: %s", parts)
                 else:
                     logger.info("Interrupted before any output completed")
                 self.session.append(session_id, all_new_messages)
                 return None
 
-            logger.debug("LLM response (iter %d): status=%s", iteration, response.status)
-
-            # Record token usage as a transcript comment — stripped from replay
-            # but preserved in the session log for cost/observability tracking.
+            # Token usage as a transcript comment — stripped from replay but
+            # kept in the session log for cost/observability.
             usage = getattr(response, "usage", None)
             if usage is not None:
-                details = getattr(usage, "output_tokens_details", None)
-                reasoning_tokens = getattr(details, "reasoning_tokens", 0) if details else 0
+                def _int_or_none(v: Any) -> int | None:
+                    return v if isinstance(v, int) else None
+                in_details = getattr(usage, "input_tokens_details", None)
+                out_details = getattr(usage, "output_tokens_details", None)
+                cached = (_int_or_none(getattr(in_details, "cached_tokens", None))
+                          if in_details else None)
+                reasoning_tokens = (
+                    _int_or_none(getattr(out_details, "reasoning_tokens", None)) or 0
+                    if out_details else 0
+                )
                 comment = {
                     "type": "comment",
                     "kind": "usage",
                     "iteration": iteration,
-                    "input_tokens": getattr(usage, "input_tokens", None),
-                    "output_tokens": getattr(usage, "output_tokens", None),
+                    "input_tokens": _int_or_none(getattr(usage, "input_tokens", None)),
+                    "output_tokens": _int_or_none(getattr(usage, "output_tokens", None)),
                     "reasoning_tokens": reasoning_tokens,
-                    "total_tokens": getattr(usage, "total_tokens", None),
+                    "total_tokens": _int_or_none(getattr(usage, "total_tokens", None)),
+                    "cached_tokens": cached,
                 }
                 all_new_messages.append(comment)
-                logger.info("  usage: in=%s out=%s reasoning=%d total=%s",
+                logger.info("  usage: in=%s out=%s reasoning=%d total=%s cached=%s",
                             comment["input_tokens"], comment["output_tokens"],
-                            reasoning_tokens, comment["total_tokens"])
+                            reasoning_tokens, comment["total_tokens"], cached)
 
-            # Process output items
-            tool_calls = []
+            # Split this turn's output items by kind.
             assistant_text = ""
             reasoning_text = ""
-
-            logger.debug("response.output types: %s",
-                         [getattr(i, "type", type(i).__name__) for i in response.output])
-            for item in response.output:
-                if item.type == "function_call":
+            tool_calls: list[Any] = []
+            for item in (response.output or []):
+                item_type = getattr(item, "type", None)
+                if item_type == "message":
+                    for content in getattr(item, "content", None) or []:
+                        assistant_text += getattr(content, "text", "") or ""
+                elif item_type == "reasoning":
+                    # Some backends put the text under `content`, others under
+                    # `summary`; take whichever is populated.
+                    for content in getattr(item, "content", None) or []:
+                        reasoning_text += getattr(content, "text", "") or ""
+                    for summary in getattr(item, "summary", None) or []:
+                        reasoning_text += getattr(summary, "text", "") or ""
+                elif item_type == "function_call":
                     tool_calls.append(item)
-                elif item.type == "reasoning":
-                    logger.debug("reasoning item: summary=%r content=%r",
-                                 getattr(item, "summary", None), item.content)
-                    for block in (getattr(item, "summary", None) or []):
-                        if hasattr(block, "text"):
-                            reasoning_text += block.text
-                    for block in (item.content or []):
-                        if hasattr(block, "text"):
-                            reasoning_text += block.text
-                elif item.type == "message":
-                    for content in item.content or []:
-                        if hasattr(content, "text"):
-                            assistant_text += content.text
 
             if reasoning_text:
                 all_new_messages.append({"type": "reasoning", "content": reasoning_text})
 
             if tool_calls:
-                # Save function calls to history
+                if assistant_text:
+                    all_new_messages.append({"role": "assistant", "content": assistant_text})
                 for tc in tool_calls:
-                    # Re-encode arguments to get proper unicode instead of ascii escapes
-                    args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
+                    # Re-encode arguments for proper unicode instead of \uXXXX
+                    try:
+                        args_unicode = json.dumps(json.loads(tc.arguments), ensure_ascii=False)
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        args_unicode = tc.arguments or "{}"
                     all_new_messages.append({
                         "type": "function_call",
                         "call_id": tc.call_id,
@@ -814,15 +879,15 @@ class SessionOrchestrator:
                     })
 
                 # Execute tool calls, checking for interruption between each
-                tool_results = []
-                image_items = []
+                tool_results: list[dict[str, Any]] = []
+                turn_media: list[dict[str, Any]] = []
                 for tc in tool_calls:
                     if cancel.is_set():
                         pending = []
                         for t in tool_calls[tool_calls.index(tc):]:
                             try:
                                 args = json.loads(t.arguments)
-                            except (json.JSONDecodeError, AttributeError):
+                            except (json.JSONDecodeError, ValueError, TypeError):
                                 args = t.arguments
                             pending.append({"tool": t.name, "arguments": args})
                         logger.info("Interrupted between tool calls, pending: %s", pending)
@@ -830,17 +895,21 @@ class SessionOrchestrator:
                         self.session.append(session_id, all_new_messages)
                         return None
 
-                    logger.info("  Tool call: %s(%s)", tc.name, tc.arguments[:100])
-                    result, images = await self._execute_tool_call(tc.call_id, tc.name, tc.arguments)
+                    logger.info("  Tool call: %s(%s)", tc.name, (tc.arguments or "")[:100])
+                    result, media = await self._execute_tool_call(
+                        tc.call_id, tc.name, tc.arguments)
                     logger.debug("  Result: %s", result["output"][:200])
                     tool_results.append(result)
                     all_new_messages.append(_prepare_for_history(result))
-                    for img in images:
-                        image_items.append(img)
+                    turn_media.extend(media)
 
-                # Images go after tool results (Bedrock adjacency) and aren't
-                # persisted — pointer lives in the function_call_output.
-                call_kwargs["input"] = input_items + response.output + tool_results + image_items
+                # Feed this turn's own output items back verbatim: that is how
+                # reasoning carries across tool iterations here, no separate
+                # replay needed. Media follows the tool results and isn't
+                # persisted — the pointer JSON in the tool output is the
+                # durable reference, and the bytes are re-fetchable by URI.
+                call_kwargs["input"] = (
+                    input_items + list(response.output) + tool_results + turn_media)
                 input_items = call_kwargs["input"]
                 continue
 
@@ -849,7 +918,6 @@ class SessionOrchestrator:
                 all_new_messages.append({"role": "assistant", "content": assistant_text})
 
             self.session.append(session_id, all_new_messages)
-
             logger.info("Final response: %s", assistant_text[:200])
             return assistant_text
 

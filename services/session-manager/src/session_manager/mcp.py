@@ -16,7 +16,12 @@ import exifread.utils
 import jsonpath
 import jsonref
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+try:  # renamed in newer SDKs; the old spelling is gone in recent releases
+    from mcp.client.streamable_http import streamable_http_client
+except ImportError:  # pragma: no cover - older SDKs only have the old name
+    from mcp.client.streamable_http import (  # type: ignore[attr-defined]
+        streamablehttp_client as streamable_http_client,
+    )
 
 from session_manager.binaries import BinaryStore
 
@@ -229,10 +234,15 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                 parts.append({"type": "input_text", "text": json.dumps(exif)})
             parts.append({
                 "type": "input_image",
+                # `detail` is not optional here: input_image without it fails
+                # request validation outright.
+                "detail": "auto",
                 "image_url": f"data:{block.mimeType};base64,{block.data}",
             })
 
         elif block.type == "audio":
+            # No audio variant in the Responses input schema — the pointer is
+            # all we can hand back, same as video.
             parts.append(_describe_binary(block.data, block.mimeType, store))
 
         elif block.type == "resource":
@@ -248,8 +258,16 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
                         parts.append({"type": "input_text", "text": json.dumps(exif)})
                     parts.append({
                         "type": "input_image",
+                        "detail": "auto",
                         "image_url": f"data:{mime};base64,{blob}",
                     })
+                elif mime.startswith("video/"):
+                    # No model host we target accepts video, so hand back the
+                    # pointer rather than the bytes — she still learns a video
+                    # arrived and can re-fetch it by URI.
+                    parts.append(_describe_binary(blob, mime, store))
+                elif mime.startswith("audio/"):
+                    parts.append(_describe_binary(blob, mime, store))
                 elif _is_text_type(mime):
                     raw = base64.b64decode(blob)
                     parts.append({"type": "input_text", "text": raw.decode("utf-8")})
@@ -293,7 +311,7 @@ class MCPConnection:
     async def _run(self) -> None:
         """Run the connection lifecycle in an isolated task."""
         try:
-            async with streamablehttp_client(self.url) as transport:
+            async with streamable_http_client(self.url) as transport:
                 read, write = transport[0], transport[1]
                 async with ClientSession(read, write) as session:
                     self.session = session
