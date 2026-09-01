@@ -6,26 +6,64 @@ import copy
 import io
 import json
 import logging
+import os
+import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
+import httpx
 import exifread
 import exifread.utils
 import jsonpath
 import jsonref
 from mcp import ClientSession
-try:  # renamed in newer SDKs; the old spelling is gone in recent releases
-    from mcp.client.streamable_http import streamable_http_client
-except ImportError:  # pragma: no cover - older SDKs only have the old name
-    from mcp.client.streamable_http import (  # type: ignore[attr-defined]
-        streamablehttp_client as streamable_http_client,
-    )
 
 from session_manager.binaries import BinaryStore
 
 logger = logging.getLogger(__name__)
+
+
+try:  # 1.x transport: takes headers (and auth/timeout) directly
+    from mcp.client.streamable_http import (  # type: ignore[attr-defined]
+        streamablehttp_client as _legacy_http_client,
+    )
+except ImportError:  # pragma: no cover - removed in 2.x
+    _legacy_http_client = None
+
+try:  # 2.x transport: configuration moved onto a caller-supplied httpx client
+    from mcp.client.streamable_http import (  # type: ignore[attr-defined]
+        streamable_http_client as _modern_http_client,
+    )
+except ImportError:  # pragma: no cover - absent in older 1.x
+    _modern_http_client = None
+
+
+@asynccontextmanager
+async def _open_transport(url: str, headers: dict[str, str] | None):
+    """Open a streamable-HTTP transport across both SDK generations.
+
+    These are not two spellings of one function. 1.x takes `headers`
+    directly; 2.x dropped that parameter and expects a preconfigured httpx
+    client instead. Aliasing one to the other silently drops auth, so both
+    shapes are handled explicitly.
+    """
+    if _legacy_http_client is not None:
+        async with _legacy_http_client(url, headers=headers) as transport:
+            yield transport
+        return
+
+    if _modern_http_client is None:  # pragma: no cover - neither available
+        raise RuntimeError("mcp SDK exposes no streamable-HTTP client")
+
+    client = httpx.AsyncClient(headers=headers or {})
+    try:
+        async with _modern_http_client(url, http_client=client) as transport:
+            yield transport
+    finally:
+        await client.aclose()
 
 POINTER_PREFIX = "pointer://"
 
@@ -284,12 +322,72 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
 
 
 
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env(value: str, where: str) -> str:
+    """Substitute ${VAR} references from the environment.
+
+    Raises on a missing variable rather than leaving the placeholder in
+    place. A literal "${HA_TOKEN}" sent as a bearer token surfaces much
+    later as an opaque 401 from the server, a long way from the mistake.
+    """
+    def replace(match: re.Match) -> str:
+        name = match.group(1)
+        try:
+            return os.environ[name]
+        except KeyError:
+            raise ValueError(
+                f"{where}: environment variable {name!r} is not set") from None
+
+    return _ENV_REF.sub(replace, value)
+
+
+def parse_server_spec(name: str, spec: Any) -> tuple[str, dict[str, str] | None]:
+    """Normalize one `mcp_servers` entry into (url, headers).
+
+    Accepts the plain-URL shorthand or a mapping::
+
+        memory: http://memory-mcp:8001/mcp
+        home_assistant:
+          url: http://homeassistant.local:8123/mcp
+          headers:
+            Authorization: "Bearer ${HA_TOKEN}"
+
+    Header values expand ${VAR} from the environment, so tokens come from
+    a secret at runtime instead of being written into the config file.
+    """
+    if isinstance(spec, str):
+        return spec, None
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"mcp_servers.{name}: expected a URL string or a mapping, "
+            f"got {type(spec).__name__}")
+
+    url = spec.get("url")
+    if not isinstance(url, str) or not url:
+        raise ValueError(f"mcp_servers.{name}: missing required 'url'")
+
+    raw_headers = spec.get("headers") or {}
+    if not isinstance(raw_headers, dict):
+        raise ValueError(f"mcp_servers.{name}.headers: expected a mapping")
+
+    headers = {
+        str(k): _expand_env(str(v), f"mcp_servers.{name}.headers.{k}")
+        for k, v in raw_headers.items()
+    }
+    return url, headers or None
+
+
 class MCPConnection:
     """Manages a persistent connection to an MCP server."""
 
-    def __init__(self, name: str, url: str, prefix: str = "aptool"):
+    def __init__(self, name: str, url: str, prefix: str = "aptool",
+                 headers: dict[str, str] | None = None):
         self.name = name
         self.url = url
+        # Never logged: these carry bearer tokens and API keys.
+        self.headers = dict(headers) if headers else None
         self.prefix = prefix
         self.session: ClientSession | None = None
         self.tools: list[dict] = []
@@ -311,7 +409,7 @@ class MCPConnection:
     async def _run(self) -> None:
         """Run the connection lifecycle in an isolated task."""
         try:
-            async with streamable_http_client(self.url) as transport:
+            async with _open_transport(self.url, self.headers) as transport:
                 read, write = transport[0], transport[1]
                 async with ClientSession(read, write) as session:
                     self.session = session

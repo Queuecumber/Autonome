@@ -47,12 +47,12 @@ async def startup():
     await asyncio.sleep(0.5)
 
     # Connect to MCP servers (retry until available)
-    mcp_urls = dict(config.get("mcp_servers", {}) or {})
-    mcp_urls.setdefault("session", f"http://localhost:{platform_mcp_port}/mcp")
+    mcp_servers = dict(config.get("mcp_servers", {}) or {})
+    mcp_servers.setdefault("session", f"http://localhost:{platform_mcp_port}/mcp")
     max_retries = 30
     for attempt in range(max_retries):
         try:
-            await orchestrator.connect_mcp_servers(mcp_urls)
+            await orchestrator.connect_mcp_servers(mcp_servers)
             if orchestrator.openai_tools:
                 break
         except (KeyboardInterrupt, SystemExit):

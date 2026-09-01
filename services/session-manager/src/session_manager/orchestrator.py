@@ -13,7 +13,12 @@ from openai import AsyncOpenAI
 
 from session_manager.binaries import BinaryStore
 from session_manager.event import Event
-from session_manager.mcp import MCPConnection, mcp_content_to_openai, resolve_uri_args
+from session_manager.mcp import (
+    MCPConnection,
+    mcp_content_to_openai,
+    parse_server_spec,
+    resolve_uri_args,
+)
 from session_manager.session import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -371,10 +376,15 @@ class SessionOrchestrator:
 
         self.max_tool_iterations = 20
 
-    async def connect_mcp_servers(self, mcp_urls: dict[str, str]) -> None:
-        """Connect to all MCP servers, discover tools and resource schemes."""
-        for name, url in mcp_urls.items():
-            conn = MCPConnection(name, url)
+    async def connect_mcp_servers(self, mcp_servers: dict[str, Any]) -> None:
+        """Connect to all MCP servers, discover tools and resource schemes.
+
+        Each entry is either a URL string or a mapping carrying a url plus
+        optional auth headers — see `parse_server_spec`.
+        """
+        for name, spec in mcp_servers.items():
+            url, headers = parse_server_spec(name, spec)
+            conn = MCPConnection(name, url, headers=headers)
             try:
                 await conn.connect()
                 self.mcp_connections[name] = conn
