@@ -20,10 +20,17 @@ import exifread.utils
 import jsonpath
 import jsonref
 from mcp import ClientSession
+from mcp.shared.exceptions import McpError
+from mcp.types import METHOD_NOT_FOUND
 
 from session_manager.binaries import BinaryStore
 
 logger = logging.getLogger(__name__)
+
+
+def _is_method_not_found(err: McpError) -> bool:
+    """Did the server reject the call as an unimplemented method?"""
+    return getattr(getattr(err, "error", None), "code", None) == METHOD_NOT_FOUND
 
 
 try:  # 1.x transport: takes headers (and auth/timeout) directly
@@ -390,6 +397,7 @@ class MCPConnection:
         self.headers = dict(headers) if headers else None
         self.prefix = prefix
         self.session: ClientSession | None = None
+        self.capabilities: Any = None
         self.tools: list[dict] = []
         self.binary_params: dict[str, list[BinaryParam]] = {}
         self.instructions: str = ""
@@ -415,6 +423,7 @@ class MCPConnection:
                     self.session = session
                     init_result = await session.initialize()
 
+                    self.capabilities = getattr(init_result, "capabilities", None)
                     self.instructions = getattr(init_result, "instructions", "") or ""
 
                     result = await session.list_tools()
@@ -455,16 +464,43 @@ class MCPConnection:
         result = await self.session.call_tool(original_name, args)
         return result.content
 
+    @property
+    def supports_resources(self) -> bool:
+        """Whether the server advertised the resources capability.
+
+        Resources are optional in the protocol — plenty of servers expose
+        tools only, and asking them to enumerate resources is an error.
+        """
+        return getattr(self.capabilities, "resources", None) is not None
+
     async def list_resources(self) -> list:
         if self.session is None:
             raise RuntimeError(f"MCP server {self.name} not connected")
-        result = await self.session.list_resources()
+        if not self.supports_resources:
+            return []
+        try:
+            result = await self.session.list_resources()
+        except McpError as e:
+            if not _is_method_not_found(e):
+                raise
+            logger.debug("MCP [%s]: resources/list not implemented", self.name)
+            return []
         return list(result.resources or [])
 
     async def list_resource_templates(self) -> list:
         if self.session is None:
             raise RuntimeError(f"MCP server {self.name} not connected")
-        result = await self.session.list_resource_templates()
+        if not self.supports_resources:
+            return []
+        try:
+            result = await self.session.list_resource_templates()
+        except McpError as e:
+            # A server can advertise `resources` and still not implement the
+            # templates half — the two are separate methods.
+            if not _is_method_not_found(e):
+                raise
+            logger.debug("MCP [%s]: resources/templates/list not implemented", self.name)
+            return []
         return list(result.resourceTemplates or [])
 
     async def read_resource(self, uri: str) -> list:

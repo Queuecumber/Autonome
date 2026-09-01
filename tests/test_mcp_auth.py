@@ -71,3 +71,74 @@ def test_connection_carries_headers_through():
     conn = MCPConnection("ha", "http://x/mcp", headers={"Authorization": "Bearer t"})
     assert conn.headers == {"Authorization": "Bearer t"}
     assert MCPConnection("plain", "http://x/mcp").headers is None
+
+
+# ── Optional server capabilities ─────────────────────────
+#
+# Resources are optional in the protocol. Home Assistant serves tools only,
+# and asking it to enumerate resource templates fails the whole connection
+# with "Method not found" unless we check first.
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+from mcp.shared.exceptions import McpError
+from mcp.types import METHOD_NOT_FOUND, ErrorData
+
+
+def _conn_with(capabilities, session):
+    conn = MCPConnection("srv", "http://x/mcp")
+    conn.capabilities = capabilities
+    conn.session = session
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_resource_enumeration_skipped_when_not_advertised():
+    """A tools-only server is never asked to enumerate resources."""
+    session = MagicMock()
+    session.list_resources = AsyncMock()
+    session.list_resource_templates = AsyncMock()
+    conn = _conn_with(SimpleNamespace(resources=None), session)
+
+    assert await conn.list_resources() == []
+    assert await conn.list_resource_templates() == []
+    session.list_resources.assert_not_called()
+    session.list_resource_templates.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_method_not_found_is_tolerated_when_advertised():
+    """Servers can advertise `resources` and still not implement the
+    templates half — the two are separate methods."""
+    err = McpError(ErrorData(code=METHOD_NOT_FOUND, message="Method not found"))
+    session = MagicMock()
+    session.list_resource_templates = AsyncMock(side_effect=err)
+    session.list_resources = AsyncMock(side_effect=err)
+    conn = _conn_with(SimpleNamespace(resources=object()), session)
+
+    assert await conn.list_resource_templates() == []
+    assert await conn.list_resources() == []
+
+
+@pytest.mark.asyncio
+async def test_other_mcp_errors_still_propagate():
+    """Only method-not-found is swallowed; a real failure must surface."""
+    err = McpError(ErrorData(code=-32000, message="boom"))
+    session = MagicMock()
+    session.list_resource_templates = AsyncMock(side_effect=err)
+    conn = _conn_with(SimpleNamespace(resources=object()), session)
+
+    with pytest.raises(McpError, match="boom"):
+        await conn.list_resource_templates()
+
+
+@pytest.mark.asyncio
+async def test_templates_returned_when_supported():
+    tmpl = SimpleNamespace(uriTemplate="mxc://{server}/{id}")
+    session = MagicMock()
+    session.list_resource_templates = AsyncMock(
+        return_value=SimpleNamespace(resourceTemplates=[tmpl]))
+    conn = _conn_with(SimpleNamespace(resources=object()), session)
+
+    assert await conn.list_resource_templates() == [tmpl]
