@@ -608,6 +608,7 @@ class SessionOrchestrator:
         """
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        reasoning_deltas = 0          # diagnostic: how many arrived at all
         tool_calls_by_idx: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
         usage: Any = None
@@ -644,7 +645,12 @@ class SessionOrchestrator:
             # target: the thinking text arrives on its own delta field.
             reasoning = getattr(delta, "reasoning_content", None)
             if isinstance(reasoning, str) and reasoning:
+                reasoning_deltas += 1
                 reasoning_parts.append(reasoning)
+            elif reasoning is not None:
+                # Present but not a non-empty string — worth seeing, since it
+                # distinguishes "field absent" from "field arrived empty".
+                reasoning_deltas += 1
 
             for tc in getattr(delta, "tool_calls", None) or []:
                 idx = getattr(tc, "index", 0) or 0
@@ -663,6 +669,7 @@ class SessionOrchestrator:
         result = collected()
         result["usage"] = usage
         result["finish_reason"] = finish_reason
+        result["reasoning_deltas"] = reasoning_deltas
         return result, None
 
     async def handle_event(self, event: Event) -> str | None:
@@ -966,6 +973,14 @@ class SessionOrchestrator:
             assistant_text = response["content"]
             reasoning_text = response.get("reasoning") or ""
             tool_calls = response["tool_calls"]
+
+            # Did the model send thinking, and did we keep it? A zero delta
+            # count means the model sent none; deltas with no text means we
+            # dropped it. The usage counters don't separate those.
+            logger.info("  reasoning: deltas=%s chars=%d finish=%s content=%d tool_calls=%d",
+                        response.get("reasoning_deltas"), len(reasoning_text),
+                        response.get("finish_reason"), len(assistant_text or ""),
+                        len(tool_calls))
 
             if reasoning_text:
                 all_new_messages.append({"type": "reasoning", "content": reasoning_text})
