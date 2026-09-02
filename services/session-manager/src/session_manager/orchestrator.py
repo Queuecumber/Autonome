@@ -512,6 +512,9 @@ class _SessionState:
         # Events that arrived mid-turn, waiting to ride out on the next tool
         # result rather than cancelling the turn.
         self.pending_steer: list[Event] = []
+        # Events collected during the debounce window, before a turn starts.
+        self.debounce_batch: list[Event] = []
+        self.debounce_task: asyncio.Task | None = None
 
 
 class SessionOrchestrator:
@@ -539,6 +542,12 @@ class SessionOrchestrator:
         )
 
         session_config = config.get("session", {})
+        # Hold briefly before starting a turn so a burst — someone sending a
+        # thought as three quick messages — becomes one turn instead of
+        # three. A turn costs a full round trip over the whole conversation,
+        # so this is the cheapest latency win available. Applies to every
+        # source, not just chat: reactions and cron ticks coalesce too.
+        self.debounce_seconds = float(session_config.get("debounce_seconds", 0.35))
         self.compaction_trigger_tokens = int(
             session_config.get("compaction_trigger_tokens",
                                session_config.get("max_history_tokens", 100_000))
@@ -808,6 +817,16 @@ class SessionOrchestrator:
         """
         state = self._get_session(event.session_id)
 
+        # Idle: collect for a moment so a burst lands as one turn. Restarting
+        # the timer on each arrival means the window measures quiet, not age.
+        if not state.lock.locked() and self.debounce_seconds > 0:
+            state.debounce_batch.append(event)
+            if state.debounce_task is not None:
+                state.debounce_task.cancel()
+            state.debounce_task = asyncio.create_task(
+                self._run_after_debounce(event.session_id))
+            return None
+
         if state.lock.locked():
             if event.energy == "passive":
                 logger.info("Queuing passive event for %s: %s",
@@ -819,30 +838,33 @@ class SessionOrchestrator:
                 state.pending_steer.append(event)
             return None
 
-        async with state.lock:
-            cancel = asyncio.Event()
-            state.cancel = cancel
-            try:
-                result = await self._process_events(event.session_id, [event], cancel)
-            finally:
-                if state.cancel is cancel:
-                    state.cancel = None
+        return await self._run_turn(event.session_id, [event])
 
-        # Anything that could not be steered, plus queued passive events,
-        # drains as a single batched turn.
-        if state.pending_steer or state.passive_queue:
-            batch = state.pending_steer + state.passive_queue
-            state.pending_steer = []
-            state.passive_queue = []
-            logger.info("Draining %d deferred event(s) for %s", len(batch), event.session_id)
+    async def _run_turn(self, session_id: str, events: list[Event]) -> str | None:
+        """Run one turn, then drain anything that arrived while it ran."""
+        state = self._get_session(session_id)
+
+        async def _once(batch: list[Event]) -> str | None:
             async with state.lock:
                 cancel = asyncio.Event()
                 state.cancel = cancel
                 try:
-                    await self._process_events(event.session_id, batch, cancel)
+                    return await self._process_events(session_id, batch, cancel)
                 finally:
                     if state.cancel is cancel:
                         state.cancel = None
+
+        result = await _once(events)
+
+        # Events that could not be steered, plus queued passive ones, drain
+        # as a single batched turn. Loops because the drain turn can itself
+        # collect more.
+        while state.pending_steer or state.passive_queue:
+            batch = state.pending_steer + state.passive_queue
+            state.pending_steer = []
+            state.passive_queue = []
+            logger.info("Draining %d deferred event(s) for %s", len(batch), session_id)
+            await _once(batch)
 
         return result
 
@@ -988,6 +1010,22 @@ class SessionOrchestrator:
             return text
 
         raise RuntimeError(f"summary call exceeded {self.max_tool_iterations} tool iterations")
+
+    async def _run_after_debounce(self, session_id: str) -> str | None:
+        """Wait out the quiet window, then run the collected events as a turn."""
+        try:
+            await asyncio.sleep(self.debounce_seconds)
+        except asyncio.CancelledError:
+            return None
+        state = self._get_session(session_id)
+        batch, state.debounce_batch = state.debounce_batch, []
+        state.debounce_task = None
+        if not batch:
+            return None
+        if len(batch) > 1:
+            logger.info("Coalesced %d events into one turn for %s",
+                        len(batch), session_id)
+        return await self._run_turn(session_id, batch)
 
     async def _process_events(
         self,

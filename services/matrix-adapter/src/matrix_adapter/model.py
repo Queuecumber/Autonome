@@ -5,7 +5,7 @@ import json
 import logging
 import asyncio
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, Self, Union
@@ -416,15 +416,6 @@ class MatrixClient:
         self._on_message: Callable[[Message | Reaction | Redaction | RoomPins], Awaitable[None]] | None = None
         self._synced_rooms: set[str] = set()
 
-        # Text debounce. People send a thought as two or three quick
-        # messages; forwarding each one starts a separate turn, and a turn
-        # costs a full model round trip over the whole conversation. Holding
-        # briefly lets them coalesce into one. Only same-room, same-sender,
-        # plain-text messages merge; anything else flushes first.
-        self._text_debounce_seconds = float(
-            os.environ.get("MATRIX_TEXT_DEBOUNCE_SECONDS", "0.35"))
-        self._pending_text: dict[str, Message] = {}
-        self._pending_task: dict[str, asyncio.Task] = {}
 
         # Event type → handler dispatch table
         self._handlers: dict[type, Callable] = {
@@ -519,79 +510,15 @@ class MatrixClient:
         if not isinstance(event, UnknownEvent) and event.sender == self.user_id:
             return
         handler = self._handlers.get(type(event))
-        if not handler:
-            return
-        # Anything that isn't plain text ends the burst: flush first so the
-        # forwarded order matches the order they were sent.
-        if handler is not self._on_text and room.room_id in getattr(
-                self, "_pending_text", {}):
-            await self._flush_text(room.room_id)
-        await handler(room, event)
+        if handler:
+            await handler(room, event)
 
     # ── Per-type handlers ────────────────────────────────────
 
     async def _on_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
         msg = Message.from_nio(room, event)
         logger.info("Received text in %s from %s", msg.room.name, msg.sender.name)
-        if not self._on_message:
-            return
-        # getattr: MatrixClient is constructed via __new__ in tests, so the
-        # debounce fields may not exist. Absent window means dispatch now.
-        if getattr(self, "_text_debounce_seconds", 0.0) <= 0:
-            await self._on_message(msg)
-            return
-        await self._debounce_text(msg)
-
-    # ── Text debounce ────────────────────────────────────────
-
-    def _can_merge(self, pending: Message, incoming: Message) -> bool:
-        """Only plain consecutive text from the same person merges.
-
-        A relation (reply/edit/thread) or an attachment makes the message
-        structurally distinct, so it stays its own event.
-        """
-        return (
-            pending.sender.id == incoming.sender.id
-            and not pending.attachments and not incoming.attachments
-            and pending.relation is None and incoming.relation is None
-        )
-
-    async def _debounce_text(self, msg: Message) -> None:
-        if not hasattr(self, "_pending_text"):
-            self._pending_text, self._pending_task = {}, {}
-        key = msg.room.id
-        pending = self._pending_text.get(key)
-        if pending is not None and not self._can_merge(pending, msg):
-            await self._flush_text(key)
-            pending = None
-
-        if pending is None:
-            self._pending_text[key] = msg
-        else:
-            # Keep the newest identity — a read receipt on the latest event
-            # acknowledges everything before it — and join the bodies.
-            merged = replace(
-                msg, text="\n".join(t for t in (pending.text, msg.text) if t))
-            self._pending_text[key] = merged
-
-        task = self._pending_task.pop(key, None)
-        if task is not None:
-            task.cancel()
-        self._pending_task[key] = asyncio.create_task(self._flush_after(key))
-
-    async def _flush_after(self, key: str) -> None:
-        try:
-            await asyncio.sleep(self._text_debounce_seconds)
-        except asyncio.CancelledError:
-            return
-        await self._flush_text(key)
-
-    async def _flush_text(self, key: str) -> None:
-        task = self._pending_task.pop(key, None)
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
-        msg = self._pending_text.pop(key, None)
-        if msg is not None and self._on_message:
+        if self._on_message:
             await self._on_message(msg)
 
     async def _on_media(self, room: MatrixRoom, event) -> None:

@@ -154,9 +154,12 @@ def _stream(text: str):
     return _gen()
 
 
-def _orch(tmp_path, model: str = "test-model", **model_cfg):
+def _orch(tmp_path, model: str = "test-model", debounce: float = 0, **model_cfg):
+    # Debounce off by default so a turn runs inline and can be awaited;
+    # the window itself is covered by the debounce tests below.
     return SessionOrchestrator(
         config={"model": {"name": model, **model_cfg},
+                "session": {"debounce_seconds": debounce},
                 "binaries": {"store": str(tmp_path / "b"), "retention_days": 30}},
         session_dir=tmp_path,
     )
@@ -360,3 +363,78 @@ async def test_passive_event_still_waits_for_the_turn_to_end(tmp_path):
         assert [e.text for e in state.passive_queue] == ["✨"]
     finally:
         state.lock.release()
+
+
+# ── Event debounce ───────────────────────────────────────
+#
+# A burst — someone sending a thought as three quick messages — should cost
+# one turn, not three. A turn is a full model round trip over the whole
+# conversation, so this is the cheapest latency win available. It lives at
+# the event layer, so it covers every source, not just chat.
+
+
+@pytest.mark.asyncio
+async def test_burst_becomes_one_turn(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    orch = _orch(sessions_dir, debounce=0.05)
+    turns = []
+
+    async def fake_create(**kwargs):
+        turns.append(kwargs["messages"])
+        return _stream("ok")
+    orch.llm = MagicMock()
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
+
+    for text in ("hey", "you around?", "got a sec?"):
+        await orch.handle_event(Event(source="matrix", text=text, metadata={}))
+    await asyncio.sleep(0.3)
+
+    assert len(turns) == 1, f"expected one turn, got {len(turns)}"
+    # all three arrived, interleaved with their payloads in one user message
+    user = next(m for m in turns[0] if m["role"] == "user")
+    texts = [p["text"] for p in user["content"]]
+    assert "hey" in texts and "you around?" in texts and "got a sec?" in texts
+
+
+@pytest.mark.asyncio
+async def test_debounce_window_measures_quiet_not_age(tmp_path):
+    """Each arrival restarts the timer, so a steady trickle stays one turn."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    orch = _orch(sessions_dir, debounce=0.1)
+    turns = []
+
+    async def fake_create(**kwargs):
+        turns.append(kwargs["messages"])
+        return _stream("ok")
+    orch.llm = MagicMock()
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
+
+    for text in ("one", "two", "three"):
+        await orch.handle_event(Event(source="matrix", text=text, metadata={}))
+        await asyncio.sleep(0.05)          # shorter than the window
+    await asyncio.sleep(0.35)
+    assert len(turns) == 1
+
+
+@pytest.mark.asyncio
+async def test_debounce_applies_to_any_source(tmp_path):
+    """Not chat-specific: a cron tick and a message coalesce together."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    orch = _orch(sessions_dir, debounce=0.05)
+    _mock_llm(orch, "ok")
+
+    await orch.handle_event(Event(source="time", text="\u2728", metadata={}))
+    await orch.handle_event(Event(source="matrix", text="hi", metadata={}))
+    await asyncio.sleep(0.3)
+
+    history = SessionManager(store_dir=sessions_dir).load("main")
+    sources = [json.loads(m["content"])["source"]
+               for m in history if m.get("role") == "developer"]
+    assert "time" in sources and "matrix" in sources
