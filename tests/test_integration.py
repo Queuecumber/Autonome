@@ -4,6 +4,7 @@ Mocks the LLM (chat completions streaming) and verifies that an inbound
 event flows through to a final response and gets persisted to the session.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -261,3 +262,101 @@ async def test_tool_failure_becomes_output_not_a_dead_turn(tmp_path):
     assert result["type"] == "function_call_output"
     assert "video/mp4" in result["output"]
     assert media == []
+
+
+# ── Steering ─────────────────────────────────────────────
+#
+# An event arriving mid-turn is appended to the next tool result instead of
+# cancelling the turn: nothing in flight is lost and no partial state has to
+# be reconstructed. Role alternation is untouched — only existing content is
+# modified — so tool_call pairing can't be broken by delivery.
+
+from session_manager.orchestrator import _apply_steer_to_tool_results  # noqa: E402
+
+_STEER = [
+    {"role": "developer", "content": '{"event": "message", "source": "matrix"}'},
+    {"role": "user", "content": "are you still there?"},
+]
+
+
+def _tool_parts(msg):
+    return [json.loads(p["text"]) for p in msg["content"][1:]]
+
+
+def test_steer_turns_tool_content_into_parts_without_restructuring():
+    msgs = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "x", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "first"},
+        {"role": "tool", "tool_call_id": "b", "content": "second"},
+    ]
+    before = [m["role"] for m in msgs]
+    assert _apply_steer_to_tool_results(msgs, 2, _STEER) is True
+    assert [m["role"] for m in msgs] == before            # no message inserted
+    assert msgs[1]["content"] == "first"                  # earlier result untouched
+    parts = msgs[-1]["content"]
+    assert parts[0] == {"type": "text", "text": "second"}  # tool output stays first
+    # the events keep the exact shape they'd have had on their own
+    assert _tool_parts(msgs[-1]) == _STEER
+
+
+def test_steer_batches_multiple_events_in_order():
+    msgs = [{"role": "tool", "tool_call_id": "a", "content": "out"}]
+    two = _STEER + [{"role": "developer", "content": '{"event": "reaction"}'},
+                    {"role": "user", "content": "👍"}]
+    assert _apply_steer_to_tool_results(msgs, 1, two) is True
+    assert _tool_parts(msgs[0]) == two
+
+
+def test_steer_reports_failure_when_no_tool_result_to_carry_it():
+    """Caller must fall back to delivering it as a normal next-turn event."""
+    msgs = [{"role": "assistant", "content": "done"}]
+    assert _apply_steer_to_tool_results(msgs, 1, _STEER) is False
+    assert msgs == [{"role": "assistant", "content": "done"}]
+
+
+def test_steer_extends_already_multipart_tool_content():
+    msgs = [{"role": "tool", "tool_call_id": "a",
+             "content": [{"type": "text", "text": "body"}]}]
+    assert _apply_steer_to_tool_results(msgs, 1, _STEER) is True
+    assert msgs[0]["content"][0] == {"type": "text", "text": "body"}
+    assert _tool_parts(msgs[0]) == _STEER
+
+
+def test_steer_is_a_noop_with_no_batch_or_no_events():
+    msgs = [{"role": "tool", "tool_call_id": "a", "content": "x"}]
+    assert _apply_steer_to_tool_results(msgs, 0, _STEER) is False
+    assert _apply_steer_to_tool_results(msgs, 1, []) is False
+
+
+@pytest.mark.asyncio
+async def test_midturn_event_steers_instead_of_cancelling(tmp_path):
+    """A busy session parks the event for delivery rather than setting cancel."""
+    orch = _orch(tmp_path)
+    state = orch._get_session("main")
+    await state.lock.acquire()
+    try:
+        cancel = asyncio.Event()
+        state.cancel = cancel
+        assert await orch.handle_event(
+            Event(source="matrix", text="you there?", metadata={})) is None
+        assert not cancel.is_set()                      # turn was not torn down
+        assert [e.text for e in state.pending_steer] == ["you there?"]
+        assert state.passive_queue == []
+    finally:
+        state.lock.release()
+
+
+@pytest.mark.asyncio
+async def test_passive_event_still_waits_for_the_turn_to_end(tmp_path):
+    """Low-value events shouldn't add noise to a turn already in progress."""
+    orch = _orch(tmp_path)
+    state = orch._get_session("main")
+    await state.lock.acquire()
+    try:
+        await orch.handle_event(
+            Event(source="time", text="✨", energy="passive", metadata={}))
+        assert state.pending_steer == []
+        assert [e.text for e in state.passive_queue] == ["✨"]
+    finally:
+        state.lock.release()
