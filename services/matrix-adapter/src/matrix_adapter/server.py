@@ -357,6 +357,28 @@ async def typing_indicator(room_id: str, stop: bool = False) -> None:
 
 
 @mcp.tool
+async def acknowledge(room_id: str, event_id: str) -> None:
+    """Mark a message read and start typing, in one call.
+
+    The usual opening move when you intend to reply: it tells the sender you
+    have seen the message and are composing. Equivalent to `read_receipt`
+    followed by `typing_indicator`, but a single round trip.
+
+    Only use this when you actually intend to reply — a typing indicator you
+    never follow through on hangs until it times out. If you are only
+    catching up and may not respond, use `read_receipt` on its own.
+
+    Args:
+        room_id: The Matrix room.
+        event_id: The message being acknowledged.
+    """
+    await asyncio.gather(
+        client.send_read_receipt(room_id, event_id),
+        client.send_typing(room_id, typing=True),
+    )
+
+
+@mcp.tool
 async def get_message(room_id: str, event_id: str) -> Message:
     """Fetch a Matrix message by id.
 

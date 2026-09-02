@@ -1282,3 +1282,86 @@ def _handler_types(model):
         r"self\._handlers: dict\[type, Callable\] = \{(.*?)\n        \}", src, re.S
     ).group(1)
     return {getattr(model, cls) for cls, _ in re.findall(r"(\w+): self\.(\w+)", table)}
+
+
+# ── Text debounce ────────────────────────────────────────
+#
+# People send a thought as two or three quick messages. Forwarding each one
+# starts a separate turn, and a turn costs a full model round trip over the
+# whole conversation — so a burst is held briefly and coalesced.
+
+
+def _debounce_client(seconds=0.05):
+    import matrix_adapter.model as model
+    c = model.MatrixClient.__new__(model.MatrixClient)
+    c._text_debounce_seconds = seconds
+    c._pending_text = {}
+    c._pending_task = {}
+    c.user_id = "@agent:x"
+    c.allowed_rooms = None
+    sent = []
+
+    async def on_message(m):
+        sent.append(m)
+    c._on_message = on_message
+    return c, sent
+
+
+def _msg(text, *, sender="@max:x", room="!r:x", event_id="e1", attachments=None, relation=None):
+    import matrix_adapter.model as model
+    return model.Message(
+        sender=model.Sender(id=sender, name="Max", avatar_url=None),
+        room=model.Room(id=room, display_name="Max", canonical_alias=None,
+                        encrypted=True, member_count=2),
+        event_id=event_id, text=text,
+        attachments=attachments or [], relation=relation)
+
+
+@pytest.mark.asyncio
+async def test_rapid_messages_coalesce_into_one_event():
+    c, sent = _debounce_client()
+    await c._debounce_text(_msg("hey", event_id="e1"))
+    await c._debounce_text(_msg("you around?", event_id="e2"))
+    await asyncio.sleep(0.15)
+    assert len(sent) == 1
+    assert sent[0].text == "hey\nyou around?"
+    # newest identity survives: a receipt on the latest covers the earlier one
+    assert sent[0].event_id == "e2"
+
+
+@pytest.mark.asyncio
+async def test_a_single_message_still_arrives():
+    c, sent = _debounce_client()
+    await c._debounce_text(_msg("just one"))
+    await asyncio.sleep(0.15)
+    assert [m.text for m in sent] == ["just one"]
+
+
+@pytest.mark.asyncio
+async def test_messages_from_a_different_sender_do_not_merge():
+    c, sent = _debounce_client()
+    await c._debounce_text(_msg("from max", sender="@max:x"))
+    await c._debounce_text(_msg("from someone else", sender="@other:x"))
+    await asyncio.sleep(0.15)
+    assert [m.text for m in sent] == ["from max", "from someone else"]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_stays_its_own_event():
+    """A relation makes the message structurally distinct — merging it would
+    lose which message was being replied to."""
+    import matrix_adapter.model as model
+    c, sent = _debounce_client()
+    rel = model.MessageRelation(related_event_id="x", relation_type="m.in_reply_to")
+    await c._debounce_text(_msg("plain"))
+    await c._debounce_text(_msg("a reply", relation=rel))
+    await asyncio.sleep(0.15)
+    assert [m.text for m in sent] == ["plain", "a reply"]
+
+
+@pytest.mark.asyncio
+async def test_debounce_can_be_disabled():
+    c, sent = _debounce_client(seconds=0)
+    import matrix_adapter.model as model
+    # _on_text short-circuits when the window is zero
+    assert c._text_debounce_seconds == 0
