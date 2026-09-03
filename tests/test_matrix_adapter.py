@@ -1209,18 +1209,17 @@ async def test_forward_events_retries_on_failure(monkeypatch):
     from matrix_adapter import server as matrix_server
 
     matrix_server._event_queue = asyncio.Queue()
-    matrix_server.session_manager_url = "http://sm"
 
     calls = 0
-    async def flaky_post(url, json):
+    async def flaky_push(level, data, logger=None):
         nonlocal calls
         calls += 1
         if calls < 3:
             raise RuntimeError("session-manager down")
-        return MagicMock()
 
-    matrix_server._http = MagicMock()
-    matrix_server._http.post = AsyncMock(side_effect=flaky_post)
+    session = MagicMock()
+    session.send_log_message = AsyncMock(side_effect=flaky_push)
+    matrix_server._session = session
 
     # Don't actually sleep between retries.
     monkeypatch.setattr(matrix_server.asyncio, "sleep", AsyncMock())

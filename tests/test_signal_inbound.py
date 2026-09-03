@@ -3,10 +3,13 @@
 import pytest
 from unittest.mock import AsyncMock
 
-import httpx
-
 from signal_adapter.model import SignalClient, Message, Reaction, Attachment
 from signal_adapter import server as signal_mcp
+
+
+def _pushed(mod):
+    """The event payload from the last notification the adapter pushed."""
+    return mod._session.send_log_message.call_args.kwargs["data"]
 
 
 @pytest.fixture
@@ -19,9 +22,9 @@ def setup_signal():
     )
     c._http = AsyncMock()
     signal_mcp.client = c
-    signal_mcp.session_manager_url = "http://localhost:5000"
-    signal_mcp._http = AsyncMock()
-    signal_mcp._http.post = AsyncMock()
+    # Events ride out as MCP notifications on the connected client session.
+    signal_mcp._session = AsyncMock()
+    signal_mcp._session.send_log_message = AsyncMock()
     return signal_mcp
 
 
@@ -35,8 +38,10 @@ async def test_on_message_pushes_event(setup_signal):
 
     await setup_signal.on_message(msg)
 
-    setup_signal._http.post.assert_called_once()
-    event = setup_signal._http.post.call_args.kwargs["json"]
+    setup_signal._session.send_log_message.assert_called_once()
+    assert (setup_signal._session.send_log_message.call_args.kwargs["logger"]
+            == signal_mcp.EVENT_LOGGER)
+    event = _pushed(setup_signal)
     assert event["source"] == "signal"
     # Adapters no longer dictate session_id — events route to the default.
     assert "session_id" not in event
@@ -55,7 +60,7 @@ async def test_on_message_reaction(setup_signal):
 
     await setup_signal.on_message(reaction)
 
-    event = setup_signal._http.post.call_args.kwargs["json"]
+    event = _pushed(setup_signal)
     # Reactions are tagged event_type="reaction"; the structured payload
     # (type/emoji/target) is JSON-encoded into text.
     assert event["event_type"] == "reaction"
@@ -76,7 +81,7 @@ async def test_on_message_attachment(setup_signal):
 
     await setup_signal.on_message(msg)
 
-    event = setup_signal._http.post.call_args.kwargs["json"]
+    event = _pushed(setup_signal)
     assert event["text"] == "Check this"
     assert len(event["metadata"]["attachments"]) == 1
     assert event["metadata"]["attachments"][0]["filename"] == "doc.pdf"

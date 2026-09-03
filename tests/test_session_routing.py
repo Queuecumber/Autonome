@@ -99,17 +99,12 @@ async def test_time_fire_omits_session_id_when_unset(monkeypatch):
 
     posted: dict = {}
 
-    class _Resp:
-        def raise_for_status(self): pass
+    class _Session:
+        async def send_log_message(self, level, data, logger=None):
+            posted["json"] = data
+            posted["logger"] = logger
 
-    class _Http:
-        async def post(self, url, json):
-            posted["url"] = url
-            posted["json"] = json
-            return _Resp()
-
-    monkeypatch.setattr(time_server, "_http", _Http(), raising=False)
-    monkeypatch.setattr(time_server, "session_manager_url", "http://test", raising=False)
+    monkeypatch.setattr(time_server, "_session", _Session(), raising=False)
 
     sched = Schedule(id="continuity", cron="*/20 * * * *", message="✨")
     await time_server._fire(sched)
@@ -125,16 +120,12 @@ async def test_time_fire_includes_session_id_when_set(monkeypatch):
 
     posted: dict = {}
 
-    class _Resp:
-        def raise_for_status(self): pass
+    class _Session:
+        async def send_log_message(self, level, data, logger=None):
+            posted["json"] = data
+            posted["logger"] = logger
 
-    class _Http:
-        async def post(self, url, json):
-            posted["json"] = json
-            return _Resp()
-
-    monkeypatch.setattr(time_server, "_http", _Http(), raising=False)
-    monkeypatch.setattr(time_server, "session_manager_url", "http://test", raising=False)
+    monkeypatch.setattr(time_server, "_session", _Session(), raising=False)
 
     sched = Schedule(
         id="custom-cron", cron="0 9 * * *", message="hi",
