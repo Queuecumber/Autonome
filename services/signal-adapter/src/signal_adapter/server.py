@@ -11,9 +11,10 @@ import asyncio
 import base64
 import logging
 import os
+from typing import Any
 
-import httpx
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from fastmcp.resources import ResourceContent, ResourceResult
 from pydantic import Base64Bytes
 
@@ -24,8 +25,6 @@ logger = logging.getLogger(__name__)
 # ── Client and state (created in main()) ─────────────────
 
 client: SignalClient
-session_manager_url: str
-_http: httpx.AsyncClient  # timeout must exceed LLM response time
 
 mcp = FastMCP("signal", instructions=(
     "Signal messaging. Use these tools to communicate with users on Signal. "
@@ -170,11 +169,50 @@ async def update_profile_avatar(avatar: Base64Bytes) -> None:
 
 # ── Inbound event forwarding ─────────────────────────────
 
+# Events go out as MCP log notifications tagged with EVENT_LOGGER, on the
+# session the client opened to us: the one standard server->client channel
+# that is fire-and-forget and carries arbitrary structured data. A client
+# that doesn't know us just sees a log line.
+
+EVENT_LOGGER = "autonome/event"
+
+_session: Any = None
+
+
+class _EventChannel(Middleware):
+    """Capture the client's session so events can be pushed to it.
+
+    Events fire with no request context of their own, and FastMCP exposes no
+    session registry — but every connection opens with initialize, so that
+    hook is where a pushable session can be caught. Re-captured on each
+    connect, so a reconnecting client replaces a session that is now dead.
+    """
+
+    async def on_initialize(self, context, call_next):
+        global _session
+        result = await call_next(context)
+        if context.fastmcp_context is not None:
+            _session = context.fastmcp_context.session
+            logger.info("Event channel attached")
+        return result
+
+
+mcp.add_middleware(_EventChannel())
+
+
+async def _emit_event(payload: dict) -> None:
+    """Push one event. Raises if there is no channel, matching the failure
+    handling the HTTP post it replaced already had."""
+    if _session is None:
+        raise RuntimeError("no event channel: client has not connected yet")
+    await _session.send_log_message(level="info", data=payload, logger=EVENT_LOGGER)
+
+
 async def on_message(msg: Message | Reaction) -> None:
     """Push a message or reaction to the session manager."""
     logger.info(f"Received: {msg}")
     try:
-        await _http.post(f"{session_manager_url}/event", json=msg.to_event())
+        await _emit_event(msg.to_event())
     except Exception as e:
         logger.error(f"Failed to push event to session manager: {e}")
 
@@ -182,7 +220,7 @@ async def on_message(msg: Message | Reaction) -> None:
 # ── Entrypoint ───────────────────────────────────────────
 
 async def main():
-    global client, session_manager_url, _http
+    global client
 
     logging.basicConfig(
         level=logging.INFO,
@@ -190,7 +228,6 @@ async def main():
     )
 
     signal_cli_url = os.environ.get("SIGNAL_CLI_URL", "http://localhost:8080")
-    session_manager_url = os.environ.get("SESSION_MANAGER_URL", "http://localhost:5000")
     account = os.environ.get("SIGNAL_ACCOUNT", "")
     allow_from = os.environ.get("ALLOW_FROM", "").split(",") if os.environ.get("ALLOW_FROM") else []
     mcp_port = int(os.environ.get("CHANNEL_MCP_PORT", "8100"))
@@ -200,7 +237,6 @@ async def main():
         account=account,
         allow_from=allow_from,
     )
-    _http = httpx.AsyncClient(timeout=600)
 
     try:
         await asyncio.gather(
@@ -208,7 +244,6 @@ async def main():
             mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port),
         )
     finally:
-        await _http.aclose()
         await client.close()
 
 
