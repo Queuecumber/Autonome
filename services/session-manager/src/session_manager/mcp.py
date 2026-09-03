@@ -33,44 +33,21 @@ def _is_method_not_found(err: McpError) -> bool:
     return getattr(getattr(err, "error", None), "code", None) == METHOD_NOT_FOUND
 
 
-try:  # 1.x transport: takes headers (and auth/timeout) directly
-    from mcp.client.streamable_http import (  # type: ignore[attr-defined]
-        streamablehttp_client as _legacy_http_client,
-    )
-except ImportError:  # pragma: no cover - removed in 2.x
-    _legacy_http_client = None
-
-try:  # 2.x transport: configuration moved onto a caller-supplied httpx client
-    from mcp.client.streamable_http import (  # type: ignore[attr-defined]
-        streamable_http_client as _modern_http_client,
-    )
-except ImportError:  # pragma: no cover - absent in older 1.x
-    _modern_http_client = None
+from mcp.client.streamable_http import streamable_http_client
 
 
 @asynccontextmanager
 async def _open_transport(url: str, headers: dict[str, str] | None):
-    """Open a streamable-HTTP transport across both SDK generations.
+    """Open a streamable-HTTP transport with auth headers applied.
 
-    These are not two spellings of one function. 1.x takes `headers`
-    directly; 2.x dropped that parameter and expects a preconfigured httpx
-    client instead. Aliasing one to the other silently drops auth, so both
-    shapes are handled explicitly.
+    The transport's own `headers` parameter is deprecated: configuration
+    belongs on a caller-supplied httpx client instead. We own the client so
+    we also own closing it.
     """
-    if _legacy_http_client is not None:
-        async with _legacy_http_client(url, headers=headers) as transport:
+    async with httpx.AsyncClient(headers=headers or {}) as client:
+        async with streamable_http_client(url, http_client=client) as transport:
             yield transport
-        return
 
-    if _modern_http_client is None:  # pragma: no cover - neither available
-        raise RuntimeError("mcp SDK exposes no streamable-HTTP client")
-
-    client = httpx.AsyncClient(headers=headers or {})
-    try:
-        async with _modern_http_client(url, http_client=client) as transport:
-            yield transport
-    finally:
-        await client.aclose()
 
 POINTER_PREFIX = "pointer://"
 
