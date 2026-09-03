@@ -598,7 +598,8 @@ class SessionOrchestrator:
         """
         for name, spec in mcp_servers.items():
             url, headers = parse_server_spec(name, spec)
-            conn = MCPConnection(name, url, headers=headers)
+            conn = MCPConnection(name, url, headers=headers,
+                                 on_event=self._dispatch_pushed_event)
             try:
                 await conn.connect()
                 self.mcp_connections[name] = conn
@@ -616,6 +617,22 @@ class SessionOrchestrator:
         logger.info("Connected to %d MCP servers, %d tools total, schemes: %s",
                     len(self.mcp_connections), len(self.openai_tools),
                     sorted(self._scheme_to_mcp.keys()))
+
+    def _dispatch_pushed_event(self, data: dict) -> None:
+        """Turn an event pushed over MCP into a turn.
+
+        Fire-and-forget: a notification has no response, so the adapter is
+        already gone by the time this runs and there is nothing to report a
+        failure back to. Malformed payloads are dropped with a warning
+        rather than raising into the connection's read loop, which would
+        tear down the MCP session for every other event too.
+        """
+        try:
+            event = Event.from_dict(data)
+        except (ValueError, TypeError) as e:
+            logger.warning("Discarding malformed pushed event: %s", e)
+            return
+        asyncio.create_task(self.handle_event(event))
 
     async def _register_schemes(self, conn: MCPConnection) -> None:
         """Register URI schemes this server owns via its resource templates.

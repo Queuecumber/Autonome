@@ -51,6 +51,21 @@ async def _open_transport(url: str, headers: dict[str, str] | None):
 
 POINTER_PREFIX = "pointer://"
 
+# Adapters push inbound events as log notifications tagged with this logger
+# name. `notifications/message` is the one standard server->client channel
+# that is fire-and-forget and carries arbitrary structured data, which is
+# exactly the shape of an event: we never want a reply. Tagging by logger
+# keeps it a normal notification to any other client, which just sees a log
+# line it is free to ignore.
+EVENT_LOGGER = "autonome/event"
+
+_LOG_LEVELS = {
+    "debug": logging.DEBUG, "info": logging.INFO, "notice": logging.INFO,
+    "warning": logging.WARNING, "error": logging.ERROR,
+    "critical": logging.CRITICAL, "alert": logging.CRITICAL,
+    "emergency": logging.CRITICAL,
+}
+
 # Mirrors workspace_fs/server.py's _is_text_type — kept duplicated to avoid
 # coupling MCP servers to each other. If this list grows, sync both copies.
 _TEXT_TYPES = {"application/json", "application/xml", "application/yaml", "application/x-yaml"}
@@ -367,12 +382,14 @@ class MCPConnection:
     """Manages a persistent connection to an MCP server."""
 
     def __init__(self, name: str, url: str, prefix: str = "aptool",
-                 headers: dict[str, str] | None = None):
+                 headers: dict[str, str] | None = None,
+                 on_event: Callable[[dict], None] | None = None):
         self.name = name
         self.url = url
         # Never logged: these carry bearer tokens and API keys.
         self.headers = dict(headers) if headers else None
         self.prefix = prefix
+        self.on_event = on_event
         self.session: ClientSession | None = None
         self.capabilities: Any = None
         self.tools: list[dict] = []
@@ -383,6 +400,26 @@ class MCPConnection:
         self._shutdown = asyncio.Event()
         self._error: BaseException | None = None
         self._task: asyncio.Task | None = None
+
+    async def _on_log(self, params) -> None:
+        """Route a log notification: our events in, everything else logged.
+
+        Server logs are worth surfacing rather than dropping — an adapter
+        with no other channel to us can say something went wrong.
+        """
+        if params.logger == EVENT_LOGGER and self.on_event is not None:
+            data = params.data
+            if not isinstance(data, dict):
+                logger.warning("MCP [%s]: event payload was %s, not an object",
+                               self.name, type(data).__name__)
+                return
+            try:
+                self.on_event(data)
+            except Exception as e:
+                logger.error("MCP [%s]: event dispatch failed: %r", self.name, e)
+            return
+        logger.log(_LOG_LEVELS.get(params.level, logging.INFO),
+                   "MCP [%s] %s: %s", self.name, params.logger or "-", params.data)
 
     async def connect(self) -> None:
         """Start the connection task and wait until ready or failed."""
@@ -396,7 +433,7 @@ class MCPConnection:
         try:
             async with _open_transport(self.url, self.headers) as transport:
                 read, write = transport[0], transport[1]
-                async with ClientSession(read, write) as session:
+                async with ClientSession(read, write, logging_callback=self._on_log) as session:
                     self.session = session
                     init_result = await session.initialize()
 
