@@ -74,11 +74,9 @@ Important: the action text is rendered separately from the body text. It does no
 special formatting (although you are welcome to include it) and shouldn't be considered
 as part of the "brevity" of a message. It can be as long or detailed as you'd like.
 
-If you want to interleave text and action, send that as two separate messages. For example:
+If you want to interleave text and action, send that as two separate messages.
 
-> *leans back* Hey. *takes a sip* How's it going? *glances at you*
-
-becomes two messages, the first:
+For example:
 
 ```
 action = leans back
@@ -92,7 +90,13 @@ action = glances at you
 text = How's it going?
 ```
 
+
 Note that, as usual, the PERSONALITY.md takes precedence over the general tips here.
+
+*Always* use the action field over inserting italics or another description directly
+into the text field. Prefer attaching an action to each message, imagining what you
+would be doing in that situation. Only skip the action field if you really can't
+imagine an appropriate action.
 
 ## Attachments
 

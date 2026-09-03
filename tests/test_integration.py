@@ -1,20 +1,21 @@
 """Smoke test for the orchestrator's event-handling pipeline.
 
-Mocks the LLM (Responses streaming) and verifies that an inbound event
-flows through to a final response and gets persisted to the session.
+Mocks the LLM (chat completions streaming) and verifies that an inbound
+event flows through to a final response and gets persisted to the session.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from session_manager.event import Event
-from session_manager.orchestrator import SessionOrchestrator, _to_input_items
+from session_manager.orchestrator import SessionOrchestrator, _to_chat_messages
 from session_manager.session import SessionManager
 
-# One turn as persisted: an event pair, reasoning before a tool call, the
-# tool result, then reasoning before the final text.
+# One turn as persisted: an event pair, reasoning, a tool call, its result,
+# then the reply.
 _TURN = [
     {"role": "developer", "content": '{"event": "message"}'},
     {"role": "user", "content": "what time is it?"},
@@ -22,98 +23,146 @@ _TURN = [
     {"type": "reasoning", "content": "I should check the clock."},
     {"type": "function_call", "call_id": "c1", "name": "get_time", "arguments": "{}"},
     {"type": "function_call_output", "call_id": "c1", "output": "13:00"},
-    {"type": "reasoning", "content": "Now answer."},
     {"role": "assistant", "content": "It's 13:00."},
 ]
 
 
-# ── Input construction ───────────────────────────────────
+# ── Wire translation ─────────────────────────────────────
 
 
-def test_to_input_items_passes_session_items_through():
-    """The session format is the Responses format: function_call and
-    function_call_output go back on the wire exactly as stored."""
-    items = _to_input_items(_TURN)
-    assert items == [
+def test_event_and_text_become_one_multipart_user_message():
+    """Context and text are separate items in the session file but one
+    message on the wire, so the payload each text belongs to is explicit
+    rather than positional."""
+    msgs = _to_chat_messages(_TURN)
+    assert msgs[0] == {"role": "user", "content": [
+        {"type": "text", "text": '{"event": "message"}'},
+        {"type": "text", "text": "what time is it?"},
+    ]}
+
+
+def test_batched_events_extend_the_same_message():
+    """Several queued events draining together interleave into one message
+    rather than emitting a pair each."""
+    batched = [
         {"role": "developer", "content": '{"event": "message"}'},
-        {"role": "user", "content": "what time is it?"},
-        {"type": "function_call", "call_id": "c1", "name": "get_time", "arguments": "{}"},
-        {"type": "function_call_output", "call_id": "c1", "output": "13:00"},
-        {"role": "assistant", "content": "It's 13:00."},
+        {"role": "user", "content": "Hello"},
+        {"role": "developer", "content": '{"event": "continuity"}'},
+        {"role": "user", "content": "✨"},
     ]
+    msgs = _to_chat_messages(batched)
+    assert len(msgs) == 1
+    assert [p["text"] for p in msgs[0]["content"]] == [
+        '{"event": "message"}', "Hello", '{"event": "continuity"}', "✨"]
 
 
-def test_to_input_items_drops_comments_and_reasoning():
-    """Comments are telemetry. Reasoning is persisted as flat text, not in
-    the item shape the API returns, so it can't be replayed verbatim."""
-    kept = _to_input_items(_TURN)
-    assert not any(i.get("type") in ("comment", "reasoning") for i in kept)
+def test_nothing_rides_as_developer_on_the_wire():
+    """Chat completions coerces `developer` to `system`, which means a
+    system message mid-conversation — rejected by strict templates and
+    worthless on permissive ones. The role stays a session-file marker."""
+    assert all(m["role"] != "developer" for m in _to_chat_messages(_TURN))
 
 
-def test_to_input_items_can_remap_the_developer_role():
-    """Escape hatch for a backend that rejects developer items."""
-    assert _to_input_items(_TURN, developer_role="user")[0] == {
-        "role": "user", "content": '{"event": "message"}'}
+def test_comments_are_never_sent():
+    """Comments are telemetry — usage counts and boundaries."""
+    assert "usage" not in json.dumps(_to_chat_messages(_TURN))
 
 
-def _orch(tmp_path, model: str = "test-model", **model_cfg):
-    return SessionOrchestrator(
-        config={"model": {"name": model, **model_cfg},
-                "binaries": {"store": str(tmp_path / "b"), "retention_days": 30}},
-        session_dir=tmp_path,
-    )
+def test_reasoning_rides_back_on_the_assistant_message():
+    """Models trained with preserved thinking history read a transcript
+    where no prior turn reasoned as a cue to stop reasoning themselves,
+    which then persists nothing and makes the next turn equally bare."""
+    call = next(m for m in _to_chat_messages(_TURN) if m.get("tool_calls"))
+    assert call["reasoning_content"] == "I should check the clock."
+    # never as a standalone item — it belongs to the assistant turn
+    assert all(m["role"] != "reasoning" for m in _to_chat_messages(_TURN))
 
 
-def test_developer_role_defaults_to_developer(tmp_path):
-    """Responses keeps developer distinct and in position, so it's the
-    default here — unlike chat completions, which folds it into system."""
-    assert _orch(tmp_path).developer_role == "developer"
-    assert _orch(tmp_path, developer_role="user").developer_role == "user"
+def test_reasoning_replay_can_be_disabled():
+    msgs = _to_chat_messages(_TURN, replay_reasoning=False)
+    assert "I should check the clock" not in json.dumps(msgs)
 
 
-def test_developer_role_rejects_unknown_value(tmp_path):
-    with pytest.raises(ValueError, match="developer_role"):
-        _orch(tmp_path, developer_role="system")
+def test_replay_reasoning_defaults_on(tmp_path):
+    assert _orch(tmp_path).replay_reasoning is True
+    assert _orch(tmp_path, replay_reasoning=False).replay_reasoning is False
 
 
-# ── Responses stream mocks ───────────────────────────────
+def test_tool_calls_and_results_round_trip():
+    msgs = _to_chat_messages(_TURN)
+    call = next(m for m in msgs if m.get("tool_calls"))
+    assert call["tool_calls"][0]["function"]["name"] == "get_time"
+    result = next(m for m in msgs if m["role"] == "tool")
+    assert result["tool_call_id"] == "c1" and result["content"] == "13:00"
+    assert msgs[-1] == {"role": "assistant", "content": "It's 13:00."}
 
 
-def _message_item(text: str):
-    item = MagicMock()
-    item.type = "message"
-    content = MagicMock()
-    content.text = text
-    item.content = [content]
-    return item
+def test_parallel_tool_calls_merge_into_one_assistant_message():
+    """A turn that made three calls persists three items; on the wire they
+    belong to one assistant message so each result can be matched to it."""
+    items = [
+        {"type": "function_call", "call_id": "a", "name": "one", "arguments": "{}"},
+        {"type": "function_call", "call_id": "b", "name": "two", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "a", "output": "1"},
+        {"type": "function_call_output", "call_id": "b", "output": "2"},
+    ]
+    msgs = _to_chat_messages(items)
+    assert len(msgs[0]["tool_calls"]) == 2
+    assert [m["role"] for m in msgs] == ["assistant", "tool", "tool"]
 
 
-def _usage():
+# ── Chat completions stream mocks ────────────────────────
+
+
+def _chunk(*, content=None, tool_call=None, finish=None):
+    chunk = MagicMock()
+    delta = MagicMock()
+    delta.content = content
+    delta.reasoning_content = None
+    delta.tool_calls = None
+    if tool_call is not None:
+        tc = MagicMock()
+        tc.index = 0
+        tc.id = tool_call["id"]
+        tc.function = MagicMock()
+        tc.function.name = tool_call["name"]
+        tc.function.arguments = tool_call["arguments"]
+        delta.tool_calls = [tc]
+    choice = MagicMock()
+    choice.delta = delta
+    choice.finish_reason = finish
+    chunk.choices = [choice]
+    chunk.usage = None
+    return chunk
+
+
+def _usage_chunk():
+    chunk = MagicMock()
+    chunk.choices = []
     u = MagicMock()
-    u.input_tokens, u.output_tokens, u.total_tokens = 100, 50, 150
-    u.input_tokens_details = MagicMock(cached_tokens=0)
-    u.output_tokens_details = MagicMock(reasoning_tokens=0)
-    return u
+    u.prompt_tokens, u.completion_tokens, u.total_tokens = 100, 50, 150
+    u.prompt_tokens_details = MagicMock(cached_tokens=0)
+    u.completion_tokens_details = MagicMock(reasoning_tokens=0)
+    chunk.usage = u
+    return chunk
 
 
 def _stream(text: str):
-    """Async iterator of Responses events for a plain text answer."""
-    item = _message_item(text)
-    response = MagicMock()
-    response.output = [item]
-    response.usage = _usage()
-
     async def _gen():
-        done = MagicMock()
-        done.type = "response.output_item.done"
-        done.item = item
-        yield done
-        completed = MagicMock()
-        completed.type = "response.completed"
-        completed.response = response
-        yield completed
-
+        yield _chunk(content=text, finish="stop")
+        yield _usage_chunk()
     return _gen()
+
+
+def _orch(tmp_path, model: str = "test-model", debounce: float = 0, **model_cfg):
+    # Debounce off by default so a turn runs inline and can be awaited;
+    # the window itself is covered by the debounce tests below.
+    return SessionOrchestrator(
+        config={"model": {"name": model, **model_cfg},
+                "session": {"debounce_seconds": debounce},
+                "binaries": {"store": str(tmp_path / "b"), "retention_days": 30}},
+        session_dir=tmp_path,
+    )
 
 
 def _mock_llm(orch, text: str, captured: dict | None = None):
@@ -123,8 +172,9 @@ def _mock_llm(orch, text: str, captured: dict | None = None):
             captured.update(kwargs)
         return _stream(text)
     orch.llm = MagicMock()
-    orch.llm.responses = MagicMock()
-    orch.llm.responses.create = fake_create
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
 
 
 @pytest.fixture(autouse=True)
@@ -137,8 +187,6 @@ def _api_key(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_event_flows_to_response_and_persists(tmp_path):
-    """End-to-end: build an event, hand it to the orchestrator, get a
-    response back, confirm it lands in the session file."""
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
     orch = _orch(sessions_dir)
@@ -153,9 +201,7 @@ async def test_event_flows_to_response_and_persists(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_turn_is_sent_as_responses_input_not_messages(tmp_path):
-    """The call carries `input` + `instructions`, never chat `messages`, and
-    developer events keep their own role."""
+async def test_turn_is_sent_as_chat_messages_with_no_developer_role(tmp_path):
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
     orch = _orch(sessions_dir)
@@ -163,14 +209,23 @@ async def test_turn_is_sent_as_responses_input_not_messages(tmp_path):
     _mock_llm(orch, "ok", captured)
 
     await orch.handle_event(Event(source="matrix", text="first", metadata={}))
-    assert "messages" not in captured
-    assert isinstance(captured["instructions"], str)
-    assert any(i.get("role") == "developer" for i in captured["input"])
+    msgs = captured["messages"]
+    assert "input" not in captured and "instructions" not in captured
+    assert msgs[0]["role"] == "system"
+    assert all(m["role"] != "developer" for m in msgs)
+    # The synthetic boot event and the real event batch into ONE message:
+    # two payload/text pairs, four parts, no second user message.
+    users = [m for m in msgs if m["role"] == "user"]
+    assert len(users) == 1
+    parts = users[0]["content"]
+    assert [p["type"] for p in parts] == ["text"] * 4
+    assert json.loads(parts[0]["text"])["event"] == "boot"
+    assert json.loads(parts[2]["text"])["event"] == "message"
+    assert parts[3]["text"] == "first"
 
 
 @pytest.mark.asyncio
-async def test_usage_comment_uses_responses_token_fields(tmp_path):
-    """Responses reports input_tokens/output_tokens, not prompt/completion."""
+async def test_usage_comment_uses_chat_token_fields(tmp_path):
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
     orch = _orch(sessions_dir)
@@ -184,14 +239,12 @@ async def test_usage_comment_uses_responses_token_fields(tmp_path):
 
 @pytest.mark.asyncio
 async def test_explicit_session_id_routes(tmp_path):
-    """An event with an explicit session_id lands there, not in main."""
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
     orch = _orch(sessions_dir)
     _mock_llm(orch, "ack")
 
     await orch.handle_event(Event(session_id="cron-target", source="time", text="tick"))
-
     mgr = SessionManager(store_dir=sessions_dir)
     assert mgr.load("cron-target") != []
     assert mgr.load("main") == []
@@ -200,8 +253,7 @@ async def test_explicit_session_id_routes(tmp_path):
 @pytest.mark.asyncio
 async def test_tool_failure_becomes_output_not_a_dead_turn(tmp_path):
     """handle_event runs in a bare create_task, so an exception escaping a
-    tool call would kill the turn and discard everything collected for it.
-    Failures have to come back as tool output instead."""
+    tool call would kill the turn and discard everything collected for it."""
     orch = _orch(tmp_path)
     conn = MagicMock()
     conn.call_tool = AsyncMock(
@@ -211,6 +263,178 @@ async def test_tool_failure_becomes_output_not_a_dead_turn(tmp_path):
 
     result, media = await orch._execute_tool_call("c1", "read_thing", "{}")
     assert result["type"] == "function_call_output"
-    assert result["call_id"] == "c1"
     assert "video/mp4" in result["output"]
     assert media == []
+
+
+# ── Steering ─────────────────────────────────────────────
+#
+# An event arriving mid-turn is appended to the next tool result instead of
+# cancelling the turn: nothing in flight is lost and no partial state has to
+# be reconstructed. Role alternation is untouched — only existing content is
+# modified — so tool_call pairing can't be broken by delivery.
+
+from session_manager.orchestrator import _apply_steer_to_tool_results  # noqa: E402
+
+_STEER = [
+    {"role": "developer", "content": '{"event": "message", "source": "matrix"}'},
+    {"role": "user", "content": "are you still there?"},
+]
+
+
+def _tool_parts(msg):
+    return [json.loads(p["text"]) for p in msg["content"][1:]]
+
+
+def test_steer_turns_tool_content_into_parts_without_restructuring():
+    msgs = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "x", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "first"},
+        {"role": "tool", "tool_call_id": "b", "content": "second"},
+    ]
+    before = [m["role"] for m in msgs]
+    assert _apply_steer_to_tool_results(msgs, 2, _STEER) is True
+    assert [m["role"] for m in msgs] == before            # no message inserted
+    assert msgs[1]["content"] == "first"                  # earlier result untouched
+    parts = msgs[-1]["content"]
+    assert parts[0] == {"type": "text", "text": "second"}  # tool output stays first
+    # the events keep the exact shape they'd have had on their own
+    assert _tool_parts(msgs[-1]) == _STEER
+
+
+def test_steer_batches_multiple_events_in_order():
+    msgs = [{"role": "tool", "tool_call_id": "a", "content": "out"}]
+    two = _STEER + [{"role": "developer", "content": '{"event": "reaction"}'},
+                    {"role": "user", "content": "👍"}]
+    assert _apply_steer_to_tool_results(msgs, 1, two) is True
+    assert _tool_parts(msgs[0]) == two
+
+
+def test_steer_reports_failure_when_no_tool_result_to_carry_it():
+    """Caller must fall back to delivering it as a normal next-turn event."""
+    msgs = [{"role": "assistant", "content": "done"}]
+    assert _apply_steer_to_tool_results(msgs, 1, _STEER) is False
+    assert msgs == [{"role": "assistant", "content": "done"}]
+
+
+def test_steer_extends_already_multipart_tool_content():
+    msgs = [{"role": "tool", "tool_call_id": "a",
+             "content": [{"type": "text", "text": "body"}]}]
+    assert _apply_steer_to_tool_results(msgs, 1, _STEER) is True
+    assert msgs[0]["content"][0] == {"type": "text", "text": "body"}
+    assert _tool_parts(msgs[0]) == _STEER
+
+
+def test_steer_is_a_noop_with_no_batch_or_no_events():
+    msgs = [{"role": "tool", "tool_call_id": "a", "content": "x"}]
+    assert _apply_steer_to_tool_results(msgs, 0, _STEER) is False
+    assert _apply_steer_to_tool_results(msgs, 1, []) is False
+
+
+@pytest.mark.asyncio
+async def test_midturn_event_steers_instead_of_cancelling(tmp_path):
+    """A busy session parks the event for delivery rather than setting cancel."""
+    orch = _orch(tmp_path)
+    state = orch._get_session("main")
+    await state.lock.acquire()
+    try:
+        cancel = asyncio.Event()
+        state.cancel = cancel
+        assert await orch.handle_event(
+            Event(source="matrix", text="you there?", metadata={})) is None
+        assert not cancel.is_set()                      # turn was not torn down
+        assert [e.text for e in state.pending_steer] == ["you there?"]
+        assert state.passive_queue == []
+    finally:
+        state.lock.release()
+
+
+@pytest.mark.asyncio
+async def test_passive_event_still_waits_for_the_turn_to_end(tmp_path):
+    """Low-value events shouldn't add noise to a turn already in progress."""
+    orch = _orch(tmp_path)
+    state = orch._get_session("main")
+    await state.lock.acquire()
+    try:
+        await orch.handle_event(
+            Event(source="time", text="✨", energy="passive", metadata={}))
+        assert state.pending_steer == []
+        assert [e.text for e in state.passive_queue] == ["✨"]
+    finally:
+        state.lock.release()
+
+
+# ── Event debounce ───────────────────────────────────────
+#
+# A burst — someone sending a thought as three quick messages — should cost
+# one turn, not three. A turn is a full model round trip over the whole
+# conversation, so this is the cheapest latency win available. It lives at
+# the event layer, so it covers every source, not just chat.
+
+
+@pytest.mark.asyncio
+async def test_burst_becomes_one_turn(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    orch = _orch(sessions_dir, debounce=0.05)
+    turns = []
+
+    async def fake_create(**kwargs):
+        turns.append(kwargs["messages"])
+        return _stream("ok")
+    orch.llm = MagicMock()
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
+
+    for text in ("hey", "you around?", "got a sec?"):
+        await orch.handle_event(Event(source="matrix", text=text, metadata={}))
+    await asyncio.sleep(0.3)
+
+    assert len(turns) == 1, f"expected one turn, got {len(turns)}"
+    # all three arrived, interleaved with their payloads in one user message
+    user = next(m for m in turns[0] if m["role"] == "user")
+    texts = [p["text"] for p in user["content"]]
+    assert "hey" in texts and "you around?" in texts and "got a sec?" in texts
+
+
+@pytest.mark.asyncio
+async def test_debounce_window_measures_quiet_not_age(tmp_path):
+    """Each arrival restarts the timer, so a steady trickle stays one turn."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    orch = _orch(sessions_dir, debounce=0.1)
+    turns = []
+
+    async def fake_create(**kwargs):
+        turns.append(kwargs["messages"])
+        return _stream("ok")
+    orch.llm = MagicMock()
+    orch.llm.chat = MagicMock()
+    orch.llm.chat.completions = MagicMock()
+    orch.llm.chat.completions.create = fake_create
+
+    for text in ("one", "two", "three"):
+        await orch.handle_event(Event(source="matrix", text=text, metadata={}))
+        await asyncio.sleep(0.05)          # shorter than the window
+    await asyncio.sleep(0.35)
+    assert len(turns) == 1
+
+
+@pytest.mark.asyncio
+async def test_debounce_applies_to_any_source(tmp_path):
+    """Not chat-specific: a cron tick and a message coalesce together."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    orch = _orch(sessions_dir, debounce=0.05)
+    _mock_llm(orch, "ok")
+
+    await orch.handle_event(Event(source="time", text="\u2728", metadata={}))
+    await orch.handle_event(Event(source="matrix", text="hi", metadata={}))
+    await asyncio.sleep(0.3)
+
+    history = SessionManager(store_dir=sessions_dir).load("main")
+    sources = [json.loads(m["content"])["source"]
+               for m in history if m.get("role") == "developer"]
+    assert "time" in sources and "matrix" in sources

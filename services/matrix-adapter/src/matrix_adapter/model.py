@@ -3,6 +3,8 @@
 import io
 import json
 import logging
+import asyncio
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -413,6 +415,7 @@ class MatrixClient:
         )
         self._on_message: Callable[[Message | Reaction | Redaction | RoomPins], Awaitable[None]] | None = None
         self._synced_rooms: set[str] = set()
+
 
         # Event type → handler dispatch table
         self._handlers: dict[type, Callable] = {
