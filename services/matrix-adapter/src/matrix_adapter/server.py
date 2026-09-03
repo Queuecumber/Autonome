@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import os
+from typing import Any
 
 import filetype
-import httpx
 from fastmcp import FastMCP
 from fastmcp.resources import ResourceContent, ResourceResult
+from fastmcp.server.middleware import Middleware
 from matrix_adapter.model import (
     MatrixClient,
     Message,
@@ -23,8 +24,6 @@ from pydantic import Base64Bytes
 logger = logging.getLogger(__name__)
 
 client: MatrixClient
-session_manager_url: str
-_http: httpx.AsyncClient
 _event_queue: asyncio.Queue
 
 mcp = FastMCP("matrix", instructions=(
@@ -492,6 +491,39 @@ async def update_profile(display_name: str | None = None, avatar: Base64Bytes | 
 
 
 # ── Inbound event forwarding ─────────────────────────────
+#
+# Events go out as MCP log notifications tagged with EVENT_LOGGER, on the
+# session the client opened to us. `notifications/message` is the one
+# standard server->client channel that is fire-and-forget and carries
+# arbitrary structured data — the right shape for something we never want a
+# reply to. A client that doesn't know us just sees a log line.
+
+EVENT_LOGGER = "autonome/event"
+
+_session: Any = None
+
+
+class _EventChannel(Middleware):
+    """Capture the client's session so events can be pushed to it.
+
+    An inbound Matrix message has no request context of its own, and FastMCP
+    exposes no session registry — but every connection opens with
+    initialize, so that hook is where a pushable session can be caught.
+    Re-captured on each connect, so a reconnecting client replaces a session
+    that is now dead.
+    """
+
+    async def on_initialize(self, context, call_next):
+        global _session
+        result = await call_next(context)
+        if context.fastmcp_context is not None:
+            _session = context.fastmcp_context.session
+            logger.info("Event channel attached")
+        return result
+
+
+mcp.add_middleware(_EventChannel())
+
 
 async def on_message(msg: Message | Reaction | Redaction | RoomPins) -> None:
     logger.info("Received: %s", msg)
@@ -501,25 +533,33 @@ async def on_message(msg: Message | Reaction | Redaction | RoomPins) -> None:
 async def _forward_events() -> None:
     """Drain queued events to session-manager. Retries each event with
     exponential backoff (1s–60s) until it sticks — so a session-manager
-    blip doesn't drop messages."""
+    blip doesn't drop messages.
+
+    The queue also covers a gap the HTTP endpoint never had: the client's
+    standing stream takes a moment to come up after initialize, and a push
+    into that window is dropped silently rather than raising."""
     while True:
         payload = await _event_queue.get()
         backoff = 1
         while True:
-            try:
-                await _http.post(f"{session_manager_url}/event", json=payload)
-                break
-            except Exception as e:
-                logger.warning("Event delivery failed (%s); retry in %ds", e, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+            if _session is not None:
+                try:
+                    await _session.send_log_message(
+                        level="info", data=payload, logger=EVENT_LOGGER)
+                    break
+                except Exception as e:
+                    logger.warning("Event delivery failed (%s); retry in %ds", e, backoff)
+            else:
+                logger.warning("No event channel yet; retry in %ds", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
         _event_queue.task_done()
 
 
 # ── Entrypoint ───────────────────────────────────────────
 
 async def main():
-    global client, session_manager_url, _http, _event_queue
+    global client, _event_queue
 
     logging.basicConfig(
         level=logging.INFO,
@@ -532,7 +572,6 @@ async def main():
     password = os.environ.get("MATRIX_PASSWORD", "")
     access_token = os.environ.get("MATRIX_ACCESS_TOKEN", "")
     allowed_rooms = os.environ.get("MATRIX_ALLOWED_ROOMS", "").split(",") if os.environ.get("MATRIX_ALLOWED_ROOMS") else []
-    session_manager_url = os.environ.get("SESSION_MANAGER_URL", "http://localhost:5000")
     mcp_port = int(os.environ.get("CHANNEL_MCP_PORT", "8200"))
 
     client = MatrixClient(
@@ -543,7 +582,6 @@ async def main():
         access_token=access_token if access_token else None,
         allowed_rooms=allowed_rooms if allowed_rooms else None,
     )
-    _http = httpx.AsyncClient(timeout=600)
     _event_queue = asyncio.Queue()
 
     await client.login()
@@ -555,7 +593,6 @@ async def main():
             _forward_events(),
         )
     finally:
-        await _http.aclose()
         await client.close()
 
 
