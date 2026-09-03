@@ -38,6 +38,26 @@ system:
   searchUrl: ""
   searchApiKey: ""
 
+# Secrets for MCP servers that need auth (Home Assistant and friends).
+# Each key is exposed to session-manager as an environment variable, for
+# ${VAR} interpolation in the `mcp_servers` headers of agent.yaml:
+#
+#   mcp:
+#     secretEnv:
+#       HA_TOKEN: "eyJhbGci..."
+#
+#   # agent.yaml
+#   mcp_servers:
+#     home_assistant:
+#       url: http://homeassistant.local:8123/mcp
+#       headers:
+#         Authorization: "Bearer ${HA_TOKEN}"
+#
+# Values are only used when secrets.create=true; with secrets.existingName
+# set, provide the same keys in that secret and leave the values empty.
+mcp:
+  secretEnv: {}
+
 # Empty values fall back to time-mcp's own defaults.
 time:
   continuityCron: ""
