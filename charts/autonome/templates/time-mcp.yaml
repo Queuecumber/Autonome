@@ -31,7 +31,6 @@ spec:
           ports:
             - { name: mcp, containerPort: {{ $svc.port }} }
           env:
-            - { name: SESSION_MANAGER_URL,   value: "http://session-manager:{{ .Values.services.sessionManager.port }}" }
             - { name: TIME_MCP_PORT,         value: "{{ $svc.port }}" }
             {{- with .Values.time.continuityCron }}
             - { name: CONTINUITY_CRON,       value: {{ . | quote }} }

@@ -64,16 +64,14 @@ async def startup():
     if not orchestrator.openai_tools:
         logger.error("No MCP tools discovered after retries. Starting anyway.")
 
-    async def event_endpoint(request: Request) -> Response:
-        body = await request.json()
-        try:
-            event = Event.from_dict(body)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        asyncio.create_task(orchestrator.handle_event(event))
-        return Response(status_code=202)
+    # Events now arrive over MCP, pushed by the adapters as notifications
+    # (see MCPConnection._on_log). The HTTP listener stays because the
+    # deployment's readiness and liveness probes are tcpSocket checks
+    # against this port.
+    async def health(request: Request) -> Response:
+        return Response(status_code=200)
 
-    app = Starlette(routes=[Route("/event", event_endpoint, methods=["POST"])])
+    app = Starlette(routes=[Route("/health", health, methods=["GET"])])
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info"))
 
     asyncio.create_task(orchestrator.run_binary_gc())

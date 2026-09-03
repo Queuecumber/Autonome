@@ -1,7 +1,7 @@
 """Canonical event schema for the session manager.
 
 Adapters (signal, matrix, time, etc.) produce events that conform to this
-shape and POST them to the /event endpoint. Events without a session_id
+shape and push them to session-manager as MCP notifications. Events without a session_id
 route to the default session — the agent has one unified history. An
 event can target a different session by setting session_id explicitly.
 """
