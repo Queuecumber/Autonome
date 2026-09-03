@@ -9,19 +9,18 @@ import asyncio
 import json
 import logging
 import os
+from typing import Any
 from datetime import datetime
 from pathlib import Path
 
-import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import BaseModel, computed_field
 
 logger = logging.getLogger(__name__)
 
-session_manager_url: str
-_http: httpx.AsyncClient
 _store_path: Path
 _scheduler: AsyncIOScheduler | None = None
 _schedules: dict[str, "Schedule"] = {}
@@ -178,10 +177,49 @@ def cancel_schedule(schedule_id: str) -> None:
     _save()
 
 
+# Events go out as MCP log notifications tagged with EVENT_LOGGER, on the
+# session the client opened to us: the one standard server->client channel
+# that is fire-and-forget and carries arbitrary structured data. A client
+# that doesn't know us just sees a log line.
+
+EVENT_LOGGER = "autonome/event"
+
+_session: Any = None
+
+
+class _EventChannel(Middleware):
+    """Capture the client's session so events can be pushed to it.
+
+    Events fire with no request context of their own, and FastMCP exposes no
+    session registry — but every connection opens with initialize, so that
+    hook is where a pushable session can be caught. Re-captured on each
+    connect, so a reconnecting client replaces a session that is now dead.
+    """
+
+    async def on_initialize(self, context, call_next):
+        global _session
+        result = await call_next(context)
+        if context.fastmcp_context is not None:
+            _session = context.fastmcp_context.session
+            logger.info("Event channel attached")
+        return result
+
+
+mcp.add_middleware(_EventChannel())
+
+
+async def _emit_event(payload: dict) -> None:
+    """Push one event. Raises if there is no channel, matching the failure
+    handling the HTTP post it replaced already had."""
+    if _session is None:
+        raise RuntimeError("no event channel: client has not connected yet")
+    await _session.send_log_message(level="info", data=payload, logger=EVENT_LOGGER)
+
+
 # ── Firing ───────────────────────────────────────────────
 
 async def _fire(sched: Schedule) -> None:
-    """POST a scheduled event to the session manager."""
+    """Push a scheduled event to the session manager."""
     event: dict = {
         "source": "time",
         "event_type": "continuity" if sched.id == "continuity" else "cron",
@@ -196,7 +234,7 @@ async def _fire(sched: Schedule) -> None:
         event["session_id"] = sched.session_id
     logger.info(f"Firing schedule {sched.id} ({sched.energy}) → {sched.session_id or 'default'}")
     try:
-        await _http.post(f"{session_manager_url}/event", json=event)
+        await _emit_event(event)
     except Exception as e:
         logger.error(f"Failed to fire schedule {sched.id}: {e}")
 
@@ -204,21 +242,19 @@ async def _fire(sched: Schedule) -> None:
 # ── Entrypoint ───────────────────────────────────────────
 
 async def main():
-    global session_manager_url, _http, _store_path, _scheduler
+    global _store_path, _scheduler
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    session_manager_url = os.environ.get("SESSION_MANAGER_URL", "http://localhost:5000")
     mcp_port = int(os.environ.get("TIME_MCP_PORT", "8300"))
     _store_path = Path(os.environ.get("SCHEDULE_STORE", "/data/schedules.json"))
 
     continuity_cron = os.environ.get("CONTINUITY_CRON", "*/20 * * * *")
     continuity_message = os.environ.get("CONTINUITY_MESSAGE", "✨")
 
-    _http = httpx.AsyncClient(timeout=600)
     _scheduler = AsyncIOScheduler()
     _scheduler.start()
 
@@ -235,7 +271,6 @@ async def main():
         await mcp.run_async(transport="http", host="0.0.0.0", port=mcp_port)
     finally:
         _scheduler.shutdown()
-        await _http.aclose()
 
 
 if __name__ == "__main__":
