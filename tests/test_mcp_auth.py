@@ -142,3 +142,36 @@ async def test_templates_returned_when_supported():
     conn = _conn_with(SimpleNamespace(resources=object()), session)
 
     assert await conn.list_resource_templates() == [tmpl]
+
+
+# ── Transport client defaults ────────────────────────────
+#
+# The transport is handed a caller-supplied httpx client, which means the
+# caller also supplies its behaviour. A bare AsyncClient silently drops the
+# defaults the transport used to provide for itself.
+
+
+@pytest.mark.asyncio
+async def test_transport_client_carries_the_mcp_defaults(monkeypatch):
+    """follow_redirects especially: without it a server that normalizes
+    `/mcp` to `/mcp/` fails outright on the 307 instead of connecting."""
+    import contextlib
+    from session_manager import mcp as mcp_mod
+
+    seen = {}
+
+    @contextlib.asynccontextmanager
+    async def fake_transport(url, http_client=None):
+        seen["client"] = http_client
+        yield (MagicMock(), MagicMock(), MagicMock())
+
+    monkeypatch.setattr(mcp_mod, "streamable_http_client", fake_transport)
+
+    async with mcp_mod._open_transport("http://example/mcp", {"X-Auth": "t"}):
+        pass
+
+    client = seen["client"]
+    assert client.follow_redirects is True
+    # 300s read window for SSE, against httpx's 5s default.
+    assert client.timeout.read == 300
+    assert client.headers["X-Auth"] == "t"

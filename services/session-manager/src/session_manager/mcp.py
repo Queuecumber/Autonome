@@ -34,6 +34,7 @@ def _is_method_not_found(err: McpError) -> bool:
 
 
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 
 @asynccontextmanager
@@ -43,8 +44,13 @@ async def _open_transport(url: str, headers: dict[str, str] | None):
     The transport's own `headers` parameter is deprecated: configuration
     belongs on a caller-supplied httpx client instead. We own the client so
     we also own closing it.
+
+    Built via the SDK's factory, not a bare AsyncClient: it carries the MCP
+    defaults (follow_redirects, 30s timeout) that the transport used to
+    supply itself. A plain client silently drops both — servers that
+    normalize `/mcp` to `/mcp/` fail outright.
     """
-    async with httpx.AsyncClient(headers=headers or {}) as client:
+    async with create_mcp_http_client(headers=headers or None) as client:
         async with streamable_http_client(url, http_client=client) as transport:
             yield transport
 
