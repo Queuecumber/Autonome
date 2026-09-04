@@ -18,6 +18,7 @@ members = [
     "services/system-mcp",
     "services/matrix-adapter",
     "services/time-mcp",
+    "services/graphiti-mcp",
 ]
 
 [tool.uv.sources]
