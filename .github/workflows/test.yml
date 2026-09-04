@@ -11,6 +11,22 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      # The knowledge-graph tests run against a real FalkorDB. Without it they
+      # skip rather than fail, so CI has to supply one or the suite would go
+      # quietly uncovered.
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GRAPH_HOST: localhost
+      GRAPH_PORT: "6379"
     steps:
       - uses: actions/checkout@v4
 
