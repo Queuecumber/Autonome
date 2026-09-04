@@ -12,6 +12,7 @@ storage:
   memory:       { size: 1Gi }
   matrixCrypto: { size: 100Mi }
   time:         { size: 100Mi }
+  graph:        { size: 5Gi }
 
 # agent.yaml and PERSONALITY.md contents — typically supplied via
 # `helm install --set-file agent.config=agent.yaml --set-file agent.personality=PERSONALITY.md`
@@ -77,3 +78,8 @@ services:
   memoryMcp:      { image: { name: autonome-memory-mcp },      port: 8001 }
   systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
   timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }
+  graphitiMcp:    { image: { name: autonome-graphiti-mcp },    port: 8005 }
+  # The graph store behind graphiti-mcp. Embeddings are optional: unset, the
+  # service still records and traverses facts, and keyword search still works —
+  # only semantic search is disabled.
+  falkordb:       { image: falkordb/falkordb:latest,           port: 6379 }
