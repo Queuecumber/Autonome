@@ -11,28 +11,37 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import falkordb
 import pytest
+from redis.exceptions import RedisError
 
 GRAPH_HOST = os.environ.get("GRAPH_HOST", "localhost")
 GRAPH_PORT = int(os.environ.get("GRAPH_PORT", "6379"))
 
 
-def _falkordb_available() -> bool:
+@pytest.fixture(scope="session")
+def graph_backend() -> None:
+    """Require FalkorDB in CI while allowing local runs without the service.
+
+    Returns:
+        None when the configured database is reachable.
+
+    Raises:
+        pytest.fail.Exception: If REQUIRE_GRAPH_TESTS=1 and FalkorDB is unavailable.
+        pytest.skip.Exception: If FalkorDB is unavailable during an optional run.
+    """
     try:
-        import falkordb
-        falkordb.FalkorDB(host=GRAPH_HOST, port=GRAPH_PORT).list_graphs()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _falkordb_available(),
-    reason=f"FalkorDB not reachable at {GRAPH_HOST}:{GRAPH_PORT}")
+        falkordb.FalkorDB(host=GRAPH_HOST, port=GRAPH_PORT,
+                         socket_connect_timeout=2, socket_timeout=2).list_graphs()
+    except RedisError as error:
+        message = f"FalkorDB not reachable at {GRAPH_HOST}:{GRAPH_PORT}: {error}"
+        if os.environ.get("REQUIRE_GRAPH_TESTS") == "1":
+            pytest.fail(message, pytrace=False)
+        pytest.skip(message)
 
 
 @pytest.fixture
-def graph(monkeypatch):
+def graph(monkeypatch, graph_backend):
     """A private graph per test, so ordering and leftovers cannot matter."""
     import graphiti_mcp.store as store
     import graphiti_mcp.embed as embed
