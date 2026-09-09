@@ -217,6 +217,34 @@ async def test_search_hides_superseded_facts_by_default(embedded):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["keyword", "semantic"])
+async def test_superseded_facts_do_not_consume_the_search_limit(graph, monkeypatch, mode):
+    """Each search mode must return a current match behind a higher-ranked old fact."""
+    if mode == "semantic":
+        async def embedding(text: str) -> list[float]:
+            """Return a vector for text, ranking coffee above tea for the query."""
+            return [0.8, 0.6] if "tea" in text else [1.0, 0.0]
+
+        monkeypatch.setattr(graph.embed, "embed", embedding)
+
+    old = await graph.save_facts(facts=[
+        _fact(graph, "Heather", "PREFERS", "coffee", "Heather likes coffee")])
+    old_id = old["facts"][0]["fact_id"]
+    await graph.supersede_fact(old_id)
+    current = await graph.save_facts(facts=[
+        _fact(graph, "Heather", "PREFERS", "tea",
+              "Heather likes tea with breakfast every morning before starting work")])
+    current_id = current["facts"][0]["fact_id"]
+    query = "Heather" if mode == "keyword" else "preferred beverage"
+
+    history = await graph.search_facts(query, limit=1, include_superseded=True)
+    assert [hit["fact_id"] for hit in history] == [old_id]
+    hits = await graph.search_facts(query, limit=1)
+    assert [hit["fact_id"] for hit in hits] == [current_id]
+    assert hits[0]["superseded"] is False
+
+
+@pytest.mark.asyncio
 async def test_search_returns_the_episode_id_so_linking_is_cheap(embedded):
     """Sharing a story has to be easier than rewriting one, or duplicates win
     on convenience alone."""

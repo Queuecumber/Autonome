@@ -18,7 +18,8 @@ from datetime import datetime
 from fastmcp import FastMCP
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodicNode
-from graphiti_core.search.search_filters import SearchFilters
+from graphiti_core.search.search_filters import (ComparisonOperator, DateFilter,
+                                                 SearchFilters)
 from graphiti_core.search.search_utils import (edge_fulltext_search,
                                                  edge_similarity_search)
 from pydantic import BaseModel, Field
@@ -130,7 +131,8 @@ async def search_facts(query: str, limit: int = 10,
 
     Args:
         query: What you are looking for, in your own words.
-        limit: How many to return.
+        limit: How many matching facts to return, excluding superseded facts
+            unless include_superseded is set.
         include_superseded: Also return facts that have stopped being true —
             use this when you want history rather than the current picture.
 
@@ -139,6 +141,9 @@ async def search_facts(query: str, limit: int = 10,
         `episode_id` of the story behind it (pass that to `get_story`).
     """
     await store.ensure_indices()
+    filters = SearchFilters()
+    if not include_superseded:
+        filters.invalid_at = [[DateFilter(comparison_operator=ComparisonOperator.is_null)]]
 
     # Two ways of being relevant, and they fail differently: vectors miss an
     # exact name they never saw, keywords miss a paraphrase. Run both and
@@ -147,22 +152,17 @@ async def search_facts(query: str, limit: int = 10,
     vector = await embed.embed(query)
     if vector is not None:
         for e in await edge_similarity_search(
-                store.driver(), vector, None, None, SearchFilters(),
+                store.driver(), vector, None, None, filters,
                 [store.GROUP_ID], limit):
             found[e.uuid] = e
     try:
         for e in await edge_fulltext_search(
-                store.driver(), query, SearchFilters(), [store.GROUP_ID], limit):
+                store.driver(), query, filters, [store.GROUP_ID], limit):
             found.setdefault(e.uuid, e)
     except Exception as e:
         logger.warning("Keyword search unavailable: %r", e)
 
-    out = []
-    for edge in found.values():
-        if edge.invalid_at is not None and not include_superseded:
-            continue
-        out.append(await _render(edge))
-    return out[:limit]
+    return [await _render(edge) for edge in list(found.values())[:limit]]
 
 
 @mcp.tool
