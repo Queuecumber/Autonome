@@ -193,12 +193,15 @@ async def search_facts(query: str, limit: int = 10,
     # exact name they never saw, keywords miss a paraphrase. Run both and
     # merge — a name lookup should not depend on the embedder being reachable.
     found: dict[str, EntityEdge] = {}
-    vector = await embed.embed(query)
+    vector = await embed.embed(query, is_query=True)
     if vector is not None:
-        for e in await edge_similarity_search(
-                store.driver(), vector, None, None, filters,
-                [store.GROUP_ID], limit):
-            found[e.uuid] = e
+        try:
+            for e in await edge_similarity_search(
+                    store.driver(), vector, None, None, filters,
+                    [store.GROUP_ID], limit, min_score=embed.MIN_SCORE):
+                found[e.uuid] = e
+        except Exception as e:
+            logger.warning("Semantic search unavailable: %r", e)
     try:
         for e in await edge_fulltext_search(
                 store.driver(), query, filters, [store.GROUP_ID], limit):

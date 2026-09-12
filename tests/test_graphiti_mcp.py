@@ -438,7 +438,7 @@ def embedded(graph, monkeypatch):
         n = math.sqrt(sum(x * x for x in v))
         return [x / n for x in v]
 
-    async def fake(text):
+    async def fake(text, *, is_query=False):
         return vector(text) if text else None
 
     monkeypatch.setattr(embed, "embed", fake)
@@ -474,7 +474,7 @@ async def test_search_hides_superseded_facts_by_default(embedded):
 async def test_superseded_facts_do_not_consume_the_search_limit(graph, monkeypatch, mode):
     """Each search mode must return a current match behind a higher-ranked old fact."""
     if mode == "semantic":
-        async def embedding(text: str) -> list[float]:
+        async def embedding(text: str, *, is_query: bool = False) -> list[float]:
             """Return a vector for text, ranking coffee above tea for the query."""
             return [0.8, 0.6] if "tea" in text else [1.0, 0.0]
 
@@ -550,6 +550,38 @@ async def test_search_merges_keyword_and_semantic_hits(embedded):
     assert any(h["subject"] == "Heather" for h in hits)
     ids = [h["fact_id"] for h in hits]
     assert len(ids) == len(set(ids)), "a fact matched by both modes was returned twice"
+
+
+@pytest.mark.asyncio
+async def test_keyword_search_survives_a_vector_query_failure(embedded, monkeypatch):
+    """A failing vector query must not prevent exact-name memory retrieval."""
+    result = await embedded.save_facts(facts=[
+        _fact(embedded, "Heather", "RUNS_ON", "model", "Heather runs on model")])
+
+    async def unavailable(*args, **kwargs):
+        """Simulate an unavailable vector index while the graph remains readable."""
+        raise RuntimeError("Vector query unavailable")
+
+    monkeypatch.setattr(embedded, "edge_similarity_search", unavailable)
+    hits = await embedded.search_facts("Heather")
+    assert [hit["fact_id"] for hit in hits] == [result["facts"][0]["fact_id"]]
+
+
+@pytest.mark.asyncio
+async def test_semantic_threshold_can_be_tuned_for_the_embedding_model(graph, monkeypatch):
+    """Model-specific score thresholds control semantic recall without keyword matches."""
+    async def vector(text, *, is_query=False):
+        """Return query/document vectors whose cosine similarity is one half."""
+        return [1.0, 0.0] if is_query else [0.5, math.sqrt(0.75)]
+
+    monkeypatch.setattr(graph.embed, "embed", vector)
+    result = await graph.save_facts(facts=[
+        _fact(graph, "Heather", "PREFERS", "tea", "Heather prefers tea")])
+    monkeypatch.setattr(graph.embed, "MIN_SCORE", 0.8)
+    assert await graph.search_facts("favored beverage") == []
+    monkeypatch.setattr(graph.embed, "MIN_SCORE", 0.7)
+    hits = await graph.search_facts("favored beverage")
+    assert [hit["fact_id"] for hit in hits] == [result["facts"][0]["fact_id"]]
 
 
 async def graph_save(server):

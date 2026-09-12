@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=2.0,<4",
     "graphiti-core[falkordb]>=0.30,<0.31",
+    "openai>=1.91.0,<3",
 ]
 
 [build-system]

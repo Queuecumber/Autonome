@@ -261,12 +261,14 @@ source = { editable = "services/graphiti-mcp" }
 dependencies = [
     { name = "fastmcp" },
     { name = "graphiti-core", extra = ["falkordb"] },
+    { name = "openai" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=2.0,<4" },
     { name = "graphiti-core", extras = ["falkordb"], specifier = ">=0.30,<0.31" },
+    { name = "openai", specifier = ">=1.91.0,<3" },
 ]
 
 [[package]]
