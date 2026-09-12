@@ -18,7 +18,6 @@ from uuid import UUID
 
 from fastmcp import FastMCP
 from graphiti_core.edges import EntityEdge
-from graphiti_core.errors import GroupsEdgesNotFoundError
 from graphiti_core.nodes import EntityNode, EpisodicNode
 from graphiti_core.search.search_filters import (ComparisonOperator, DateFilter,
                                                  SearchFilters)
@@ -198,11 +197,7 @@ async def list_facts(limit: int = 50, cursor: str | None = None) -> dict:
     if cursor is not None:
         cursor = str(UUID(cursor))
     await store.ensure_indices()
-    try:
-        edges = await EntityEdge.get_by_group_ids(
-            store.driver(), [store.GROUP_ID], limit=limit + 1, uuid_cursor=cursor)
-    except GroupsEdgesNotFoundError:
-        edges = []
+    edges = await store.page_edges(limit + 1, cursor)
     page = edges[:limit]
     return {
         "facts": [await _render(edge) for edge in page],

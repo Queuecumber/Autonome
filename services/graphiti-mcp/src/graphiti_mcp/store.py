@@ -20,7 +20,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from graphiti_core.driver.falkordb_driver import FalkorDriver
-from graphiti_core.edges import EntityEdge
+from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
+from graphiti_core.models.edges.edge_db_queries import get_entity_edge_return_query
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 
 GRAPH_HOST = os.environ.get("GRAPH_HOST", "localhost")
@@ -198,6 +199,28 @@ async def link_episode(ep: EpisodicNode, edge_uuids: list[str]) -> None:
 async def edges_for_entity(node_uuid: str) -> list[EntityEdge]:
     """Every fact an entity takes part in, in either direction."""
     return await EntityEdge.get_by_node_uuid(driver(), node_uuid)
+
+
+async def page_edges(limit: int, cursor: str | None = None) -> list[EntityEdge]:
+    """Read a bounded page of facts from the configured memory group.
+
+    Args:
+        limit: Maximum number of records to read.
+        cursor: Exclude IDs at or above this boundary in descending UUID order.
+
+    Returns:
+        Facts in descending UUID order, or an empty list at the end.
+    """
+    # Cast before comparing: FalkorDB's indexed string ranges can include UUIDs above the boundary.
+    boundary = "AND toString(e.uuid) < $cursor " if cursor is not None else ""
+    records, _, _ = await driver().execute_query(
+        "MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity) "
+        "WHERE e.group_id = $group_id " + boundary + "RETURN "
+        + get_entity_edge_return_query(driver().provider)
+        + " ORDER BY e.uuid DESC LIMIT $limit",
+        group_id=GROUP_ID, cursor=cursor, limit=limit,
+    )
+    return [get_entity_edge_from_record(record, driver().provider) for record in records]
 
 
 async def vocabulary() -> dict[str, list[str]]:

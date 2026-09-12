@@ -424,6 +424,20 @@ async def graph_save(server):
 @pytest.mark.asyncio
 async def test_inventory_pages_through_all_facts_including_history(graph, monkeypatch):
     """An audit visits each fact once without a query or an embedding service."""
+    edge_model = graph.store.EntityEdge
+    ids = iter([
+        "f655d1e4-03ce-4a4f-a9b7-9104a03bfb95",
+        "f4678cfd-1682-4e4d-ab41-f887b80776fb",
+        "4e17917b-4ae8-4360-8d14-d3a1ad91c50e",
+        "13e2080d-0c6f-4f00-9bfe-7abc557b1af9",
+        "031ded59-004f-4b69-b906-607810a493e2",
+    ])
+
+    def edge_with_id(**kwargs):
+        """Build an edge with UUIDs that exercise shared string-index prefixes."""
+        return edge_model(uuid=next(ids), **kwargs)
+
+    monkeypatch.setattr(graph.store, "EntityEdge", edge_with_id)
     result = await graph.save_facts(facts=[
         _fact(graph, "Max", "RECORDED", f"item {i}", f"Max recorded item {i}")
         for i in range(5)])
