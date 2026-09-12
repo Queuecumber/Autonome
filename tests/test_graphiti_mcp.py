@@ -373,3 +373,60 @@ async def graph_save(server):
     await server.save_facts(facts=[
         _fact(server, "Heather", "RUNS_ON", "glm-5.3", "Heather runs on glm-5.3",
               s_type="Agent", o_type="Model")])
+
+
+@pytest.mark.asyncio
+async def test_inventory_pages_through_all_facts_including_history(graph, monkeypatch):
+    """An audit visits each fact once without a query or an embedding service."""
+    result = await graph.save_facts(facts=[
+        _fact(graph, "Max", "RECORDED", f"item {i}", f"Max recorded item {i}")
+        for i in range(5)])
+    expected = sorted((fact["fact_id"] for fact in result["facts"]), reverse=True)
+    await graph.supersede_fact(expected[0])
+
+    async def forbidden_embedding(text):
+        """Fail if an inventory attempts to embed any text."""
+        raise AssertionError("An inventory must not use embeddings")
+
+    monkeypatch.setattr(graph.embed, "embed", forbidden_embedding)
+    first = await graph.list_facts(limit=2)
+    second = await graph.list_facts(limit=2, cursor=first["next_cursor"])
+    third = await graph.list_facts(limit=2, cursor=second["next_cursor"])
+    pages = [first, second, third]
+    assert [len(page["facts"]) for page in pages] == [2, 2, 1]
+    assert [fact["fact_id"] for page in pages for fact in page["facts"]] == expected
+    assert first["facts"][0]["superseded"] is True
+    assert first["next_cursor"] == expected[1]
+    assert second["next_cursor"] == expected[3]
+    assert third["next_cursor"] is None
+    assert await graph.list_facts(cursor=expected[-1]) == {
+        "facts": [], "next_cursor": None}
+
+
+@pytest.mark.asyncio
+async def test_inventory_is_empty_for_an_empty_graph(graph):
+    """An empty store produces a terminal empty page."""
+    assert await graph.list_facts() == {"facts": [], "next_cursor": None}
+
+
+@pytest.mark.asyncio
+async def test_inventory_only_lists_the_configured_group(graph, monkeypatch):
+    """An audit cannot enumerate facts belonging to another memory group."""
+    await graph.save_facts(facts=[_fact(graph, "Max", "KNOWS", "a", "Max knows a")])
+    monkeypatch.setattr(graph.store, "GROUP_ID", "other")
+    assert await graph.list_facts() == {"facts": [], "next_cursor": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, -1, 101])
+async def test_inventory_rejects_unbounded_page_sizes(graph, limit):
+    """Page limits are bounded even when calling the implementation directly."""
+    with pytest.raises(ValueError, match="limit"):
+        await graph.list_facts(limit=limit)
+
+
+@pytest.mark.asyncio
+async def test_inventory_rejects_invalid_cursors(graph):
+    """Malformed cursors fail clearly instead of returning misleading pages."""
+    with pytest.raises(ValueError):
+        await graph.list_facts(cursor="not-a-cursor")

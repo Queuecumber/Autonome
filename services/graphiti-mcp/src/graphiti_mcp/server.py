@@ -14,9 +14,11 @@ replacement for it.
 import logging
 import os
 from datetime import datetime
+from uuid import UUID
 
 from fastmcp import FastMCP
 from graphiti_core.edges import EntityEdge
+from graphiti_core.errors import GroupsEdgesNotFoundError
 from graphiti_core.nodes import EntityNode, EpisodicNode
 from graphiti_core.search.search_filters import (ComparisonOperator, DateFilter,
                                                  SearchFilters)
@@ -165,6 +167,40 @@ async def search_facts(query: str, limit: int = 10,
         logger.warning("Keyword search unavailable: %r", e)
 
     return [await _render(edge) for edge in list(found.values())[:limit]]
+
+
+@mcp.tool
+async def list_facts(limit: int = 50, cursor: str | None = None) -> dict:
+    """Audit stored facts without needing a search query.
+
+    Args:
+        limit: Page size, from 1 to 100.
+        cursor: The previous page's next_cursor. Omit for the first page.
+
+    Returns:
+        A facts page and next_cursor, which is null at the end. Includes
+        superseded facts for auditing. Pages use descending fact-ID order,
+        not date or relevance order. Concurrent writes are not a snapshot;
+        restart an audit to include facts saved while paging.
+
+    Raises:
+        ValueError: If limit is outside its bounds or cursor is not a UUID.
+    """
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    if cursor is not None:
+        cursor = str(UUID(cursor))
+    await store.ensure_indices()
+    try:
+        edges = await EntityEdge.get_by_group_ids(
+            store.driver(), [store.GROUP_ID], limit=limit + 1, uuid_cursor=cursor)
+    except GroupsEdgesNotFoundError:
+        edges = []
+    page = edges[:limit]
+    return {
+        "facts": [await _render(edge) for edge in page],
+        "next_cursor": page[-1].uuid if len(edges) > limit else None,
+    }
 
 
 @mcp.tool
