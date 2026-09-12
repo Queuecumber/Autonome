@@ -213,6 +213,52 @@ async def test_facts_without_a_story_are_still_valid(graph):
     assert r["episode_id"] is None and r["facts"][0]["fact_id"]
 
 
+@pytest.mark.asyncio
+async def test_source_only_batches_keep_shared_provenance(graph):
+    """Attribution survives saving and retrieval even without narrative text."""
+    source = "archive/2026-05-12.md"
+    result = await graph.save_facts(
+        facts=[_fact(graph, "Max", "PREFERS", "a", "Max prefers a"),
+               _fact(graph, "Max", "PREFERS", "b", "Max prefers b")],
+        source=source)
+    assert result["episode_id"]
+    assert {fact["episode_id"] for fact in result["facts"]} == {result["episode_id"]}
+    story = await graph.get_story(result["episode_id"])
+    assert story["source"] == source
+    assert story["story"] == ""
+    assert story["fact_count"] == 2
+    hits = await graph.search_facts("Max")
+    assert len(hits) == 2
+    assert {hit["episode_id"] for hit in hits} == {result["episode_id"]}
+
+
+@pytest.mark.asyncio
+async def test_story_keeps_narrative_source_and_dates_separate(graph):
+    """A historical source date must not be reported as the date it was saved."""
+    when = datetime(2026, 5, 12, tzinfo=timezone.utc)
+    result = await graph.save_facts(
+        facts=[_fact(graph, "Max", "PREFERS", "a", "Max prefers a")],
+        story="We discussed this in May.", source="archive/2026-05-12.md",
+        valid_at=when)
+    story = await graph.get_story(result["episode_id"])
+    assert story["story"] == "We discussed this in May."
+    assert story["source"] == "archive/2026-05-12.md"
+    assert datetime.fromisoformat(story["valid_at"]) == when
+    assert datetime.fromisoformat(story["recorded_at"]) > when
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provenance", [{"story": "ignored narrative"},
+                                       {"source": "ignored source"}])
+async def test_reusing_an_episode_rejects_conflicting_provenance(graph, provenance):
+    """New attribution cannot be silently discarded when an episode is reused."""
+    with pytest.raises(ValueError, match="episode_id"):
+        await graph.save_facts(
+            facts=[_fact(graph, "Max", "PREFERS", "a", "Max prefers a")],
+            episode_id="existing-episode", **provenance)
+    assert await graph.list_facts() == {"facts": [], "next_cursor": None}
+
+
 # ── Time ─────────────────────────────────────────────────
 
 

@@ -83,18 +83,25 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
     Args:
         facts: The relationships to record. Save everything that came out of
             one conversation in a single call so they share a story.
-        story: Markdown describing how you came to know this. Optional, but
-            it is what you will want when a bare sentence is not enough later.
+        story: The actual narrative in markdown: what happened and how you
+            learned the facts. This is separate from the source attribution.
         episode_id: Attach to an existing story instead of writing a new one —
             use the `episode_id` from a search result when adding to something
-            you already recorded.
+            you already recorded. Do not combine with story or source.
         valid_at: When these facts became true. Defaults to now; set it for
             something you are recording after the fact.
-        source: Where this came from, e.g. 'matrix conversation'.
+        source: Attribution such as a message link or journal filename. Kept
+            even without a story; it does not supply or generate narrative text.
 
     Returns:
         The stored `facts` (with their ids) and the `episode_id` they share.
+        Supplying story or source creates an episode; otherwise its ID is null.
+
+    Raises:
+        ValueError: If episode_id is combined with story or source.
     """
+    if episode_id and (story or source):
+        raise ValueError("Use episode_id to reuse provenance, or story/source to create it")
     if not facts:
         return {"facts": [], "episode_id": episode_id or None}
     await store.ensure_indices()
@@ -102,7 +109,7 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
     ep: EpisodicNode | None = None
     if episode_id:
         ep = await EpisodicNode.get_by_uuid(store.driver(), episode_id)
-    elif story:
+    elif story or source:
         ep = await store.save_episode(story, source, valid_at)
 
     saved, uuids = [], []
@@ -231,11 +238,17 @@ async def get_story(episode_id: str) -> dict:
 
     Args:
         episode_id: From a search result or a `save_facts` response.
+
+    Returns:
+        The narrative in story and its attribution in source. Story is empty
+        for source-only provenance. recorded_at is when the episode was saved;
+        valid_at is when the described source event occurred.
     """
     ep = await EpisodicNode.get_by_uuid(store.driver(), episode_id)
     return {"episode_id": ep.uuid, "story": ep.content,
             "source": ep.source_description,
-            "recorded_at": ep.valid_at.isoformat() if ep.valid_at else None,
+            "recorded_at": ep.created_at.isoformat(),
+            "valid_at": ep.valid_at.isoformat() if ep.valid_at else None,
             "fact_count": len(ep.entity_edges or [])}
 
 
