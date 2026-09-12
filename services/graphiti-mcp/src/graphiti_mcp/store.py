@@ -62,6 +62,20 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def utc_time(value: datetime) -> datetime:
+    """Normalize a supplied date to UTC.
+
+    Args:
+        value: A timestamp. A missing timezone is interpreted as UTC.
+
+    Returns:
+        The equivalent timezone-aware UTC timestamp.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 async def find_entity(name: str) -> EntityNode | None:
     """Look up an entity by exact name.
 
@@ -154,6 +168,21 @@ async def save_edge(source: EntityNode, relation: str, target: EntityNode,
                     attributes: dict[str, Any] | None = None,
                     episode_uuid: str | None = None,
                     embedding: list[float] | None = None) -> EntityEdge:
+    """Store a fact while keeping its validity separate from its recording time.
+
+    Args:
+        source: The existing subject entity.
+        relation: The relationship name.
+        target: The existing object entity.
+        fact: The complete fact sentence.
+        valid_at: When the fact became true; None means unknown.
+        attributes: Optional fact metadata.
+        episode_uuid: Optional shared provenance record.
+        embedding: Optional fact embedding.
+
+    Returns:
+        The saved edge, with created_at set to the recording time.
+    """
     edge = EntityEdge(
         source_node_uuid=source.uuid,
         target_node_uuid=target.uuid,
@@ -161,7 +190,7 @@ async def save_edge(source: EntityNode, relation: str, target: EntityNode,
         name=relation,
         fact=fact,
         created_at=now(),
-        valid_at=valid_at or now(),
+        valid_at=valid_at,
         attributes=attributes or {},
         episodes=[episode_uuid] if episode_uuid else [],
         fact_embedding=embedding,

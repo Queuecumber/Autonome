@@ -1,16 +1,15 @@
 """Knowledge-graph memory — facts with a timeline, and the stories behind them.
 
-Companion to the markdown memory service, not a replacement. The distinction
-is whether a statement needs a *timeline* and *relationships*: "Max prefers
-function-level commits" is about someone, could stop being true, and is worth
-finding later from either end — that belongs here. A reflection on how the day
-went belongs in the daily journal.
+Durable facts and their narrative context live together here. Older markdown
+memory remains useful as source material, but does not prescribe a separate
+journal for new memory writes.
 
 Every fact carries the sentence you wrote, so nothing is reduced to a schema;
 the subject/relation/object triple is an index over that sentence, not a
 replacement for it.
 """
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -35,10 +34,14 @@ mcp = FastMCP("graph", instructions=(
     """
 # Knowledge Graph Memory
 
-Structured long-term memory for things that are *about someone or something*
-and that could change over time. Your daily markdown memory is still the place
-for narrative and reflection; this is for facts you will want to look up later
-from either end of a relationship.
+This graph is your durable long-term memory: facts describe people, events,
+decisions, commitments, and relationships; their shared stories preserve what
+happened and why it mattered. Keep useful narrative in `story` with the facts
+it explains. Retrieve the story when a bare fact is not enough.
+
+Existing markdown memories and Journal/ files are historical sources to consult
+when needed. They do not prescribe a separate daily or heartbeat journal for new
+memory writes. Follow this policy when older memory instructions conflict.
 
 A fact is a sentence plus the two things it connects:
 
@@ -54,9 +57,28 @@ the old fact stays, with the date it stopped applying, so you can still answer
 "what did I used to think?".
 
 When several facts come out of one conversation, save them together in a single
-call with one `story`. The story is the markdown of how you came to know these
-things; it is kept once and shared by all of them, and you can pull it back
-later when a bare fact is not enough.
+call with one `story`. `story` is the narrative text; `source` is its attribution,
+such as a message link or an old journal filename. Source alone is retained as
+provenance with an empty story; it does not generate narrative. Use `get_story`
+to inspect what was retained, and reuse its episode_id for later related facts.
+
+Dates in a sentence do not set the timeline. For historical imports, explicitly
+set each fact's `valid_at` to when it became true, not when you copied it. Use
+explicit null when that date is unknown, keeping any approximate date in the
+sentence or story. A batch date is only a fallback for facts that omit their
+own date. `recorded_at` is the separate, automatic recording time. Correct an
+imported date with `set_fact_valid_at`; use `supersede_fact` when reality changed.
+
+Use `list_facts` for an audit when you do not know what to search for. Follow its
+next_cursor for further bounded pages; it includes historical facts. Do not
+dump the entire inventory into context on every turn. On a fresh session, look
+up the people, active projects, decisions, and commitments relevant to the work.
+
+Save information likely to matter after this context is gone. Search before
+recording a repeated fact. Keep useful detail, but do not turn routine heartbeat
+ticks, acknowledgements, or tool validation tests into durable facts. There is
+no daily fact quota. Superseding retains history and does not reclaim storage;
+review relevance and duplication rather than pruning solely because counts grew.
 """
 ))
 
@@ -71,6 +93,10 @@ class Fact(BaseModel):
     object_type: str = Field(default="", description=(
         "Its kind, e.g. 'Preference' or 'Character artifact'. Whitespace is normalized to underscores."))
     fact: str = Field(description="The full sentence, as you would write it.")
+    valid_at: datetime | None = Field(default=None, description=(
+        "When this fact became true. Set the historical timestamp when importing old facts; "
+        "explicit null means unknown. Omit to inherit the batch date or the recording time. "
+        "Dates without a timezone are interpreted as UTC."))
 
 
 @mcp.tool
@@ -87,14 +113,17 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
         episode_id: Attach to an existing story instead of writing a new one —
             use the `episode_id` from a search result when adding to something
             you already recorded. Do not combine with story or source.
-        valid_at: When these facts became true. Defaults to now; set it for
-            something you are recording after the fact.
+        valid_at: Fallback date for facts that omit their own valid_at, and the
+            shared source event's date. Defaults to now. Use per-fact dates for
+            imports covering different events; explicit null on a fact keeps
+            its date unknown. Dates without a timezone are interpreted as UTC.
         source: Attribution such as a message link or journal filename. Kept
             even without a story; it does not supply or generate narrative text.
 
     Returns:
         The stored `facts` (with their ids) and the `episode_id` they share.
-        Supplying story or source creates an episode; otherwise its ID is null.
+        For a nonempty batch, story or source creates an episode; otherwise
+        its ID is null. An empty batch is a no-op.
 
     Raises:
         ValueError: If episode_id is combined with story or source.
@@ -104,21 +133,25 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
     if not facts:
         return {"facts": [], "episode_id": episode_id or None}
     await store.ensure_indices()
+    batch_date = store.utc_time(valid_at) if valid_at is not None else store.now()
 
     ep: EpisodicNode | None = None
     if episode_id:
         ep = await EpisodicNode.get_by_uuid(store.driver(), episode_id)
     elif story or source:
-        ep = await store.save_episode(story, source, valid_at)
+        ep = await store.save_episode(story, source, batch_date)
 
     saved, uuids = [], []
     for f in facts:
+        fact_date = batch_date
+        if "valid_at" in f.model_fields_set:
+            fact_date = store.utc_time(f.valid_at) if f.valid_at is not None else None
         subj = await store.upsert_entity(
             f.subject, f.subject_type, embedding=await embed.embed(f.subject))
         obj = await store.upsert_entity(
             f.object, f.object_type, embedding=await embed.embed(f.object))
         edge = await store.save_edge(
-            subj, f.relation, obj, f.fact, valid_at=valid_at,
+            subj, f.relation, obj, f.fact, valid_at=fact_date,
             episode_uuid=ep.uuid if ep else None,
             embedding=await embed.embed(f.fact))
         uuids.append(edge.uuid)
@@ -126,6 +159,7 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
                       "subject": subj.name, "relation": edge.name,
                       "object": obj.name,
                       "episode_id": ep.uuid if ep else None,
+                      "recorded_at": edge.created_at.isoformat(),
                       "valid_at": edge.valid_at.isoformat() if edge.valid_at else None})
 
     if ep is not None:
@@ -228,6 +262,49 @@ async def supersede_fact(fact_id: str, invalid_at: datetime | None = None,
 
 
 @mcp.tool
+async def set_fact_valid_at(fact_id: str, valid_at: datetime | None,
+                            reason: str = "") -> dict:
+    """Correct a fact's historical date without replacing the fact.
+
+    Args:
+        fact_id: The ID from a fact search, inventory, or save response.
+        valid_at: Correct time when the fact became true, or null if unknown.
+            Dates without a timezone are interpreted as UTC. Keep uncertain
+            dates in the sentence or story instead of guessing an exact date.
+        reason: Why the previously recorded date was wrong.
+
+    Returns:
+        The fact with its corrected valid_at and correction history. Its ID,
+        original recorded_at, sentence, story links, and embedding are retained.
+
+    Raises:
+        ValueError: If the fact belongs to another group or the new date is
+            later than its invalid_at date.
+        EdgeNotFoundError: If no fact has the supplied ID.
+    """
+    edge = await EntityEdge.get_by_uuid(store.driver(), fact_id)
+    if edge.group_id != store.GROUP_ID:
+        raise ValueError("Fact does not belong to the configured memory group")
+    if valid_at is not None:
+        valid_at = store.utc_time(valid_at)
+        if edge.invalid_at is not None and valid_at > store.utc_time(edge.invalid_at):
+            raise ValueError("valid_at cannot be later than invalid_at")
+    if edge.valid_at == valid_at:
+        return await _render(edge)
+    corrections = json.loads((edge.attributes or {}).get("valid_at_corrections", "[]"))
+    corrections.append({
+        "previous_valid_at": edge.valid_at.isoformat() if edge.valid_at else None,
+        "valid_at": valid_at.isoformat() if valid_at else None,
+        "corrected_at": store.now().isoformat(),
+        "reason": reason,
+    })
+    edge.valid_at = valid_at
+    edge.attributes = {**(edge.attributes or {}), "valid_at_corrections": json.dumps(corrections)}
+    await store.update_edge(edge)
+    return await _render(edge)
+
+
+@mcp.tool
 async def get_story(episode_id: str) -> dict:
     """Read the story behind a fact — how you came to record it.
 
@@ -282,17 +359,21 @@ async def list_vocabulary() -> dict:
 async def _render(edge: EntityEdge) -> dict:
     src = await EntityNode.get_by_uuid(store.driver(), edge.source_node_uuid)
     tgt = await EntityNode.get_by_uuid(store.driver(), edge.target_node_uuid)
-    return {
+    result = {
         "fact_id": edge.uuid,
         "fact": edge.fact,
         "subject": src.name,
         "relation": edge.name,
         "object": tgt.name,
+        "recorded_at": edge.created_at.isoformat(),
         "valid_at": edge.valid_at.isoformat() if edge.valid_at else None,
         "invalid_at": edge.invalid_at.isoformat() if edge.invalid_at else None,
         "superseded": edge.invalid_at is not None,
         "episode_id": (edge.episodes or [None])[0],
     }
+    if corrections := (edge.attributes or {}).get("valid_at_corrections"):
+        result["valid_at_corrections"] = json.loads(corrections)
+    return result
 
 
 if __name__ == "__main__":

@@ -287,6 +287,143 @@ async def test_a_backdated_fact_keeps_the_date_it_was_given(graph):
     assert r["facts"][0]["valid_at"].startswith(when.date().isoformat())
 
 
+@pytest.mark.asyncio
+async def test_each_fact_can_keep_its_own_historical_date(graph):
+    """A mixed import retains individual dates and a fallback for undated entries."""
+    april = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    july = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    fallback = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    first = _fact(graph, "Max", "PLANNED", "a", "Max planned a in April")
+    first.valid_at = april
+    second = _fact(graph, "Max", "FINISHED", "b", "Max finished b in July")
+    second.valid_at = july
+    third = _fact(graph, "Max", "STARTED", "c", "Max started c in June")
+    result = await graph.save_facts(facts=[first, second, third], valid_at=fallback)
+    assert [datetime.fromisoformat(f["valid_at"]) for f in result["facts"]] == [
+        april, july, fallback]
+    assert all(datetime.fromisoformat(f["recorded_at"]) > july for f in result["facts"])
+    inventory = await graph.list_facts()
+    assert {f["fact_id"]: f["valid_at"] for f in inventory["facts"]} == {
+        f["fact_id"]: f["valid_at"] for f in result["facts"]}
+
+
+@pytest.mark.asyncio
+async def test_explicit_unknown_date_does_not_become_the_import_date(graph):
+    """Explicit null overrides the batch fallback and remains unknown on retrieval."""
+    fact = _fact(graph, "Max", "PLANNED", "a", "Max planned a sometime that spring")
+    fact.valid_at = None
+    result = await graph.save_facts(
+        facts=[fact], valid_at=datetime(2026, 5, 1, tzinfo=timezone.utc))
+    assert result["facts"][0]["valid_at"] is None
+    assert result["facts"][0]["recorded_at"]
+    assert (await graph.search_facts("Max"))[0]["valid_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_omitted_date_still_defaults_to_the_recording_time(graph, monkeypatch):
+    """Existing callers retain the current-time default when they omit dates."""
+    when = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(graph.store, "now", lambda: when)
+    result = await graph.save_facts(facts=[
+        _fact(graph, "Max", "PREFERS", "a", "Max prefers a")])
+    assert result["facts"][0]["valid_at"] == result["facts"][0]["recorded_at"] == when.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_dates_without_a_timezone_are_interpreted_as_utc(graph):
+    """Date-only imports receive consistent UTC timestamps on both date paths."""
+    when = datetime(2026, 5, 1)
+    first = _fact(graph, "Max", "PLANNED", "a", "Max planned a")
+    first.valid_at = when
+    second = _fact(graph, "Max", "PLANNED", "b", "Max planned b")
+    result = await graph.save_facts(facts=[first, second], valid_at=when)
+    assert {fact["valid_at"] for fact in result["facts"]} == {
+        when.replace(tzinfo=timezone.utc).isoformat()}
+
+
+@pytest.mark.asyncio
+async def test_fact_dates_survive_mcp_tool_validation(graph):
+    """The MCP boundary preserves historical, unknown, and omitted date inputs."""
+    from fastmcp import Client
+
+    base = {"subject": "Max", "relation": "PLANNED", "fact": "Max made a plan"}
+    async with Client(graph.mcp) as client:
+        result = await client.call_tool("save_facts", {
+            "facts": [
+                {**base, "object": "April", "valid_at": "2026-04-10T00:00:00Z"},
+                {**base, "object": "unknown", "valid_at": None},
+                {**base, "object": "fallback"},
+            ],
+            "valid_at": "2026-06-01T00:00:00Z",
+        })
+    facts = result.structured_content["facts"]
+    assert [fact["valid_at"] for fact in facts] == [
+        "2026-04-10T00:00:00+00:00", None, "2026-06-01T00:00:00+00:00"]
+
+
+@pytest.mark.asyncio
+async def test_date_correction_retains_the_fact_story_and_embedding(embedded):
+    """Repairing an import preserves identity, recording time, search, and provenance."""
+    text = "Max planned a in May"
+    result = await embedded.save_facts(
+        facts=[_fact(embedded, "Max", "PLANNED", "a", text)],
+        story="The dated source document.", source="archive/2026-05-01.md")
+    original = result["facts"][0]
+    before = await embedded.EntityEdge.get_by_uuid(embedded.store.driver(), original["fact_id"])
+    await before.load_fact_embedding(embedded.store.driver())
+    assert before.fact_embedding
+    when = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    fixed = await embedded.set_fact_valid_at(
+        original["fact_id"], when, reason="The import used the recording date")
+    assert fixed["fact_id"] == original["fact_id"]
+    assert fixed["fact"] == text
+    assert fixed["valid_at"] == when.isoformat()
+    assert fixed["recorded_at"] == original["recorded_at"]
+    assert fixed["episode_id"] == result["episode_id"]
+    assert fixed["valid_at_corrections"][0]["previous_valid_at"] == original["valid_at"]
+    assert fixed["valid_at_corrections"][0]["reason"] == "The import used the recording date"
+    assert (await embedded.get_story(result["episode_id"]))["fact_count"] == 1
+    assert (await embedded.search_facts(text))[0]["valid_at"] == when.isoformat()
+    assert len((await embedded.list_facts())["facts"]) == 1
+    repeated = await embedded.set_fact_valid_at(original["fact_id"], when)
+    assert repeated["valid_at_corrections"] == fixed["valid_at_corrections"]
+    unknown = await embedded.set_fact_valid_at(original["fact_id"], None, reason="Date uncertain")
+    assert unknown["valid_at"] is None
+    assert len(unknown["valid_at_corrections"]) == 2
+    assert (await embedded.search_facts(text))[0]["valid_at"] is None
+    restored = await embedded.set_fact_valid_at(original["fact_id"], when)
+    assert restored["valid_at_corrections"][-1]["previous_valid_at"] is None
+    after = await embedded.EntityEdge.get_by_uuid(embedded.store.driver(), original["fact_id"])
+    await after.load_fact_embedding(embedded.store.driver())
+    assert after.fact_embedding == before.fact_embedding
+
+
+@pytest.mark.asyncio
+async def test_date_correction_cannot_invert_a_facts_validity(graph):
+    """A correction cannot move a start date beyond the date the fact stopped applying."""
+    original_date = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    result = await graph.save_facts(
+        facts=[_fact(graph, "Max", "PLANNED", "a", "Max planned a")],
+        valid_at=original_date)
+    fact_id = result["facts"][0]["fact_id"]
+    await graph.supersede_fact(fact_id, invalid_at=datetime(2026, 5, 1, tzinfo=timezone.utc))
+    with pytest.raises(ValueError, match="invalid_at"):
+        await graph.set_fact_valid_at(fact_id, datetime(2026, 6, 1))
+    stored = (await graph.list_facts())["facts"][0]
+    assert stored["valid_at"] == original_date.isoformat()
+    assert "valid_at_corrections" not in stored
+
+
+@pytest.mark.asyncio
+async def test_date_correction_cannot_modify_another_group(graph, monkeypatch):
+    """A known ID is insufficient to modify a different memory group's date."""
+    result = await graph.save_facts(facts=[
+        _fact(graph, "Max", "PLANNED", "a", "Max planned a")])
+    monkeypatch.setattr(graph.store, "GROUP_ID", "other")
+    with pytest.raises(ValueError, match="group"):
+        await graph.set_fact_valid_at(result["facts"][0]["fact_id"], None)
+
+
 # ── Retrieval ────────────────────────────────────────────
 
 
