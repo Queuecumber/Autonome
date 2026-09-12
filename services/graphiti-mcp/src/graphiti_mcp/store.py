@@ -84,7 +84,23 @@ async def upsert_entity(name: str, entity_type: str, summary: str = "",
 
     An existing entity keeps its identity: a later mention adds the type and
     fills an empty summary rather than replacing what is already known.
+
+    Args:
+        name: Exact entity name used for lookup.
+        entity_type: Optional type. Surrounding whitespace is trimmed and
+            internal whitespace becomes underscores, so 'Chat room' and
+            'Chat_room' share one type. Blank types are omitted.
+        summary: Description to set on creation or when the existing one is empty.
+        attributes: Properties to merge into the entity.
+        embedding: Name embedding for a newly created entity.
+
+    Returns:
+        The stored entity with its canonical type labels.
+
+    Raises:
+        ValueError: If the normalized type is not a valid graph label.
     """
+    entity_type = "_".join(entity_type.split())
     existing = await find_entity(name)
     if existing is not None:
         changed = False

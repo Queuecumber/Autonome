@@ -114,6 +114,67 @@ async def test_an_existing_entity_gains_types_without_losing_them(graph):
     assert {"Person", "Reviewer"} <= set(entity["types"])
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subject_type,object_type", [
+    ("Chat room", "Character artifact"),
+    ("  Chat\t room  ", " Character\nartifact "),
+])
+async def test_multiword_entity_types_round_trip(graph, subject_type, object_type):
+    """Subject and object types accept whitespace and return canonical labels."""
+    result = await graph.save_facts(facts=[
+        _fact(graph, "Workshop chat", "CONTAINS", "Copper sigil",
+              "Workshop chat contains the Copper sigil", subject_type, object_type)])
+
+    assert result["facts"][0]["subject"] == "Workshop chat"
+    assert result["facts"][0]["object"] == "Copper sigil"
+    assert (await graph.get_entity("Workshop chat"))["types"] == ["Chat_room"]
+    assert (await graph.get_entity("Copper sigil"))["types"] == ["Character_artifact"]
+    assert (await graph.list_vocabulary())["entity_types"] == [
+        "Character_artifact", "Chat_room"]
+
+
+@pytest.mark.asyncio
+async def test_multiword_entity_types_reuse_existing_labels(graph):
+    """Adding a multi-word type preserves old types and reuses underscored aliases."""
+    for subject_type, object_type in [
+        ("Place", "Character_artifact"),
+        ("Chat room", "Character artifact"),
+        ("Chat_room", "Character_artifact"),
+    ]:
+        await graph.save_facts(facts=[
+            _fact(graph, "Workshop chat", "CONTAINS", "Copper sigil",
+                  "Workshop chat contains the Copper sigil", subject_type, object_type)])
+
+    room = await graph.get_entity("Workshop chat")
+    artifact = await graph.get_entity("Copper sigil")
+    assert sorted(room["types"]) == ["Chat_room", "Place"]
+    assert artifact["types"] == ["Character_artifact"]
+    assert len(room["facts"]) == len(artifact["facts"]) == 3
+    assert (await graph.list_vocabulary())["entity_types"] == [
+        "Character_artifact", "Chat_room", "Place"]
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_entity_types_are_omitted(graph):
+    """Whitespace-only types behave like the optional empty type."""
+    await graph.save_facts(facts=[
+        _fact(graph, "Workshop chat", "CONTAINS", "Copper sigil",
+              "Workshop chat contains the Copper sigil", " \t ", "\n")])
+
+    assert (await graph.get_entity("Workshop chat"))["types"] == []
+    assert (await graph.get_entity("Copper sigil"))["types"] == []
+    assert (await graph.list_vocabulary())["entity_types"] == []
+
+
+@pytest.mark.asyncio
+async def test_entity_types_still_reject_punctuation(graph):
+    """Whitespace normalization must retain validation of other label characters."""
+    with pytest.raises(ValueError, match="node_labels"):
+        await graph.save_facts(facts=[
+            _fact(graph, "Workshop chat", "CONTAINS", "Copper sigil",
+                  "Workshop chat contains the Copper sigil", "Chat` room", "Artifact")])
+
+
 # ── Stories ──────────────────────────────────────────────
 
 

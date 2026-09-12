@@ -63,10 +63,12 @@ later when a bare fact is not enough.
 class Fact(BaseModel):
     """One relationship, as a sentence plus the two things it connects."""
     subject: str = Field(description="The entity the fact is about, e.g. 'Max'.")
-    subject_type: str = Field(default="", description="Its kind, e.g. 'Person'.")
+    subject_type: str = Field(default="", description=(
+        "Its kind, e.g. 'Person' or 'Chat room'. Whitespace is normalized to underscores."))
     relation: str = Field(description="The relationship, e.g. 'PREFERS'.")
     object: str = Field(description="What it relates to, e.g. 'commit granularity'.")
-    object_type: str = Field(default="", description="Its kind, e.g. 'Preference'.")
+    object_type: str = Field(default="", description=(
+        "Its kind, e.g. 'Preference' or 'Character artifact'. Whitespace is normalized to underscores."))
     fact: str = Field(description="The full sentence, as you would write it.")
 
 
@@ -210,6 +212,7 @@ async def get_entity(name: str) -> dict:
 
     Returns:
         The entity and every fact it takes part in, in either direction.
+        Types use canonical labels, e.g. 'Chat_room' for 'Chat room'.
     """
     node = await store.find_entity(name)
     if node is None:
@@ -227,6 +230,7 @@ async def list_vocabulary() -> dict:
 
     Check this before inventing a new one — reusing `PREFERS` keeps facts
     findable together, where adding `LIKES` quietly splits them in two.
+    Entity types use canonical labels, e.g. 'Chat_room' for 'Chat room'.
     """
     return await store.vocabulary()
 
