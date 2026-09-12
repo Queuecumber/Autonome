@@ -25,6 +25,7 @@ jobs:
       GRAPH_HOST: localhost
       GRAPH_PORT: "6379"
       REQUIRE_GRAPH_TESTS: "1"
+      REQUIRE_HELM_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +33,11 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.20.2
 
       - name: Run tests with coverage
         run: |

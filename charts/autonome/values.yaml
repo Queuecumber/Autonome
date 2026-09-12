@@ -78,7 +78,20 @@ services:
   memoryMcp:      { image: { name: autonome-memory-mcp },      port: 8001 }
   systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
   timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }
-  graphitiMcp:    { image: { name: autonome-graphiti-mcp },    port: 8005 }
+  graphitiMcp:
+    image: { name: autonome-graphiti-mcp }
+    port: 8005
+    embedding:
+      model: ""
+      baseUrl: ""
+      provider: nvidia
+      dim: 0
+      timeoutSeconds: 20
+      minScore: 0.6
+      apiKey: ""
+      apiKeySecretRef:
+        name: ""
+        key: EMBEDDING_API_KEY
   # The graph store behind graphiti-mcp. Embeddings are optional: unset, the
   # service still records and traverses facts, and keyword search still works —
   # only semantic search is disabled.

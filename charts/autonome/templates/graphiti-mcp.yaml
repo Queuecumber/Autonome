@@ -1,6 +1,14 @@
 {{- $svc := .Values.services.graphitiMcp }}
 {{- $graph := .Values.services.falkordb }}
 {{- $name := "graphiti-mcp" }}
+{{- $embedding := $svc.embedding | default dict }}
+{{- $keyRef := $embedding.apiKeySecretRef | default dict }}
+{{- if and $embedding.apiKey (or $keyRef.name (and $keyRef.key (ne $keyRef.key "EMBEDDING_API_KEY"))) }}
+{{- fail "Choose embedding.apiKey or embedding.apiKeySecretRef, not both" }}
+{{- end }}
+{{- if and $embedding.apiKey (not .Values.secrets.create) }}
+{{- fail "embedding.apiKey requires secrets.create=true; otherwise use apiKeySecretRef" }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -17,6 +25,11 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      {{- if and .Values.secrets.create (not $keyRef.name) }}
+      {{- $secret := include (print $.Template.BasePath "/secret.yaml") $ | fromYaml }}
+      annotations:
+        checksum/embedding-secret: {{ get $secret.stringData ($keyRef.key | default "EMBEDDING_API_KEY") | default "" | sha256sum }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: {{ $name }}
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -34,17 +47,24 @@ spec:
           env:
             - { name: GRAPH_HOST, value: "falkordb" }
             - { name: GRAPH_PORT, value: "{{ $graph.port }}" }
-            {{- with $svc.embedding }}
-            - { name: EMBEDDING_BASE_URL, value: {{ .baseUrl | quote }} }
+            {{- with $embedding }}
+            {{- if .model }}
+            - { name: EMBEDDING_BASE_URL, value: {{ required "services.graphitiMcp.embedding.baseUrl is required when model is set" .baseUrl | quote }} }
+            {{- else }}
+            - { name: EMBEDDING_BASE_URL, value: {{ .baseUrl | default "" | quote }} }
+            {{- end }}
             - { name: EMBEDDING_MODEL,    value: {{ .model | quote }} }
             - { name: EMBEDDING_DIM,      value: {{ .dim | quote }} }
+            - { name: EMBEDDING_PROVIDER, value: {{ .provider | quote }} }
+            - { name: EMBEDDING_TIMEOUT_SECONDS, value: {{ .timeoutSeconds | quote }} }
+            - { name: EMBEDDING_MIN_SCORE, value: {{ .minScore | quote }} }
             {{- end }}
             - name: EMBEDDING_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "autonome.secretName" . }}
-                  key: EMBEDDING_API_KEY
-                  optional: true
+                  name: {{ $keyRef.name | default (include "autonome.secretName" .) }}
+                  key: {{ $keyRef.key | default "EMBEDDING_API_KEY" }}
+                  optional: {{ empty $keyRef.name }}
           readinessProbe:
             tcpSocket: { port: {{ $svc.port }} }
             initialDelaySeconds: 5
