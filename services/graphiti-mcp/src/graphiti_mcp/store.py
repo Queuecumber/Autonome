@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 from graphiti_core.driver.falkordb_driver import FalkorDriver
 from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
+from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.models.edges.edge_db_queries import get_entity_edge_return_query
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from redis.exceptions import ResponseError
@@ -202,20 +203,76 @@ async def save_edge(source: EntityNode, relation: str, target: EntityNode,
     return edge
 
 
-async def update_edge(edge: EntityEdge) -> None:
-    """Persist a change to an existing edge without losing its vector.
+async def get_edge(fact_id: str) -> EntityEdge:
+    """Read one fact without relying on FalkorDB's relationship UUID index.
 
-    `get_by_uuid` does not populate `fact_embedding` — it has its own loader —
-    so the obvious read-modify-write cycle saves a null over the embedding and
-    quietly removes the fact from semantic search while leaving it in the
-    graph. Every mutation has to come through here.
+    Args:
+        fact_id: The complete fact ID returned by a save, search, or inventory.
+
+    Returns:
+        The uniquely matching fact in the configured memory group. Its vector
+        is not loaded; metadata updates preserve the database's stored vector.
+
+    Raises:
+        EdgeNotFoundError: If the fact does not exist.
+        ValueError: If the ID is ambiguous or belongs to another memory group.
     """
-    if edge.fact_embedding is None:
-        try:
-            await edge.load_fact_embedding(driver())
-        except Exception:
-            pass          # never had one; a write is still better than a loss
-    await edge.save(driver())
+    # Indexed UUID equality can miss existing relationships that search still returns.
+    records, _, _ = await driver().execute_query(
+        "MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity) "
+        "WHERE toString(e.uuid) = $uuid RETURN "
+        + get_entity_edge_return_query(driver().provider) + " LIMIT 2",
+        uuid=fact_id,
+    )
+    if not records:
+        raise EdgeNotFoundError(fact_id)
+    if len(records) != 1:
+        raise ValueError("Multiple facts share this ID; refusing an ambiguous lookup")
+    edge = get_entity_edge_from_record(records[0], driver().provider)
+    if edge.group_id != GROUP_ID:
+        raise ValueError("Fact does not belong to the configured memory group")
+    return edge
+
+
+async def update_edge(edge: EntityEdge) -> None:
+    """Update an existing fact in place while retaining its stored embedding.
+
+    Args:
+        edge: The updated fact model. Its ID, group, and endpoints must still
+            identify exactly one existing relationship. The model's embedding
+            is ignored; the existing database vector is retained atomically.
+
+    Returns:
+        None after the update is confirmed. This operation never creates an edge.
+
+    Raises:
+        ValueError: If the model belongs to another memory group.
+        RuntimeError: If the fact is missing, ambiguous, or its identity changed.
+    """
+    if edge.group_id != GROUP_ID:
+        raise ValueError("Fact does not belong to the configured memory group")
+    properties = edge.model_dump(exclude={
+        "source_node_uuid", "target_node_uuid", "attributes", "fact_embedding"})
+    properties.update(source_uuid=edge.source_node_uuid, target_uuid=edge.target_node_uuid)
+    reserved = set(type(edge).model_fields) | {"source_uuid", "target_uuid"}
+    properties.update({key: value for key, value in (edge.attributes or {}).items()
+                       if key not in reserved})
+    records, _, _ = await driver().execute_query(
+        "MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity) "
+        "WHERE toString(e.uuid) = $uuid "
+        "WITH collect(e) AS matches WHERE size(matches) = 1 "
+        "UNWIND matches AS e "
+        "WITH e WHERE e.group_id = $group_id "
+        "AND toString(startNode(e).uuid) = $source_uuid "
+        "AND toString(endNode(e).uuid) = $target_uuid "
+        "WITH e, e.fact_embedding AS stored_embedding "
+        "SET e = $properties SET e.fact_embedding = stored_embedding "
+        "RETURN e.uuid AS uuid",
+        uuid=edge.uuid, group_id=GROUP_ID, source_uuid=edge.source_node_uuid,
+        target_uuid=edge.target_node_uuid, properties=properties,
+    )
+    if len(records) != 1:
+        raise RuntimeError("Fact no longer has one matching identity; retry the lookup")
 
 
 async def link_episode(ep: EpisodicNode, edge_uuids: list[str]) -> None:

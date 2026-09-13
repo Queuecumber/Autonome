@@ -395,11 +395,9 @@ async def explain_fact(fact_id: str,
         raise ValueError("source_limit must be 1..10 and story_chars must be 0..5000")
     async with asyncio.timeout(traversal.TIMEOUT_SECONDS):
         try:
-            edge = await EntityEdge.get_by_uuid(store.driver(), fact_id)
+            edge = await store.get_edge(fact_id)
         except EdgeNotFoundError:
             return {"found": False, "fact_id": fact_id}
-        if edge.group_id != store.GROUP_ID:
-            raise ValueError("Fact does not belong to the configured memory group")
         nodes = await _load_nodes([edge.source_node_uuid, edge.target_node_uuid])
         episode_ids = list(dict.fromkeys(edge.episodes or []))
         selected = episode_ids[:source_limit]
@@ -437,8 +435,16 @@ async def supersede_fact(fact_id: str, invalid_at: datetime | None = None,
         fact_id: From a search result.
         invalid_at: When it stopped being true. Defaults to now.
         reason: Optional note about what changed.
+
+    Returns:
+        The existing fact marked as superseded, retaining its identity and vector.
+
+    Raises:
+        EdgeNotFoundError: If the fact does not exist.
+        ValueError: If the ID is ambiguous or belongs to another memory group.
+        RuntimeError: If the fact's identity changes before the update completes.
     """
-    edge = await EntityEdge.get_by_uuid(store.driver(), fact_id)
+    edge = await store.get_edge(fact_id)
     edge.invalid_at = invalid_at or store.now()
     if reason:
         edge.attributes = {**(edge.attributes or {}), "superseded_reason": reason}
@@ -463,13 +469,12 @@ async def set_fact_valid_at(fact_id: str, valid_at: datetime | None,
         original recorded_at, sentence, story links, and embedding are retained.
 
     Raises:
-        ValueError: If the fact belongs to another group or the new date is
-            later than its invalid_at date.
+        ValueError: If the ID is ambiguous, the fact belongs to another group,
+            or the new date is later than its invalid_at date.
         EdgeNotFoundError: If no fact has the supplied ID.
+        RuntimeError: If the fact's identity changes before the update completes.
     """
-    edge = await EntityEdge.get_by_uuid(store.driver(), fact_id)
-    if edge.group_id != store.GROUP_ID:
-        raise ValueError("Fact does not belong to the configured memory group")
+    edge = await store.get_edge(fact_id)
     if valid_at is not None:
         valid_at = store.utc_time(valid_at)
         if edge.invalid_at is not None and valid_at > store.utc_time(edge.invalid_at):

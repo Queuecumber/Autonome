@@ -1005,7 +1005,7 @@ async def test_explanation_respects_the_overall_timeout(graph, monkeypatch):
         """Simulate an unresponsive graph read."""
         await asyncio.sleep(1)
 
-    monkeypatch.setattr(graph.EntityEdge, "get_by_uuid", slow_read)
+    monkeypatch.setattr(graph.store, "get_edge", slow_read)
     monkeypatch.setattr(graph.traversal, "TIMEOUT_SECONDS", 0.01)
     with pytest.raises(TimeoutError):
         await graph.explain_fact(str(uuid.uuid4()))
@@ -1031,3 +1031,136 @@ def test_evidence_kind_rejects_unrecognized_certainty_labels():
 
     with pytest.raises(ValueError):
         Fact(subject="A", relation="KNOWS", object="B", fact="A knows B", evidence_kind="verified")
+
+
+@pytest.mark.asyncio
+async def test_three_todos_remain_mutable_when_indexed_uuid_reads_miss_them(graph, monkeypatch):
+    """Search-visible facts can be corrected without indexed UUID reads or edge upserts."""
+    from graphiti_core.errors import EdgeNotFoundError
+
+    identifiers = [
+        "e1c6f27d-0000-4000-8000-000000000001",
+        "f90f21a5-0000-4000-8000-000000000002",
+        "20f6386f-0000-4000-8000-000000000003",
+    ]
+    remaining_ids = iter(identifiers)
+    edge_model = graph.store.EntityEdge
+
+    def next_edge(**kwargs):
+        """Use synthetic UUIDs with the prefixes from the reported batch."""
+        return edge_model(uuid=next(remaining_ids), **kwargs)
+
+    async def embedding(text, *, is_query=False):
+        """Attach a known vector so metadata updates must preserve it."""
+        return [0.6, 0.8, 0.0, 0.0]
+
+    monkeypatch.setattr(graph.store, "EntityEdge", next_edge)
+    monkeypatch.setattr(graph.embed, "embed", embedding)
+    saved = await graph.save_facts(facts=[
+        _fact(graph, "Max", "TODO", f"task {i}", f"Max has task {i} to do",
+              o_type="Life task") for i in range(3)])
+    execute = graph.store.driver().execute_query
+
+    async def snapshot():
+        """Read physical relationship identities and vectors without the UUID index."""
+        records, _, _ = await execute(
+            "MATCH (s:Entity)-[e:RELATES_TO]->(t:Entity) "
+            "WHERE toString(e.uuid) IN $ids "
+            "RETURN e.uuid AS uuid, id(e) AS relationship_id, s.uuid AS source_uuid, "
+            "t.uuid AS target_uuid, e.fact AS fact, e.fact_embedding AS embedding, "
+            "e.created_at AS created_at, e.valid_at AS valid_at, e.episodes AS episodes",
+            ids=identifiers)
+        return records
+
+    before = {record["uuid"]: record for record in await snapshot()}
+    assert len(before) == 3
+
+    async def missing_index_entries(query, **params):
+        """Reproduce the observed point-index miss while retaining real database reads."""
+        if (params.get("uuid") in identifiers and "RELATES_TO" in query
+                and "toString(e.uuid)" not in query):
+            return [], [], None
+        if "MERGE" in query:
+            raise AssertionError("Updating a known fact must never upsert a relationship")
+        return await execute(query, **params)
+
+    monkeypatch.setattr(graph.store.driver(), "execute_query", missing_index_entries)
+    for identifier in identifiers:
+        with pytest.raises(EdgeNotFoundError):
+            await edge_model.get_by_uuid(graph.store.driver(), identifier)
+    assert {hit["fact_id"] for hit in await graph.search_facts("Max")} == set(identifiers)
+
+    when = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    for original in saved["facts"]:
+        fixed = await graph.set_fact_valid_at(original["fact_id"], when, reason="Source date")
+        assert fixed["valid_at"] == when.isoformat()
+        assert fixed["recorded_at"] == original["recorded_at"]
+        assert fixed["fact"] == original["fact"]
+        assert (await graph.explain_fact(original["fact_id"]))["found"]
+    assert (await graph.supersede_fact(identifiers[0], reason="Completed"))["superseded"]
+
+    after = await snapshot()
+    assert len(after) == 3
+    for record in after:
+        assert record["valid_at"] == when.isoformat()
+        for field in ["relationship_id", "source_uuid", "target_uuid", "fact",
+                      "embedding", "created_at", "episodes"]:
+            assert record[field] == before[record["uuid"]][field]
+
+
+@pytest.mark.asyncio
+async def test_scalar_fact_lookup_rejects_missing_partial_and_foreign_ids(graph, monkeypatch):
+    """Exact ID lookup must not match prefixes or cross a memory group boundary."""
+    from graphiti_core.errors import EdgeNotFoundError
+
+    saved = await _save_links(graph, [("A", "KNOWS", "B")])
+    identifier = saved["facts"][0]["fact_id"]
+    assert (await graph.store.get_edge(identifier)).uuid == identifier
+    for missing in [str(uuid.uuid4()), identifier[:8]]:
+        with pytest.raises(EdgeNotFoundError):
+            await graph.store.get_edge(missing)
+    monkeypatch.setattr(graph.store, "GROUP_ID", "other")
+    with pytest.raises(ValueError, match="group"):
+        await graph.store.get_edge(identifier)
+
+
+@pytest.mark.asyncio
+async def test_metadata_updates_refuse_duplicate_uuid_records(graph):
+    """A genuinely ambiguous ID cannot be read or mutate multiple relationships."""
+    saved = await _save_links(graph, [("A", "KNOWS", "B")])
+    identifier = saved["facts"][0]["fact_id"]
+    edge = await graph.store.get_edge(identifier)
+    original_date = edge.valid_at
+    await graph.store.driver().execute_query(
+        "MATCH (s:Entity)-[e:RELATES_TO]->(t:Entity) WHERE toString(e.uuid) = $uuid "
+        "CREATE (s)-[duplicate:RELATES_TO]->(t) SET duplicate = properties(e)", uuid=identifier)
+    with pytest.raises(ValueError, match="Multiple facts"):
+        await graph.store.get_edge(identifier)
+    edge.valid_at = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    with pytest.raises(RuntimeError, match="matching identity"):
+        await graph.store.update_edge(edge)
+    records, _, _ = await graph.store.driver().execute_query(
+        "MATCH ()-[e:RELATES_TO]->() WHERE toString(e.uuid) = $uuid "
+        "RETURN e.valid_at AS valid_at", uuid=identifier)
+    assert len(records) == 2
+    assert all(datetime.fromisoformat(record["valid_at"]) == original_date for record in records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["missing", "endpoints", "group"])
+async def test_metadata_updates_never_create_a_missing_or_reidentified_edge(graph, change):
+    """Updating a stale model cannot mint a new edge or change its endpoints."""
+    saved = await _save_links(graph, [("A", "KNOWS", "B")])
+    edge = await graph.store.get_edge(saved["facts"][0]["fact_id"])
+    if change == "missing":
+        edge.uuid = str(uuid.uuid4())
+    elif change == "endpoints":
+        edge.target_node_uuid = edge.source_node_uuid
+    else:
+        edge.group_id = "other"
+    with pytest.raises(ValueError if change == "group" else RuntimeError):
+        await graph.store.update_edge(edge)
+    facts = (await graph.list_facts())["facts"]
+    assert len(facts) == 1
+    assert facts[0]["fact_id"] == saved["facts"][0]["fact_id"]
+    assert (facts[0]["subject"], facts[0]["object"]) == ("A", "B")
