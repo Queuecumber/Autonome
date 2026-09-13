@@ -17,12 +17,15 @@ database is not a foundation for long-term memory, so we pay for a service.
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from graphiti_core.driver.falkordb_driver import FalkorDriver
 from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
 from graphiti_core.models.edges.edge_db_queries import get_entity_edge_return_query
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
+from redis.exceptions import ResponseError
+
+Direction = Literal["both", "outgoing", "incoming"]
 
 GRAPH_HOST = os.environ.get("GRAPH_HOST", "localhost")
 GRAPH_PORT = int(os.environ.get("GRAPH_PORT", "6379"))
@@ -250,6 +253,60 @@ async def page_edges(limit: int, cursor: str | None = None) -> list[EntityEdge]:
         group_id=GROUP_ID, cursor=cursor, limit=limit,
     )
     return [get_entity_edge_from_record(record, driver().provider) for record in records]
+
+
+async def adjacent_edges(node_uuids: list[str], excluded: list[str], limit: int,
+                         direction: Direction = "both", include_superseded: bool = False,
+                         preferred_uuid: str | None = None) -> list[EntityEdge]:
+    """Read a bounded, eligible traversal frontier without crossing memory groups.
+
+    Args:
+        node_uuids: Entities whose adjacent facts should be read.
+        excluded: Fact IDs already visited.
+        limit: Maximum number of facts to return.
+        direction: Follow facts in either, subject-to-object, or reverse direction.
+        include_superseded: Allow historical facts to participate in the traversal.
+        preferred_uuid: Prefer edges reaching this entity when limiting a frontier.
+
+    Returns:
+        Distinct facts, prioritizing the preferred entity then ordered by fact ID.
+
+    Raises:
+        ValueError: If direction is invalid.
+        TimeoutError: If the database query exceeds two seconds.
+    """
+    frontiers = {
+        "both": "(n.uuid IN $frontier OR m.uuid IN $frontier)",
+        "outgoing": "n.uuid IN $frontier",
+        "incoming": "m.uuid IN $frontier",
+    }
+    if direction not in frontiers:
+        raise ValueError("direction must be both, outgoing, or incoming")
+    if not node_uuids:
+        return []
+    validity = "" if include_superseded else "AND e.invalid_at IS NULL "
+    query = (
+        "MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity) "
+        "WHERE " + frontiers[direction] + " AND n.group_id = $group_id "
+        "AND m.group_id = $group_id AND e.group_id = $group_id "
+        "AND NOT e.uuid IN $excluded " + validity
+        + "WITH e, CASE WHEN n.uuid = $preferred OR m.uuid = $preferred THEN 0 ELSE 1 END AS priority "
+        "RETURN " + get_entity_edge_return_query(driver().provider)
+        + " ORDER BY priority, e.uuid LIMIT $limit"
+    )
+    graph = driver().client.select_graph(GRAPH_DATABASE)
+    try:
+        result = await graph.ro_query(query, params={
+            "frontier": node_uuids, "group_id": GROUP_ID, "excluded": excluded,
+            "preferred": preferred_uuid, "limit": limit,
+        }, timeout=2000)
+    except ResponseError as error:
+        if "timed out" in str(error).lower() or "timeout" in str(error).lower():
+            raise TimeoutError("Graph traversal query timed out; narrow the exploration") from error
+        raise
+    fields = [column[1] for column in result.header]
+    return [get_entity_edge_from_record(dict(zip(fields, row, strict=True)), driver().provider)
+            for row in result.result_set]
 
 
 async def vocabulary() -> dict[str, list[str]]:

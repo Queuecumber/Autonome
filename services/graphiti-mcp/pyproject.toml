@@ -6,6 +6,7 @@ dependencies = [
     "fastmcp>=2.0,<4",
     "graphiti-core[falkordb]>=0.30,<0.31",
     "openai>=1.91.0,<3",
+    "networkx>=3.4,<4",
 ]
 
 [build-system]
