@@ -147,14 +147,21 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
         The stored `facts` (with their ids) and the `episode_id` they share.
         For a nonempty batch, story or source creates an episode; otherwise
         its ID is null. An empty batch is a no-op.
+        All supplied labels are validated before any write, so a rejected label
+        leaves no partial facts, entity changes, or provenance. Database failures
+        during writing can still leave partial results; inspect memory before
+        retrying a failed database operation. This is not a multi-write transaction.
 
     Raises:
-        ValueError: If episode_id is combined with story or source.
+        ValueError: If episode_id is combined with story or source, or an entity
+            type is invalid after whitespace normalization.
     """
     if episode_id and (story or source):
         raise ValueError("Use episode_id to reuse provenance, or story/source to create it")
     if not facts:
         return {"facts": [], "episode_id": episode_id or None}
+    entity_types = [(store.normalize_entity_type(f.subject_type),
+                     store.normalize_entity_type(f.object_type)) for f in facts]
     await store.ensure_indices()
     batch_date = store.utc_time(valid_at) if valid_at is not None else store.now()
 
@@ -165,14 +172,14 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
         ep = await store.save_episode(story, source, batch_date)
 
     saved, uuids = [], []
-    for f in facts:
+    for f, (subject_type, object_type) in zip(facts, entity_types, strict=True):
         fact_date = batch_date
         if "valid_at" in f.model_fields_set:
             fact_date = store.utc_time(f.valid_at) if f.valid_at is not None else None
         subj = await store.upsert_entity(
-            f.subject, f.subject_type, embedding=await embed.embed(f.subject))
+            f.subject, subject_type, embedding=await embed.embed(f.subject))
         obj = await store.upsert_entity(
-            f.object, f.object_type, embedding=await embed.embed(f.object))
+            f.object, object_type, embedding=await embed.embed(f.object))
         edge = await store.save_edge(
             subj, f.relation, obj, f.fact, valid_at=fact_date,
             attributes={"evidence_kind": f.evidence_kind, "rationale": f.rationale},

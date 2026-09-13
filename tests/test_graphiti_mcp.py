@@ -116,6 +116,20 @@ async def test_an_existing_entity_gains_types_without_losing_them(graph):
 
 
 @pytest.mark.asyncio
+async def test_entity_type_updates_preserve_summary_and_merge_attributes(graph):
+    """Type normalization retains entity identity and the existing metadata contract."""
+    original = await graph.store.upsert_entity("Workshop", "Place", attributes={"original": "kept"})
+    enriched = await graph.store.upsert_entity(
+        "Workshop", "Chat room", summary="First description", attributes={"added": "new"})
+    assert enriched.uuid == original.uuid
+    unchanged = await graph.store.upsert_entity("Workshop", "Chat_room", summary="Replacement")
+    assert unchanged.uuid == original.uuid
+    assert unchanged.summary == "First description"
+    assert unchanged.attributes == {"original": "kept", "added": "new"}
+    assert set(unchanged.labels) == {"Entity", "Place", "Chat_room"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("subject_type,object_type", [
     ("Chat room", "Character artifact"),
     ("  Chat\t room  ", " Character\nartifact "),
@@ -174,6 +188,94 @@ async def test_entity_types_still_reject_punctuation(graph):
         await graph.save_facts(facts=[
             _fact(graph, "Workshop chat", "CONTAINS", "Copper sigil",
                   "Workshop chat contains the Copper sigil", "Chat` room", "Artifact")])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_field", ["subject_type", "object_type"])
+@pytest.mark.parametrize("reuse_story", [False, True])
+async def test_invalid_batch_labels_leave_no_partial_writes(graph, monkeypatch, invalid_field,
+                                                            reuse_story):
+    """A bad fifth label leaves no facts, entity changes, or provenance to duplicate on retry."""
+    from unittest.mock import AsyncMock
+
+    original = await graph.save_facts(
+        facts=[_fact(graph, "Existing", "KEEPS", "Original", "Existing keeps Original")],
+        story="Original story", source="original-source")
+
+    async def snapshot():
+        """Return all stored node labels and properties plus relationship properties."""
+        nodes, _, _ = await graph.store.driver().execute_query(
+            "MATCH (n) RETURN n.uuid AS uuid, labels(n) AS labels, properties(n) AS properties "
+            "ORDER BY uuid")
+        edges, _, _ = await graph.store.driver().execute_query(
+            "MATCH ()-[e]->() RETURN e.uuid AS uuid, properties(e) AS properties ORDER BY uuid")
+        return nodes, edges
+
+    before = await snapshot()
+    facts = [_fact(graph, "Existing", "KEEPS", f"New {i}", f"Existing keeps New {i}",
+                   s_type="Additional type") for i in range(4)]
+    last = _fact(graph, "New subject", "KNOWS", "New object", "New subject knows New object")
+    setattr(last, invalid_field, "Invalid` label")
+    facts.append(last)
+    provenance = ({"episode_id": original["episode_id"]} if reuse_story
+                  else {"story": "New batch story", "source": "batch-source"})
+    with monkeypatch.context() as scoped:
+        embedding = AsyncMock(return_value=None)
+        initialization = AsyncMock()
+        scoped.setattr(graph.embed, "embed", embedding)
+        scoped.setattr(graph.store, "ensure_indices", initialization)
+        with pytest.raises(ValueError, match="node_labels"):
+            await graph.save_facts(facts=facts, **provenance)
+        assert await snapshot() == before
+        embedding.assert_not_awaited()
+        initialization.assert_not_awaited()
+
+    setattr(last, invalid_field, "Valid label")
+    saved = await graph.save_facts(facts=facts, **provenance)
+    inventory = (await graph.list_facts())["facts"]
+    assert len(inventory) == 6
+    assert len({fact["fact_id"] for fact in inventory}) == 6
+    assert len(saved["facts"]) == 5
+    story = await graph.get_story(saved["episode_id"])
+    assert story["fact_count"] == (6 if reuse_story else 5)
+    assert story["story"] == ("Original story" if reuse_story else "New batch story")
+
+
+@pytest.mark.asyncio
+async def test_invalid_batch_labels_are_rejected_over_mcp_before_any_write(graph):
+    """Tool input validation rejects a late bad type without storing a prefix or story."""
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+
+    async with Client(graph.mcp) as client:
+        with pytest.raises(ToolError, match="node_labels"):
+            await client.call_tool("save_facts", {"facts": [
+                {"subject": "A", "relation": "KNOWS", "object": "B", "fact": "A knows B"},
+                {"subject": "B", "relation": "KNOWS", "object": "C", "fact": "B knows C",
+                 "object_type": "Invalid` label"},
+            ], "story": "Rejected story"})
+    records, _, _ = await graph.store.driver().execute_query("MATCH (n) RETURN count(n) AS count")
+    assert records == [{"count": 0}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provenance", [{}, {"story": "Unused", "source": "Unused"},
+                                        {"episode_id": "unused-episode"}])
+async def test_empty_batches_remain_noops(graph, monkeypatch, provenance):
+    """An empty batch neither creates nor looks up provenance and needs no services."""
+    from unittest.mock import AsyncMock, Mock
+
+    driver = Mock(side_effect=AssertionError("Empty batches must not access the graph"))
+    initialize = AsyncMock()
+    embedding = AsyncMock()
+    monkeypatch.setattr(graph.store, "driver", driver)
+    monkeypatch.setattr(graph.store, "ensure_indices", initialize)
+    monkeypatch.setattr(graph.embed, "embed", embedding)
+    assert await graph.save_facts(facts=[], **provenance) == {
+        "facts": [], "episode_id": provenance.get("episode_id")}
+    driver.assert_not_called()
+    initialize.assert_not_awaited()
+    embedding.assert_not_awaited()
 
 
 # ── Stories ──────────────────────────────────────────────

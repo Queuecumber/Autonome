@@ -22,6 +22,7 @@ from typing import Any, Literal
 from graphiti_core.driver.falkordb_driver import FalkorDriver
 from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
 from graphiti_core.errors import EdgeNotFoundError
+from graphiti_core.helpers import validate_node_labels
 from graphiti_core.models.edges.edge_db_queries import get_entity_edge_return_query
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from redis.exceptions import ResponseError
@@ -96,6 +97,23 @@ async def find_entity(name: str) -> EntityNode | None:
     return await EntityNode.get_by_uuid(driver(), records[0]["uuid"])
 
 
+def normalize_entity_type(entity_type: str) -> str:
+    """Normalize and validate an optional entity type without accessing storage.
+
+    Args:
+        entity_type: A type label; whitespace is collapsed to underscores.
+
+    Returns:
+        A safe graph label, or an empty string for a blank type.
+
+    Raises:
+        ValueError: If the normalized type is not a valid graph label.
+    """
+    label = "_".join(entity_type.split())
+    validate_node_labels([label] if label else [])
+    return label
+
+
 async def upsert_entity(name: str, entity_type: str, summary: str = "",
                         attributes: dict[str, Any] | None = None,
                         embedding: list[float] | None = None) -> EntityNode:
@@ -119,7 +137,7 @@ async def upsert_entity(name: str, entity_type: str, summary: str = "",
     Raises:
         ValueError: If the normalized type is not a valid graph label.
     """
-    entity_type = "_".join(entity_type.split())
+    entity_type = normalize_entity_type(entity_type)
     existing = await find_entity(name)
     if existing is not None:
         changed = False
