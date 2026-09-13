@@ -27,6 +27,41 @@ helm install <release> ./charts/autonome \
 
 Keys: `OPENAI_API_KEY` (required), `MATRIX_PASSWORD` (required), `SEARCH_API_KEY` and `EMBEDDING_API_KEY` (optional).
 
+## Graph Exploration
+
+The graph MCP exposes structural exploration tools alongside semantic and keyword
+search. These tools use recorded relationships and do not call an embedding or
+language model.
+
+| Tool | Purpose |
+|---|---|
+| `get_neighborhood(name, max_hops=2, limit=50, direction="both")` | Explore nearby facts and entities, including hop distances. Direction can be `both`, `outgoing`, or `incoming`. |
+| `find_path(source, target, max_hops=4, limit=100, directed=false)` | Return one shortest path in the bounded exploration, with ordered facts and explicit traversal direction. |
+| `explain_fact(fact_id, source_limit=5, story_chars=2000)` | Inspect the stored evidence label, rationale, provenance, date corrections, and supersession reason. |
+
+Neighborhood and path requests allow at most six hops and 100 explored facts.
+They have a ten-second overall deadline; each frontier query has a two-second
+database execution limit. An extra fact may be read to detect truncation. A
+`truncated: true` result is incomplete; `found: false` means only that the bounded
+search found no route. Graph reads are not snapshots of concurrent writes.
+
+Superseded facts are excluded before every traversal step unless
+`include_superseded=true`. They cannot act as hidden bridges in a current
+exploration. A historical path may combine facts whose validity dates do not
+overlap. Reverse traversal preserves each fact's original subject/object and
+sets `traversed_forward=false`; a connection is not a new transitive or causal
+claim.
+
+Facts may include `evidence_kind` (`reported`, `inferred`, `uncertain`, or
+`unspecified`) and `rationale`. The label records how a claim was established,
+not a probability or independent truth verification. Legacy facts remain
+`unspecified`. Explanations report unavailable source links and truncation
+explicitly; use `get_story` to read a full narrative when needed. Source previews
+are limited to ten records and 5000 narrative characters per record.
+
+Deploy the updated graphiti-mcp image and restart session-manager after the
+service is ready to discover these tools. No graph migration is required.
+
 ## Graph Memory Embeddings
 
 Embeddings are optional. Leaving `services.graphitiMcp.embedding.model` empty keeps

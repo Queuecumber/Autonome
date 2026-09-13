@@ -6,6 +6,7 @@ write path. These tests pin that: every fact here is constructed by hand, with
 schema invented on the spot, and nothing configures a model.
 """
 
+import asyncio
 import math
 import os
 import uuid
@@ -13,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import falkordb
 import pytest
-from redis.exceptions import RedisError
+from redis.exceptions import RedisError, ResponseError
 
 GRAPH_HOST = os.environ.get("GRAPH_HOST", "localhost")
 GRAPH_PORT = int(os.environ.get("GRAPH_PORT", "6379"))
@@ -659,3 +660,374 @@ async def test_inventory_rejects_invalid_cursors(graph):
     """Malformed cursors fail clearly instead of returning misleading pages."""
     with pytest.raises(ValueError):
         await graph.list_facts(cursor="not-a-cursor")
+
+
+async def _save_links(graph, links):
+    """Store synthetic directed relationships and return their save response."""
+    return await graph.save_facts(facts=[
+        graph.Fact(subject=source, relation=relation, object=target,
+                   fact=f"{source} {relation} {target}")
+        for source, relation, target in links])
+
+
+@pytest.mark.asyncio
+async def test_neighborhood_follows_multiple_hops_and_preserves_directions(graph):
+    """A bounded neighborhood includes incoming links without reversing their meaning."""
+    await _save_links(graph, [("A", "USES", "B"), ("C", "OWNS", "B"),
+                              ("B", "NEEDS", "D"), ("D", "NEEDS", "E")])
+    result = await graph.get_neighborhood("A", max_hops=2)
+    assert result["found"] and not result["truncated"]
+    assert {node["name"]: node["hops"] for node in result["nodes"]} == {
+        "A": 0, "B": 1, "C": 2, "D": 2}
+    assert {(fact["subject"], fact["object"]) for fact in result["facts"]} == {
+        ("A", "B"), ("C", "B"), ("B", "D")}
+    ids = {node["entity_id"] for node in result["nodes"]}
+    assert all(fact["subject_id"] in ids and fact["object_id"] in ids for fact in result["facts"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction,expected", [
+    ("outgoing", {"B", "D"}), ("incoming", {"B", "A", "C"}),
+])
+async def test_neighborhood_direction_controls_expansion(graph, direction, expected):
+    """Incoming and outgoing exploration follow different recorded relationships."""
+    await _save_links(graph, [("A", "USES", "B"), ("C", "OWNS", "B"), ("B", "NEEDS", "D")])
+    result = await graph.get_neighborhood("B", max_hops=1, direction=direction)
+    assert {node["name"] for node in result["nodes"]} == expected
+
+
+@pytest.mark.asyncio
+async def test_exploration_handles_cycles_self_links_and_parallel_facts(graph, monkeypatch):
+    """Cycles do not duplicate facts or trigger embedding calls during graph reads."""
+    saved = await _save_links(graph, [("A", "LIKES", "B"), ("A", "KNOWS", "B"),
+                                     ("B", "KNOWS", "C"), ("C", "KNOWS", "A"),
+                                     ("B", "REFLECTS_ON", "B")])
+
+    async def forbidden(*args, **kwargs):
+        """Fail if graph-only exploration attempts to call an embedding model."""
+        raise AssertionError("Graph exploration must not embed text")
+
+    monkeypatch.setattr(graph.embed, "embed", forbidden)
+    neighborhood = await graph.get_neighborhood("A", max_hops=6)
+    assert len(neighborhood["nodes"]) == 3
+    assert {fact["fact_id"] for fact in neighborhood["facts"]} == {
+        fact["fact_id"] for fact in saved["facts"]}
+    assert not neighborhood["truncated"]
+    path = await graph.find_path("A", "B")
+    assert path["hops"] == 1 and len(path["facts"]) == 1
+    assert (await graph.explain_fact(path["facts"][0]["fact_id"]))["found"]
+    assert len((await graph.list_facts())["facts"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_superseded_links_cannot_bridge_a_current_exploration(graph):
+    """Filtering happens before traversal, including when the current route is longer."""
+    saved = await _save_links(graph, [("A", "OLD", "B"), ("B", "NEXT", "C"),
+                                     ("A", "NEW", "D"), ("D", "NEXT", "E"),
+                                     ("E", "NEXT", "C")])
+    await graph.supersede_fact(saved["facts"][0]["fact_id"])
+    neighborhood = await graph.get_neighborhood("A", max_hops=2)
+    assert {node["name"] for node in neighborhood["nodes"]} == {"A", "D", "E"}
+    current = await graph.find_path("A", "C", max_hops=3)
+    assert [node["name"] for node in current["nodes"]] == ["A", "D", "E", "C"]
+    assert all(not fact["superseded"] for fact in current["facts"])
+    historical = await graph.find_path("A", "C", include_superseded=True)
+    assert [node["name"] for node in historical["nodes"]] == ["A", "B", "C"]
+    assert historical["facts"][0]["superseded"]
+
+
+@pytest.mark.asyncio
+async def test_path_reports_reverse_traversal_without_reversing_the_fact(graph):
+    """An undirected connection is not a newly asserted reverse relationship."""
+    await _save_links(graph, [("A", "OWNS", "B")])
+    reverse = await graph.find_path("B", "A")
+    assert reverse["found"] and reverse["hops"] == 1
+    fact = reverse["facts"][0]
+    assert (fact["subject"], fact["relation"], fact["object"]) == ("A", "OWNS", "B")
+    assert fact["traversed_forward"] is False
+    assert fact["from_entity_id"] == fact["object_id"]
+    assert fact["to_entity_id"] == fact["subject_id"]
+    assert not (await graph.find_path("B", "A", directed=True))["found"]
+    assert (await graph.find_path("A", "B", directed=True))["facts"][0]["traversed_forward"]
+
+
+@pytest.mark.asyncio
+async def test_path_prefers_the_shortest_eligible_route(graph):
+    """The result uses the shorter of two eligible routes and respects the hop cap."""
+    await _save_links(graph, [("A", "NEXT", "B"), ("B", "NEXT", "D"),
+                              ("A", "NEXT", "C"), ("C", "NEXT", "E"), ("E", "NEXT", "D")])
+    result = await graph.find_path("A", "D", directed=True)
+    assert [node["name"] for node in result["nodes"]] == ["A", "B", "D"]
+    assert result["hops"] == 2
+    too_short = await graph.find_path("A", "D", max_hops=1)
+    assert not too_short["found"] and too_short["max_hops"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fact_budget_reports_incomplete_search_and_exact_completion(graph):
+    """The budget flag distinguishes an unexplored frontier from a complete small graph."""
+    await _save_links(graph, [("A", "NEXT", "B"), ("B", "NEXT", "C")])
+    limited = await graph.get_neighborhood("A", max_hops=2, limit=1)
+    assert len(limited["facts"]) == 1 and limited["truncated"]
+    radius_one = await graph.get_neighborhood("A", max_hops=1, limit=1)
+    assert not radius_one["truncated"]
+    complete = await graph.get_neighborhood("A", max_hops=3, limit=2)
+    assert len(complete["facts"]) == 2 and not complete["truncated"]
+    path = await graph.find_path("A", "C", limit=1)
+    assert not path["found"] and path["truncated"] and path["explored_facts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_target_is_prioritized_with_a_small_fact_budget(graph):
+    """A direct target remains discoverable even when other adjacent facts exceed the budget."""
+    await _save_links(graph, [("A", "KNOWS", "B"), ("A", "KNOWS", "C"), ("A", "KNOWS", "D")])
+    path = await graph.find_path("A", "D", limit=1)
+    assert path["found"] and path["hops"] == 1
+    assert path["explored_facts"] == 1 and path["truncated"]
+
+
+@pytest.mark.asyncio
+async def test_exploration_handles_missing_isolated_and_identical_entities(graph):
+    """Missing entities are explicit, while a known entity has a zero-hop path to itself."""
+    assert not (await graph.get_neighborhood("missing"))["found"]
+    missing = await graph.find_path("missing", "also missing")
+    assert missing["missing_entities"] == ["missing", "also missing"]
+    await graph.store.upsert_entity("A", "Thing")
+    isolated = await graph.get_neighborhood("A")
+    assert isolated["found"] and isolated["facts"] == [] and not isolated["truncated"]
+    assert isolated["nodes"][0]["hops"] == 0
+    same = await graph.find_path("A", "A")
+    assert same["found"] and same["hops"] == 0 and same["facts"] == []
+
+
+@pytest.mark.asyncio
+async def test_exploration_cannot_cross_group_boundaries(graph, monkeypatch):
+    """Even a malformed cross-group edge cannot expose foreign entities or provenance."""
+    await _save_links(graph, [("A", "KNOWS", "B")])
+    local = await graph.store.find_entity("A")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(graph.store, "GROUP_ID", "other")
+        foreign_facts = await _save_links(graph, [("X", "KNOWS", "Y")])
+        foreign = await graph.store.find_entity("X")
+    cross_group = await graph.store.save_edge(local, "CROSS_GROUP", foreign, "A knows X")
+    result = await graph.get_neighborhood("A", max_hops=6)
+    assert {node["name"] for node in result["nodes"]} == {"A", "B"}
+    assert (await graph.find_path("A", "X"))["missing_entities"] == ["X"]
+    with pytest.raises(ValueError, match="group"):
+        await graph.explain_fact(foreign_facts["facts"][0]["fact_id"])
+    with pytest.raises(RuntimeError):
+        await graph.explain_fact(cross_group.uuid)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,arguments", [
+    ("get_neighborhood", {"name": "A", "max_hops": 0}),
+    ("get_neighborhood", {"name": "A", "max_hops": 7}),
+    ("get_neighborhood", {"name": "A", "limit": 0}),
+    ("get_neighborhood", {"name": "A", "limit": 101}),
+    ("get_neighborhood", {"name": "A", "direction": "sideways"}),
+    ("find_path", {"source": "A", "target": "B", "max_hops": 7}),
+    ("find_path", {"source": "A", "target": "B", "limit": 101}),
+])
+async def test_exploration_rejects_unbounded_settings(graph, method, arguments):
+    """Invalid budgets are rejected even for direct Python calls."""
+    with pytest.raises(ValueError):
+        await getattr(graph, method)(**arguments)
+
+
+@pytest.mark.asyncio
+async def test_explanation_preserves_evidence_provenance_and_date_history(graph):
+    """Explanations expose stored reasoning and history without synthesizing evidence."""
+    saved = await graph.save_facts(facts=[graph.Fact(
+        subject="A", relation="PLANS", object="B", fact="A appears to be planning B",
+        evidence_kind="inferred", rationale="A requested components used by B")],
+        story="The original conversation supplied the context.", source="messages/123")
+    fact_id = saved["facts"][0]["fact_id"]
+    await graph.set_fact_valid_at(fact_id, datetime(2026, 5, 1, tzinfo=timezone.utc), reason="Source date")
+    await graph.supersede_fact(fact_id, reason="The plan was cancelled")
+    result = await graph.explain_fact(fact_id)
+    assert result["found"]
+    assert result["fact"]["evidence_kind"] == "inferred"
+    assert result["fact"]["rationale"] == "A requested components used by B"
+    assert result["fact"]["valid_at_corrections"][0]["reason"] == "Source date"
+    assert result["superseded_reason"] == "The plan was cancelled"
+    assert result["sources"][0]["source"] == "messages/123"
+    assert result["sources"][0]["story"] == "The original conversation supplied the context."
+    assert result["missing_episode_ids"] == [] and not result["sources_truncated"]
+
+
+@pytest.mark.asyncio
+async def test_explanation_bounds_stories_and_preserves_source_only_attribution(graph):
+    """Narrative and attribution truncation are explicit and full stories remain readable."""
+    saved = await graph.save_facts(facts=[_fact(graph, "A", "KNOWS", "B", "A knows B")],
+                                   story="Long narrative", source="s" * 1001)
+    result = await graph.explain_fact(saved["facts"][0]["fact_id"], story_chars=4)
+    source = result["sources"][0]
+    assert source["story"] == "Long" and source["story_truncated"]
+    assert len(source["source"]) == 1000 and source["source_truncated"]
+    assert (await graph.get_story(source["episode_id"]))["story"] == "Long narrative"
+    source_only = await graph.save_facts(
+        facts=[_fact(graph, "A", "KNOWS", "C", "A knows C")], source="messages/456")
+    provenance = (await graph.explain_fact(source_only["facts"][0]["fact_id"]))["sources"][0]
+    assert provenance["story"] == "" and not provenance["story_truncated"]
+    assert provenance["source"] == "messages/456"
+
+
+@pytest.mark.asyncio
+async def test_explanation_reports_missing_sources_and_limits_episode_reads(graph, monkeypatch):
+    """Missing or foreign provenance is not fabricated, and source limits remain bounded."""
+    saved = await _save_links(graph, [("A", "KNOWS", "B")])
+    first = await graph.store.save_episode("First story", "first")
+    second = await graph.store.save_episode("Second story", "second")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(graph.store, "GROUP_ID", "other")
+        foreign = await graph.store.save_episode("Private story", "foreign")
+    edge = await graph.EntityEdge.get_by_uuid(graph.store.driver(), saved["facts"][0]["fact_id"])
+    missing_id = str(uuid.uuid4())
+    edge.episodes = [first.uuid, first.uuid, missing_id, second.uuid, foreign.uuid]
+    await graph.store.update_edge(edge)
+    limited = await graph.explain_fact(edge.uuid, source_limit=2, story_chars=0)
+    assert len(limited["sources"]) == 1 and limited["sources_truncated"]
+    assert limited["missing_episode_ids"] == [missing_id]
+    assert limited["sources"][0]["story_truncated"] and limited["sources"][0]["story"] == ""
+    complete = await graph.explain_fact(edge.uuid, source_limit=10)
+    assert len(complete["sources"]) == 2 and not complete["sources_truncated"]
+    assert complete["missing_episode_ids"] == [missing_id, foreign.uuid]
+
+
+@pytest.mark.asyncio
+async def test_explanation_does_not_assign_evidence_to_legacy_facts(graph):
+    """Legacy records with no evidence metadata remain explicitly unspecified."""
+    saved = await _save_links(graph, [("A", "KNOWS", "B")])
+    edge = await graph.EntityEdge.get_by_uuid(graph.store.driver(), saved["facts"][0]["fact_id"])
+    edge.attributes = {}
+    await graph.store.update_edge(edge)
+    result = await graph.explain_fact(edge.uuid)
+    assert result["fact"]["evidence_kind"] == "unspecified"
+    assert result["fact"]["rationale"] == "" and result["sources"] == []
+    assert not (await graph.explain_fact(str(uuid.uuid4())))["found"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [
+    {"source_limit": 0}, {"source_limit": 11}, {"story_chars": -1}, {"story_chars": 5001},
+])
+async def test_explanation_rejects_unbounded_settings(graph, arguments):
+    """Explanation limits are validated before loading a fact."""
+    with pytest.raises(ValueError):
+        await graph.explain_fact(str(uuid.uuid4()), **arguments)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,arguments", [
+    ("get_neighborhood", {"name": "A"}),
+    ("find_path", {"source": "A", "target": "B"}),
+])
+async def test_exploration_timeout_is_not_reported_as_absence(graph, monkeypatch, method, arguments):
+    """A timed-out search raises instead of claiming the graph has no connection."""
+    async def slow_lookup(name):
+        """Simulate an unresponsive graph lookup."""
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(graph.store, "find_entity", slow_lookup)
+    monkeypatch.setattr(graph.traversal, "TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError):
+        await getattr(graph, method)(**arguments)
+
+
+@pytest.mark.asyncio
+async def test_new_graph_tools_are_available_over_mcp(graph):
+    """MCP exposes read-only graph tools with input bounds and persisted evidence metadata."""
+    from fastmcp import Client
+
+    async with Client(graph.mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+        for name in ["get_neighborhood", "find_path", "explain_fact"]:
+            assert tools[name].annotations.readOnlyHint is True
+        assert tools["get_neighborhood"].inputSchema["properties"]["max_hops"]["maximum"] == 6
+        saved = await client.call_tool("save_facts", {"facts": [{
+            "subject": "A", "relation": "KNOWS", "object": "B", "fact": "A knows B",
+            "evidence_kind": "reported", "rationale": "A said so",
+        }]})
+        neighborhood = await client.call_tool("get_neighborhood", {"name": "A"})
+        assert neighborhood.structured_content["facts"][0]["evidence_kind"] == "reported"
+        path = await client.call_tool("find_path", {"source": "A", "target": "B"})
+        assert path.structured_content["hops"] == 1
+        explained = await client.call_tool("explain_fact", {
+            "fact_id": saved.structured_content["facts"][0]["fact_id"],
+        })
+        assert explained.structured_content["fact"]["rationale"] == "A said so"
+
+
+@pytest.mark.asyncio
+async def test_traversal_uses_a_database_enforced_read_timeout(graph, monkeypatch):
+    """Each frontier is a read-only query with a database-side execution deadline."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from graphiti_core.driver.driver import GraphProvider
+
+    query = AsyncMock(return_value=SimpleNamespace(header=[], result_set=[]))
+    client = SimpleNamespace(select_graph=Mock(return_value=SimpleNamespace(ro_query=query)))
+    driver = SimpleNamespace(client=client, provider=GraphProvider.FALKORDB)
+    monkeypatch.setattr(graph.store, "driver", lambda: driver)
+    assert await graph.store.adjacent_edges(["entity-id"], [], 7) == []
+    assert query.await_args.kwargs["timeout"] == 2000
+    assert query.await_args.kwargs["params"]["limit"] == 7
+    client.select_graph.assert_called_once_with(graph.store.GRAPH_DATABASE)
+    assert await graph.store.adjacent_edges([], [], 7) == []
+    assert query.await_count == 1
+    with pytest.raises(ValueError, match="direction"):
+        await graph.store.adjacent_edges(["entity-id"], [], 7, direction="invalid")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message,expected", [("Query timed out", TimeoutError),
+                                            ("Syntax error", ResponseError)])
+async def test_database_errors_do_not_become_empty_traversals(graph, monkeypatch, message, expected):
+    """Database timeouts are explicit and unrelated failures are not swallowed."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from graphiti_core.driver.driver import GraphProvider
+
+    error = ResponseError(message)
+    query = AsyncMock(side_effect=error)
+    driver = SimpleNamespace(provider=GraphProvider.FALKORDB,
+        client=SimpleNamespace(select_graph=Mock(return_value=SimpleNamespace(ro_query=query))))
+    monkeypatch.setattr(graph.store, "driver", lambda: driver)
+    with pytest.raises(expected):
+        await graph.store.adjacent_edges(["entity-id"], [], 7)
+
+
+@pytest.mark.asyncio
+async def test_explanation_respects_the_overall_timeout(graph, monkeypatch):
+    """An unavailable fact read cannot hold the explanation call indefinitely."""
+    async def slow_read(*args, **kwargs):
+        """Simulate an unresponsive graph read."""
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(graph.EntityEdge, "get_by_uuid", slow_read)
+    monkeypatch.setattr(graph.traversal, "TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError):
+        await graph.explain_fact(str(uuid.uuid4()))
+
+
+@pytest.mark.asyncio
+async def test_exploration_does_not_return_a_broken_node_snapshot(graph, monkeypatch):
+    """Disappearing entities cause a retryable failure, not a malformed explanation graph."""
+    await _save_links(graph, [("A", "KNOWS", "B")])
+
+    async def missing_nodes(*args, **kwargs):
+        """Simulate entities disappearing between frontier and result reads."""
+        return []
+
+    monkeypatch.setattr(graph.EntityNode, "get_by_uuids", missing_nodes)
+    with pytest.raises(RuntimeError, match="Graph changed"):
+        await graph.get_neighborhood("A")
+
+
+def test_evidence_kind_rejects_unrecognized_certainty_labels():
+    """Evidence categories cannot silently become arbitrary confidence claims."""
+    from graphiti_mcp.server import Fact
+
+    with pytest.raises(ValueError):
+        Fact(subject="A", relation="KNOWS", object="B", fact="A knows B", evidence_kind="verified")

@@ -9,14 +9,17 @@ the subject/relation/object triple is an index over that sentence, not a
 replacement for it.
 """
 
+import asyncio
 import json
 import logging
 import os
 from datetime import datetime
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastmcp import FastMCP
 from graphiti_core.edges import EntityEdge
+from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.nodes import EntityNode, EpisodicNode
 from graphiti_core.search.search_filters import (ComparisonOperator, DateFilter,
                                                  SearchFilters)
@@ -24,7 +27,10 @@ from graphiti_core.search.search_utils import (edge_fulltext_search,
                                                  edge_similarity_search)
 from pydantic import BaseModel, Field
 
-from graphiti_mcp import embed, store
+from graphiti_mcp import embed, store, traversal
+
+HopCount = Annotated[int, Field(ge=1, le=traversal.MAX_HOPS)]
+FactBudget = Annotated[int, Field(ge=1, le=traversal.MAX_FACTS)]
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -74,6 +80,18 @@ next_cursor for further bounded pages; it includes historical facts. Do not
 dump the entire inventory into context on every turn. On a fresh session, look
 up the people, active projects, decisions, and commitments relevant to the work.
 
+Use `get_neighborhood` to follow related facts across a few hops, and `find_path`
+to see how two entities connect. These are bounded explorations: a truncated
+result is incomplete, and no path found does not prove that none exists. Facts
+retain their original direction even when you traverse a connection backwards.
+A path is a chain of recorded relationships, not proof of a new causal claim.
+
+Use `explain_fact` to inspect a claim's sources, saved reasoning, and date
+corrections. Set evidence_kind to reported for an explicit source statement,
+inferred for your deduction, or uncertain for an unresolved claim; put the
+reasoning in rationale. Leave it unspecified when you do not know. A reported
+claim is still a source's claim, not an independent verification of its truth.
+
 Save information likely to matter after this context is gone. Search before
 recording a repeated fact. Keep useful detail, but do not turn routine heartbeat
 ticks, acknowledgements, or tool validation tests into durable facts. There is
@@ -97,6 +115,11 @@ class Fact(BaseModel):
         "When this fact became true. Set the historical timestamp when importing old facts; "
         "explicit null means unknown. Omit to inherit the batch date or the recording time. "
         "Dates without a timezone are interpreted as UTC."))
+    evidence_kind: Literal["reported", "inferred", "uncertain", "unspecified"] = Field(
+        default="unspecified", description=(
+            "How the claim was established: a source statement, your deduction, an unresolved "
+            "claim, or unspecified. This is not a probability or independent truth verification."))
+    rationale: str = Field(default="", description="Saved reasoning or qualifications behind the claim.")
 
 
 @mcp.tool
@@ -152,6 +175,7 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
             f.object, f.object_type, embedding=await embed.embed(f.object))
         edge = await store.save_edge(
             subj, f.relation, obj, f.fact, valid_at=fact_date,
+            attributes={"evidence_kind": f.evidence_kind, "rationale": f.rationale},
             episode_uuid=ep.uuid if ep else None,
             embedding=await embed.embed(f.fact))
         uuids.append(edge.uuid)
@@ -159,6 +183,7 @@ async def save_facts(facts: list[Fact], story: str = "", episode_id: str = "",
                       "subject": subj.name, "relation": edge.name,
                       "object": obj.name,
                       "episode_id": ep.uuid if ep else None,
+                      "evidence_kind": f.evidence_kind,
                       "recorded_at": edge.created_at.isoformat(),
                       "valid_at": edge.valid_at.isoformat() if edge.valid_at else None})
 
@@ -242,6 +267,163 @@ async def list_facts(limit: int = 50, cursor: str | None = None) -> dict:
     }
 
 
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_neighborhood(name: str, max_hops: HopCount = 2, limit: FactBudget = 50,
+                           direction: store.Direction = "both",
+                           include_superseded: bool = False) -> dict:
+    """Explore relationships around an entity without an embedding request.
+
+    Args:
+        name: Exact entity name, as recorded.
+        max_hops: Expansion depth, from 1 to 6.
+        limit: Maximum explored facts, from 1 to 100; one extra may detect truncation.
+        direction: both, outgoing (subject to object), or incoming (reverse).
+        include_superseded: Permit historical facts at every hop. By default
+            they cannot appear in results or act as hidden traversal bridges.
+
+    Returns:
+        found, nodes with hop distances, original directed facts, and truncated.
+        A truncated graph is incomplete. Nodes on the radius boundary are not
+        expanded further. Concurrent writes are not a snapshot.
+
+    Raises:
+        ValueError: If limits or direction are invalid.
+        TimeoutError: If the ten-second operation or a two-second query times out.
+        RuntimeError: If entities change or disappear while assembling the result.
+    """
+    traversal.validate_limits(max_hops, limit, direction)
+    async with asyncio.timeout(traversal.TIMEOUT_SECONDS):
+        root = await store.find_entity(name)
+        if root is None:
+            return {"found": False, "name": name, "nodes": [], "facts": [], "truncated": False}
+        explored = await traversal.explore(root.uuid, max_hops, limit, direction, include_superseded)
+        nodes = await _load_nodes(list(explored.graph))
+        hops = traversal.distances(explored, root.uuid)
+        ordered = sorted(nodes.values(), key=lambda node: (hops[node.uuid], node.name, node.uuid))
+        return {
+            "found": True, "name": name, "max_hops": max_hops, "direction": direction,
+            "nodes": [{**_node_summary(node), "hops": hops[node.uuid]} for node in ordered],
+            "facts": [await _render(edge, nodes) for edge in explored.facts.values()],
+            "truncated": explored.truncated,
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def find_path(source: str, target: str, max_hops: HopCount = 4,
+                    limit: FactBudget = 100, directed: bool = False,
+                    include_superseded: bool = False) -> dict:
+    """Find one shortest connection in a bounded exploration of recorded facts.
+
+    Args:
+        source: Exact starting entity name.
+        target: Exact destination entity name.
+        max_hops: Maximum path length, from 1 to 6.
+        limit: Maximum explored facts, from 1 to 100, not the number of returned paths.
+        directed: Follow subject-to-object direction only. Otherwise either direction is allowed.
+        include_superseded: Allow historical facts. Their dates may not overlap,
+            so a historical chain need not have existed at one point in time.
+
+    Returns:
+        found, ordered nodes and facts, hops, explored_facts, and truncated.
+        traversed_forward on each step distinguishes its walk direction from
+        the original fact direction. If truncated, the search is incomplete;
+        found=false means only that this bounded exploration found no route.
+        A connection is not an assertion of a new transitive or causal fact.
+
+    Raises:
+        ValueError: If limits are invalid.
+        TimeoutError: If the ten-second operation or a two-second query times out.
+        RuntimeError: If entities change or disappear while assembling the result.
+    """
+    traversal.validate_limits(max_hops, limit)
+    async with asyncio.timeout(traversal.TIMEOUT_SECONDS):
+        start = await store.find_entity(source)
+        end = await store.find_entity(target)
+        if start is None or end is None:
+            return {"found": False, "source": source, "target": target,
+                    "max_hops": max_hops, "directed": directed,
+                    "missing_entities": list(dict.fromkeys(
+                        name for name, node in [(source, start), (target, end)] if node is None)),
+                    "nodes": [], "facts": [], "hops": None, "explored_facts": 0, "truncated": False}
+        explored = await traversal.explore(
+            start.uuid, max_hops, limit, "outgoing" if directed else "both",
+            include_superseded, target_uuid=end.uuid)
+        route = traversal.shortest_route(explored, start.uuid, end.uuid, max_hops)
+        result = {"found": route is not None, "source": source, "target": target,
+                  "max_hops": max_hops, "directed": directed,
+                  "nodes": [], "facts": [], "hops": None,
+                  "explored_facts": len(explored.facts), "truncated": explored.truncated}
+        if route is not None:
+            node_ids, edges = route
+            nodes = await _load_nodes(node_ids)
+            result["nodes"] = [_node_summary(nodes[node_id]) for node_id in node_ids]
+            result["facts"] = [
+                {**await _render(edge, nodes), "from_entity_id": left, "to_entity_id": right,
+                 "traversed_forward": edge.source_node_uuid == left}
+                for left, right, edge in zip(node_ids, node_ids[1:], edges)
+            ]
+            result["hops"] = len(edges)
+        return result
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def explain_fact(fact_id: str,
+                       source_limit: Annotated[int, Field(ge=1, le=10)] = 5,
+                       story_chars: Annotated[int, Field(ge=0, le=5000)] = 2000) -> dict:
+    """Inspect the stored basis for a claim without inventing an explanation.
+
+    Args:
+        fact_id: ID from a search, traversal, inventory, or save result.
+        source_limit: Maximum linked provenance records to return, from 1 to 10.
+        story_chars: Maximum narrative characters per source, from 0 to 5000.
+            Use get_story for a full narrative after inspecting the explanation.
+
+    Returns:
+        found, the fact with its evidence label and rationale, source records,
+        missing_episode_ids, and sources_truncated. Legacy facts have unspecified
+        evidence, not a guessed confidence. Source attributions are capped at
+        1000 characters; each source reports its own truncation flags. Date
+        corrections and the supersession reason are retained in the explanation.
+
+    Raises:
+        ValueError: If the ID or limits are invalid, or the fact belongs to another group.
+        TimeoutError: If the ten-second read budget is exceeded.
+        RuntimeError: If referenced entities are missing or outside the memory group.
+    """
+    fact_id = str(UUID(fact_id))
+    if not 1 <= source_limit <= 10 or not 0 <= story_chars <= 5000:
+        raise ValueError("source_limit must be 1..10 and story_chars must be 0..5000")
+    async with asyncio.timeout(traversal.TIMEOUT_SECONDS):
+        try:
+            edge = await EntityEdge.get_by_uuid(store.driver(), fact_id)
+        except EdgeNotFoundError:
+            return {"found": False, "fact_id": fact_id}
+        if edge.group_id != store.GROUP_ID:
+            raise ValueError("Fact does not belong to the configured memory group")
+        nodes = await _load_nodes([edge.source_node_uuid, edge.target_node_uuid])
+        episode_ids = list(dict.fromkeys(edge.episodes or []))
+        selected = episode_ids[:source_limit]
+        episodes = {episode.uuid: episode for episode in await EpisodicNode.get_by_uuids(
+            store.driver(), selected) if episode.group_id == store.GROUP_ID}
+        sources = []
+        for episode_id in selected:
+            if episode_id not in episodes:
+                continue
+            episode = episodes[episode_id]
+            sources.append({
+                **_story_record(episode), "story": episode.content[:story_chars],
+                "story_truncated": len(episode.content) > story_chars,
+                "source": episode.source_description[:1000],
+                "source_truncated": len(episode.source_description) > 1000,
+            })
+        return {
+            "found": True, "fact": await _render(edge, nodes), "sources": sources,
+            "missing_episode_ids": [episode_id for episode_id in selected if episode_id not in episodes],
+            "sources_truncated": len(episode_ids) > source_limit,
+            "superseded_reason": (edge.attributes or {}).get("superseded_reason", ""),
+        }
+
+
 @mcp.tool
 async def supersede_fact(fact_id: str, invalid_at: datetime | None = None,
                          reason: str = "") -> dict:
@@ -320,6 +502,11 @@ async def get_story(episode_id: str) -> dict:
         valid_at is when the described source event occurred.
     """
     ep = await EpisodicNode.get_by_uuid(store.driver(), episode_id)
+    return _story_record(ep)
+
+
+def _story_record(ep: EpisodicNode) -> dict:
+    """Return the stored narrative, attribution, dates, and fact count for an episode."""
     return {"episode_id": ep.uuid, "story": ep.content,
             "source": ep.source_description,
             "recorded_at": ep.created_at.isoformat(),
@@ -359,15 +546,37 @@ async def list_vocabulary() -> dict:
     return await store.vocabulary()
 
 
-async def _render(edge: EntityEdge) -> dict:
-    src = await EntityNode.get_by_uuid(store.driver(), edge.source_node_uuid)
-    tgt = await EntityNode.get_by_uuid(store.driver(), edge.target_node_uuid)
+async def _load_nodes(node_ids: list[str]) -> dict[str, EntityNode]:
+    """Load scoped entities for a result, raising RuntimeError if the graph changed."""
+    nodes = {node.uuid: node for node in await EntityNode.get_by_uuids(store.driver(), node_ids)
+             if node.group_id == store.GROUP_ID}
+    if set(nodes) != set(node_ids):
+        raise RuntimeError("Graph changed during exploration; retry the read")
+    return nodes
+
+
+def _node_summary(node: EntityNode) -> dict:
+    """Return an entity's identifier, name, and canonical types without its vectors."""
+    return {"entity_id": node.uuid, "name": node.name,
+            "types": [label for label in node.labels if label != "Entity"]}
+
+
+async def _render(edge: EntityEdge, nodes: dict[str, EntityNode] | None = None) -> dict:
+    """Render a stored fact, optionally using a preloaded entity map to avoid repeated reads."""
+    src = nodes[edge.source_node_uuid] if nodes is not None else await EntityNode.get_by_uuid(
+        store.driver(), edge.source_node_uuid)
+    tgt = nodes[edge.target_node_uuid] if nodes is not None else await EntityNode.get_by_uuid(
+        store.driver(), edge.target_node_uuid)
     result = {
         "fact_id": edge.uuid,
         "fact": edge.fact,
         "subject": src.name,
+        "subject_id": src.uuid,
         "relation": edge.name,
         "object": tgt.name,
+        "object_id": tgt.uuid,
+        "evidence_kind": (edge.attributes or {}).get("evidence_kind", "unspecified"),
+        "rationale": (edge.attributes or {}).get("rationale", ""),
         "recorded_at": edge.created_at.isoformat(),
         "valid_at": edge.valid_at.isoformat() if edge.valid_at else None,
         "invalid_at": edge.invalid_at.isoformat() if edge.invalid_at else None,
