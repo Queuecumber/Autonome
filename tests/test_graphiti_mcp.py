@@ -697,6 +697,44 @@ async def test_neighborhood_direction_controls_expansion(graph, direction, expec
 
 
 @pytest.mark.asyncio
+async def test_traversal_survives_relationship_group_index_misses(graph, monkeypatch):
+    """Indexed group misses must not hide a root or an intermediate entity's facts."""
+    from types import SimpleNamespace
+
+    saved = await _save_links(graph, [("Max", "FRIEND_OF", "Nanhi"),
+                                     ("Heather", "KNOWS", "Max"),
+                                     ("Max", "OLD", "Former plan")])
+    await graph.supersede_fact(saved["facts"][2]["fact_id"])
+    root = await graph.store.find_entity("Max")
+    graph_type = type(graph.store.driver().client.select_graph(graph.store.GRAPH_DATABASE))
+    read = graph_type.ro_query
+
+    async def missing_group_index(self, query, params=None, **kwargs):
+        """Simulate the live indexed-group miss while preserving real graph reads."""
+        if (root.uuid in (params or {}).get("frontier", [])
+                and "e.group_id = $group_id" in query):
+            return SimpleNamespace(header=[], result_set=[])
+        return await read(self, query, params=params, **kwargs)
+
+    monkeypatch.setattr(graph_type, "ro_query", missing_group_index)
+    assert len((await graph.get_entity("Max"))["facts"]) == 3
+    neighborhood = await graph.get_neighborhood("Max", max_hops=1)
+    assert {fact["fact_id"] for fact in neighborhood["facts"]} == {
+        fact["fact_id"] for fact in saved["facts"][:2]}
+    assert not neighborhood["truncated"]
+    for direction, other in [("outgoing", "Nanhi"), ("incoming", "Heather")]:
+        result = await graph.get_neighborhood("Max", max_hops=1, direction=direction)
+        assert {node["name"] for node in result["nodes"]} == {"Max", other}
+    historical = await graph.get_neighborhood("Max", max_hops=1, include_superseded=True)
+    assert len(historical["facts"]) == 3
+    for source, target, hops in [("Max", "Nanhi", 1), ("Heather", "Nanhi", 2)]:
+        path = await graph.find_path(source, target, directed=True)
+        assert path["found"] and path["hops"] == hops
+        assert all(fact["traversed_forward"] for fact in path["facts"])
+    assert (await graph.find_path("Nanhi", "Heather"))["hops"] == 2
+
+
+@pytest.mark.asyncio
 async def test_exploration_handles_cycles_self_links_and_parallel_facts(graph, monkeypatch):
     """Cycles do not duplicate facts or trigger embedding calls during graph reads."""
     saved = await _save_links(graph, [("A", "LIKES", "B"), ("A", "KNOWS", "B"),

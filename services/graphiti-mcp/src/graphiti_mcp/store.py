@@ -342,10 +342,11 @@ async def adjacent_edges(node_uuids: list[str], excluded: list[str], limit: int,
     if not node_uuids:
         return []
     validity = "" if include_superseded else "AND e.invalid_at IS NULL "
+    # Indexed relationship-group equality can hide edges reachable through their entities.
     query = (
         "MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity) "
         "WHERE " + frontiers[direction] + " AND n.group_id = $group_id "
-        "AND m.group_id = $group_id AND e.group_id = $group_id "
+        "AND m.group_id = $group_id AND toString(e.group_id) = $group_id "
         "AND NOT e.uuid IN $excluded " + validity
         + "WITH e, CASE WHEN n.uuid = $preferred OR m.uuid = $preferred THEN 0 ELSE 1 END AS priority "
         "RETURN " + get_entity_edge_return_query(driver().provider)
