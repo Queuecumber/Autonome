@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "services": {
+      "type": "object",
+      "properties": {
+        "graphitiMcp": {
+          "type": "object",
+          "properties": {
+            "embedding": {
+              "type": ["object", "null"],
+              "properties": {
+                "model": { "type": "string" },
+                "baseUrl": { "type": "string" },
+                "provider": { "enum": ["openai", "nvidia"] },
+                "dim": { "type": "integer", "minimum": 0 },
+                "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+                "minScore": { "type": "number", "minimum": 0, "maximum": 1 },
+                "apiKey": { "type": "string" },
+                "apiKeySecretRef": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "key": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -27,6 +27,7 @@ jobs:
           - workspace-fs-mcp
           - system-mcp
           - time-mcp
+          - graphiti-mcp
     steps:
       - uses: actions/checkout@v4
 

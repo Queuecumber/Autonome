@@ -18,6 +18,14 @@ mcp = FastMCP("memory", instructions=(
     """
 # Long-Term Memory Tools
 
+When the knowledge-graph memory tools are available, use their policy for new
+durable memory: facts and their narrative stories live together in the graph.
+These markdown files are historical sources to consult or import when needed,
+not instructions to keep a parallel daily or heartbeat journal.
+
+The following daily/global workflow applies only when this markdown service is
+the standalone memory system, without knowledge-graph memory tools:
+
 This tool implements a basic long-term memory that you should use liberally to
 make sure information persists outside of the active session.
 
