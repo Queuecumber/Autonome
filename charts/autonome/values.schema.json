@@ -8,6 +8,7 @@
         "icalMcp": {
           "type": "object",
           "properties": {
+            "notifySince": { "$ref": "#/definitions/notificationSince" },
             "enabled": { "type": "boolean" },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
             "urlsSecretRef": { "$ref": "#/definitions/mailPassword" },
@@ -23,6 +24,7 @@
         "imapMcp": {
           "type": "object",
           "properties": {
+            "notifySince": { "$ref": "#/definitions/notificationSince" },
             "enabled": { "type": "boolean" },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
             "server": { "type": "string", "pattern": "^$|^(imaps|tls|starttls|imap)://" },
@@ -80,6 +82,14 @@
     }
   },
   "definitions": {
+    "notificationSince": {
+      "type": "string",
+      "oneOf": [
+        { "enum": ["startup", "all"] },
+        { "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        { "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T" }
+      ]
+    },
     "mailPassword": {
       "type": "object",
       "properties": {

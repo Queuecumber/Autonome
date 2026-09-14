@@ -40,7 +40,7 @@ def test_invalid_addresses_fail(invalid):
 
 
 @pytest.mark.parametrize("overrides", [
-    {"server": "smtp://smtp.test"}, {"server": "smtps://u:p@smtp.test"},
+    {"server": "http://smtp.test"}, {"server": "smtps://u:p@smtp.test"},
     {"server": "smtps://smtp.test:0"}, {"username": ""}, {"password": ""},
     {"sender": "invalid"}, {"allowed_recipients": ("bad",)}, {"timeout": 0},
 ])
@@ -216,3 +216,15 @@ def test_environment_and_uninitialized_service(monkeypatch):
     monkeypatch.setattr(server, "mailer", None)
     with pytest.raises(RuntimeError):
         server.account()
+
+
+def test_trusted_plaintext_relay_can_skip_auth_without_relaxing_recipients(smtp):
+    """The existing relay support still enforces its sender and recipient policy."""
+    settings = server.Settings("smtp://relay.test:25", "", "", "agent@example.test", ("one@example.test",))
+    result = server.Mailer(settings).send(["one@example.test"], [], "Subject", "Body", [])
+    assert result["status"] == "accepted"
+    smtp.starttls.assert_not_called()
+    smtp.login.assert_not_called()
+    assert server.SMTP.call_args.args == ("relay.test", 25)
+    with pytest.raises(ValueError):
+        server.Mailer(settings).send(["blocked@example.test"], [], "Subject", "Body", [])

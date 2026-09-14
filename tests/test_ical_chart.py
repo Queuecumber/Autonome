@@ -32,6 +32,7 @@ def test_calendar_secret_events_and_storage(render):
     assert env["ICAL_SESSION_ID"]["value"] == "calendar-session"
     assert env["ICAL_TIMEZONE"]["value"] == "America/New_York"
     assert env["ICAL_REFRESH_SECONDS"]["value"] == "300"
+    assert env["ICAL_NOTIFY_SINCE"]["value"] == "startup"
     assert env["ICAL_STATE_PATH"]["value"] == "/data/ical.sqlite3"
     assert env["SESSION_MANAGER_URL"]["value"] == "http://session-manager:5000"
     assert any(obj["kind"] == "PersistentVolumeClaim" and obj["metadata"]["name"] == "embedding-test-ical"
@@ -53,3 +54,19 @@ def test_calendar_timezone_override(render):
 def test_invalid_calendar_values_are_rejected(render, overrides):
     """Malformed secret references and invalid limits fail Helm rendering."""
     assert render(values(**overrides)).returncode != 0
+
+
+@pytest.mark.parametrize("value", ["all", "2026-09-14", "2026-09-14T19:00:00Z"])
+def test_calendar_notification_cutoff_is_configurable(render, value):
+    """The calendar-specific cutoff is independent from IMAP and reaches the pod unchanged."""
+    objects = resources(render(values(notifySince=value)))
+    pod = next(obj for obj in objects if obj["kind"] == "Deployment"
+               and obj["metadata"]["name"] == "embedding-test-ical-mcp")
+    env = pod["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert next(item["value"] for item in env if item["name"] == "ICAL_NOTIFY_SINCE") == value
+
+
+@pytest.mark.parametrize("value", ["", "yesterday", "2026-02-31", "2026-09-14T09:00:00"])
+def test_calendar_notification_cutoff_rejects_invalid_dates(render, value):
+    """Ambiguous cutoff settings cannot accidentally disable history suppression."""
+    assert render(values(notifySince=value)).returncode != 0

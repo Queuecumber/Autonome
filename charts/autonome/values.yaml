@@ -88,6 +88,7 @@ services:
     username: ""
     passwordSecretRef: { name: "", key: IMAP_PASSWORD }
     folders: [INBOX]
+    notifySince: startup
     eventEnergy: passive
     sessionId: ""
     pollSeconds: 60
@@ -115,6 +116,7 @@ services:
     urlsSecretRef: { name: "", key: ICAL_URLS }
     timezone: ""
     refreshSeconds: 300
+    notifySince: startup
     timeoutSeconds: 20
     maxFeedBytes: 5242880
     eventEnergy: passive

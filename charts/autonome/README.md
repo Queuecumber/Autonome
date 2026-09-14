@@ -228,3 +228,30 @@ deployment; changing a feed URL establishes a new baseline. See the
 [iCal service documentation](../../services/ical-mcp/README.md) for stale reads,
 recurrence handling, token privacy, and delivery limitations. Outlook is not
 being ported because it is superseded by the NVIDIA-provided integration.
+
+### Notification History Cutoff
+
+Both read adapters default `notifySince` to `startup`. The first startup with
+cutoff support persists a date boundary in the existing adapter PVC, including
+when upgrading an older deployment. Restarts preserve that boundary. Set an
+explicit date to retain notifications from an earlier point:
+
+```yaml
+services:
+  imapMcp:
+    notifySince: "2026-09-14T00:00:00Z"
+  icalMcp:
+    notifySince: "2026-09-14"
+```
+
+`all` disables date filtering; the first snapshot still establishes a quiet
+baseline. IMAP uses server receipt dates, so gradual Proton Bridge backfill of
+old messages does not become new-mail wakeups. Calendar filtering checks actual
+recurrences and both sides of a change, retaining future anniversaries and
+cancellations/reschedules. Historical read/search tools are never date-filtered.
+
+The updated adapters also filter their pending outboxes. They cannot retract
+notifications already accepted or queued by session-manager. Advancing a cutoff
+does not delete source data; moving it backward does not replay skipped messages
+or source changes. With an unchanged deployment spec, pulling the updated IMAP
+and iCal images enables the default `startup` policy without new env variables.
