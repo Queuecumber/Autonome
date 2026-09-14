@@ -78,6 +78,32 @@ services:
   memoryMcp:      { image: { name: autonome-memory-mcp },      port: 8001 }
   systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
   timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }
+  imapMcp:
+    enabled: false
+    image: { name: autonome-imap-mcp }
+    port: 8006
+    server: ""
+    username: ""
+    passwordSecretRef: { name: "", key: IMAP_PASSWORD }
+    folders: [INBOX]
+    eventEnergy: passive
+    sessionId: ""
+    pollSeconds: 60
+    timeoutSeconds: 20
+    maxMessageBytes: 26214400
+    stateStorage: { size: 100Mi }
+  smtpMcp:
+    enabled: false
+    image: { name: autonome-smtp-mcp }
+    port: 8007
+    server: ""
+    username: ""
+    passwordSecretRef: { name: "", key: SMTP_PASSWORD }
+    from: ""
+    allowedRecipients: []
+    allowAnyRecipient: false
+    timeoutSeconds: 20
+    maxAttachmentBytes: 26214400
   graphitiMcp:
     image: { name: autonome-graphiti-mcp }
     port: 8005

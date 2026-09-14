@@ -144,3 +144,52 @@ All ClusterIP. Nothing exposed externally.
 ```bash
 helm upgrade <release> ./charts/autonome --namespace <release> --reuse-values
 ```
+
+## Optional Mail Services
+
+IMAP and SMTP ports from aibs are disabled by default. Enable only the needed
+services and register their MCP URLs in `agent.config`. IMAP pushes incoming-mail
+events directly to session-manager; it needs no scheduled agent inbox check.
+SMTP is explicit outbound sending, not an automatic responder.
+
+```yaml
+services:
+  imapMcp:
+    enabled: true
+    server: imaps://imap.example.test
+    username: agent@example.test
+    passwordSecretRef: { name: mail-credentials, key: IMAP_PASSWORD }
+    folders: [INBOX]
+    eventEnergy: passive
+    stateStorage: { size: 100Mi }
+  smtpMcp:
+    enabled: true
+    server: starttls://smtp.example.test:587
+    username: agent@example.test
+    passwordSecretRef: { name: mail-credentials, key: SMTP_PASSWORD }
+    from: agent@example.test
+    allowedRecipients: [owner@example.test]
+```
+
+The referenced Kubernetes Secret must already exist in the release namespace;
+these credentials are not copied into chart values or session-manager's env.
+External password rotation requires restarting the corresponding mail deployment.
+Keep the IMAP deployment at one replica, with its Recreate strategy and persistent
+`<release>-imap` PVC, to retain checkpoints and pending events. The PVC is only
+created when IMAP is enabled. SMTP requires no additional volume.
+
+Add whichever services are enabled to the existing agent configuration:
+
+```yaml
+mcp_servers:
+  imap: http://imap-mcp:8006/mcp
+  smtp: http://smtp-mcp:8007/mcp
+```
+
+Register IMAP's MCP even when only using push notifications, so the agent can
+retrieve message bodies and attachment resources. First IMAP startup is quiet
+for existing mail; subsequent arrivals trigger events. Servers lacking IDLE use
+adapter-side polling. HTTP acceptance is not durable agent-processing acknowledgement;
+ambiguous responses may repeat an event. See the [IMAP service documentation](../../services/imap-mcp/README.md)
+and [SMTP service documentation](../../services/smtp-mcp/README.md) for guarantees,
+environment variables, migration differences, and outbound restrictions.

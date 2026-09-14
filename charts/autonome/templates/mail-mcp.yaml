@@ -1,0 +1,112 @@
+{{- range $kind := list "imap" "smtp" }}
+{{- $svc := index $.Values.services (printf "%sMcp" $kind) }}
+{{- if $svc.enabled }}
+{{- $name := printf "%s-mcp" $kind }}
+{{- $prefix := upper $kind }}
+{{- $server := required (printf "services.%sMcp.server is required" $kind) $svc.server }}
+{{- $username := required (printf "services.%sMcp.username is required" $kind) $svc.username }}
+{{- $secret := required (printf "services.%sMcp.passwordSecretRef.name is required" $kind) $svc.passwordSecretRef.name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-{{ $name }}
+  labels:
+    {{- include "autonome.labels" (dict "name" $name "Release" $.Release "Chart" $.Chart) | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+    spec:
+      {{- with $.Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "autonome.image" (dict "root" $ "svc" $svc) }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          ports:
+            - { name: mcp, containerPort: {{ $svc.port }} }
+          env:
+            - { name: {{ $prefix }}_MCP_PORT, value: {{ $svc.port | quote }} }
+            - { name: {{ $prefix }}_SERVER, value: {{ $server | quote }} }
+            - { name: {{ $prefix }}_USERNAME, value: {{ $username | quote }} }
+            - { name: {{ $prefix }}_TIMEOUT_SECONDS, value: {{ $svc.timeoutSeconds | quote }} }
+            - name: {{ $prefix }}_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret | quote }}
+                  key: {{ required "passwordSecretRef.key is required" $svc.passwordSecretRef.key | quote }}
+                  optional: false
+            {{- if eq $kind "imap" }}
+            - { name: SESSION_MANAGER_URL, value: "http://session-manager:{{ $.Values.services.sessionManager.port }}" }
+            - { name: IMAP_FOLDERS, value: {{ $svc.folders | toJson | quote }} }
+            - { name: IMAP_EVENT_ENERGY, value: {{ $svc.eventEnergy | quote }} }
+            - { name: IMAP_SESSION_ID, value: {{ $svc.sessionId | quote }} }
+            - { name: IMAP_POLL_SECONDS, value: {{ $svc.pollSeconds | quote }} }
+            - { name: IMAP_MAX_MESSAGE_BYTES, value: {{ $svc.maxMessageBytes | quote }} }
+            - { name: IMAP_STATE_PATH, value: /data/imap.sqlite3 }
+            {{- else }}
+            - { name: SMTP_FROM, value: {{ required "services.smtpMcp.from is required" $svc.from | quote }} }
+            - { name: SMTP_ALLOWED_RECIPIENTS, value: {{ $svc.allowedRecipients | toJson | quote }} }
+            - { name: SMTP_ALLOW_ANY_RECIPIENT, value: {{ $svc.allowAnyRecipient | quote }} }
+            - { name: SMTP_MAX_ATTACHMENT_BYTES, value: {{ $svc.maxAttachmentBytes | quote }} }
+            {{- end }}
+          {{- if eq $kind "imap" }}
+          volumeMounts:
+            - { name: state, mountPath: /data }
+          {{- end }}
+          readinessProbe:
+            tcpSocket: { port: {{ $svc.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: {{ $svc.port }} }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- include "autonome.resources" (dict "root" $ "svc" $svc) | nindent 12 }}
+      {{- if eq $kind "imap" }}
+      volumes:
+        - { name: state, persistentVolumeClaim: { claimName: {{ $.Release.Name }}-imap } }
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "autonome.labels" (dict "name" $name "Release" $.Release "Chart" $.Chart) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: mcp, port: {{ $svc.port }}, targetPort: mcp }
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+{{- if eq $kind "imap" }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $.Release.Name }}-imap
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $svc.stateStorage.size }}
+  {{- with $.Values.storage.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
