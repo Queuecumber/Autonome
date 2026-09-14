@@ -30,6 +30,7 @@ jobs:
           - graphiti-mcp
           - imap-mcp
           - smtp-mcp
+          - ical-mcp
     steps:
       - uses: actions/checkout@v4
 

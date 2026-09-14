@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 members = [
     "autonome",
     "autonome-graphiti-mcp",
+    "autonome-ical-mcp",
     "autonome-imap-mcp",
     "autonome-matrix-adapter",
     "autonome-memory-mcp",
@@ -227,6 +228,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "autonome-graphiti-mcp" },
+    { name = "autonome-ical-mcp" },
     { name = "autonome-imap-mcp" },
     { name = "autonome-matrix-adapter" },
     { name = "autonome-memory-mcp" },
@@ -246,6 +248,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "autonome-graphiti-mcp", editable = "services/graphiti-mcp" },
+    { name = "autonome-ical-mcp", editable = "services/ical-mcp" },
     { name = "autonome-imap-mcp", editable = "services/imap-mcp" },
     { name = "autonome-matrix-adapter", editable = "services/matrix-adapter" },
     { name = "autonome-memory-mcp", editable = "services/memory-mcp" },
@@ -277,6 +280,25 @@ requires-dist = [
     { name = "graphiti-core", extras = ["falkordb"], specifier = ">=0.30,<0.31" },
     { name = "networkx", specifier = ">=3.4,<4" },
     { name = "openai", specifier = ">=1.91.0,<3" },
+]
+
+[[package]]
+name = "autonome-ical-mcp"
+version = "0.1.0"
+source = { editable = "services/ical-mcp" }
+dependencies = [
+    { name = "fastmcp" },
+    { name = "httpx" },
+    { name = "icalendar" },
+    { name = "recurring-ical-events" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastmcp", specifier = ">=2.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "icalendar", specifier = ">=6,<7" },
+    { name = "recurring-ical-events", specifier = ">=3.8,<4" },
 ]
 
 [[package]]
@@ -2300,6 +2322,21 @@ wheels = [
 ]
 
 [[package]]
+name = "recurring-ical-events"
+version = "3.8.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "icalendar" },
+    { name = "python-dateutil" },
+    { name = "tzdata" },
+    { name = "x-wr-timezone" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b9/f5/898abd8fbb25766ec6cb17b244730ebf192f47963c71eeacd61aadd903a1/recurring_ical_events-3.8.2.tar.gz", hash = "sha256:e731af31d0b7dec5cd47a1defacd8549e2f36fab1c1995e8b9f042822a0acf8e", size = 604992, upload-time = "2026-04-30T19:21:46.2Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/f7/d3eb4f545baf5d6daaa5881694517626fb7ad04036d94168197a4f021384/recurring_ical_events-3.8.2-py3-none-any.whl", hash = "sha256:9ad605e27b4fbeb70ee1c66205ade32550be15a57cedc579606522f1c67aef6d", size = 241358, upload-time = "2026-04-30T19:21:44.079Z" },
+]
+
+[[package]]
 name = "redis"
 version = "8.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2726,6 +2763,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/b6/b9afed2afadddaf5ebb2afa801abf4b0868f42f8539bfe4b071b5266c9fe/websockets-16.0-cp314-cp314t-win32.whl", hash = "sha256:5a4b4cc550cb665dd8a47f868c8d04c8230f857363ad3c9caf7a0c3bf8c61ca6", size = 178085, upload-time = "2026-01-10T09:23:33.816Z" },
     { url = "https://files.pythonhosted.org/packages/9f/3e/28135a24e384493fa804216b79a6a6759a38cc4ff59118787b9fb693df93/websockets-16.0-cp314-cp314t-win_amd64.whl", hash = "sha256:b14dc141ed6d2dde437cddb216004bcac6a1df0935d79656387bd41632ba0bbd", size = 178531, upload-time = "2026-01-10T09:23:35.016Z" },
     { url = "https://files.pythonhosted.org/packages/6f/28/258ebab549c2bf3e64d2b0217b973467394a9cea8c42f70418ca2c5d0d2e/websockets-16.0-py3-none-any.whl", hash = "sha256:1637db62fad1dc833276dded54215f2c7fa46912301a24bd94d45d46a011ceec", size = 171598, upload-time = "2026-01-10T09:23:45.395Z" },
+]
+
+[[package]]
+name = "x-wr-timezone"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "icalendar" },
+    { name = "tzdata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/79/2b/8ae5f59ab852c8fe32dd37c1aa058eb98aca118fec2d3af5c3cd56fffb7b/x_wr_timezone-2.0.1.tar.gz", hash = "sha256:9166c40e6ffd4c0edebabc354e1a1e2cffc1bb473f88007694793757685cc8c3", size = 18212, upload-time = "2025-02-06T17:10:40.913Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/b7/4bac35b4079b76c07d8faddf89467e9891b1610cfe8d03b0ebb5610e4423/x_wr_timezone-2.0.1-py3-none-any.whl", hash = "sha256:e74a53b9f4f7def8138455c240e65e47c224778bce3c024fcd6da2cbe91ca038", size = 11102, upload-time = "2025-02-06T17:10:39.192Z" },
 ]
 
 [[package]]
