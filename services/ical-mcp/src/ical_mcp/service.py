@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from ical_mcp.model import Event, EventKey, Settings, calendar_zone, instant, parse_feed, query_range
+from ical_mcp.model import (Event, EventKey, Settings, calendar_zone, instant, notification_contexts,
+                            notification_date, notification_time, parse_feed, query_range)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,17 @@ class Store:
                 error TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS outbox (
                 id TEXT PRIMARY KEY, feed TEXT NOT NULL, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS notification_floors (
+                feed TEXT PRIMARY KEY, since TEXT NOT NULL);
         """)
+
+    def notification_floor(self, feed: str) -> datetime:
+        """Return a persisted first-use cutoff; restarts never move this boundary forward."""
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO notification_floors VALUES (?, ?)",
+                            (feed, datetime.now(timezone.utc).isoformat()))
+            value = self.db.execute("SELECT since FROM notification_floors WHERE feed=?", (feed,)).fetchone()[0]
+            return datetime.fromisoformat(value)
 
     def get(self, feed: str) -> dict | None:
         """Return the cached feed/status or None before its first refresh attempt."""
@@ -56,7 +67,8 @@ class Store:
                 self.db.execute("UPDATE feeds SET checked=?, as_of=?, error='' WHERE id=?", (when, when, feed))
 
     def replace(self, feed: str, name: str, raw: bytes, snapshot: dict, etag: str,
-                modified: str, when: str, settings: Settings) -> None:
+                modified: str, when: str, settings: Settings,
+                eligible: dict[str, dict] | None = None) -> None:
         """Atomically retain a valid snapshot and queue source-level changes in batches of 20.
 
         Args:
@@ -68,6 +80,7 @@ class Store:
             modified: Last-Modified validator, or empty.
             when: UTC observation timestamp.
             settings: Event energy and explicit session routing.
+            eligible: Date-qualified source IDs and intervals, or None to notify all changes.
 
         Returns:
             None. First successful use establishes a quiet baseline, even after failures.
@@ -81,12 +94,17 @@ class Store:
                 before, after = previous.get(identifier), snapshot.get(identifier)
                 if before == after:
                     continue
+                if eligible is not None and identifier not in eligible:
+                    continue
                 change = ("removed_from_feed" if after is None else "added" if before is None
                           else "cancelled" if after["event"]["status"] == "CANCELLED" else "updated")
                 item = (after or before)["event"]
                 brief = {key: item[key] for key in ["id", "uid", "start", "end", "all_day", "status", "recurrence_id"]}
                 brief["subject"] = item["subject"][:500]
-                changes.append({"change": change, "event": brief})
+                change_record = {"change": change, "event": brief}
+                if eligible is not None:
+                    change_record["notification_context"] = eligible[identifier]
+                changes.append(change_record)
         with self.db:
             for offset in range(0, len(changes), 20):
                 identifier = str(uuid4())
@@ -129,11 +147,21 @@ class Calendars:
         self.zone = ZoneInfo(settings.timezone_name)
         self.locks = {name: asyncio.Lock() for name in settings.urls}
         self.stop = asyncio.Event()
+        for name in settings.urls:
+            self.notification_floor(name)
+
+    def notification_floor(self, name: str) -> datetime | None:
+        """Return a feed's effective notification cutoff, or None when filtering is disabled."""
+        if self.settings.notify_since == "startup":
+            return self.store.notification_floor(self.settings.feed_id(name))
+        return notification_date(self.settings.notify_since)
 
     def status(self, name: str) -> dict:
         """Return availability/freshness for a calendar without exposing its private URL."""
         row = self.store.get(self.settings.feed_id(name))
+        floor = self.notification_floor(name)
         return {"calendar": name, "available": bool(row and row["raw"] is not None),
+                "notify_since": floor.isoformat() if floor else None,
                 "as_of": row["as_of"] if row else "", "last_checked": row["checked"] if row else "",
                 "error": row["error"] if row else "", "stale": self.stale(row)}
 
@@ -179,8 +207,13 @@ class Calendars:
                         if len(raw) > self.settings.max_feed_bytes:
                             raise ValueError("Calendar feed exceeds configured size limit")
                     _, snapshot = await asyncio.to_thread(parse_feed, bytes(raw), name, feed, self.zone)
+                    floor = self.notification_floor(name)
+                    eligible = None
+                    if floor is not None and old and old["raw"] is not None:
+                        eligible = await asyncio.to_thread(notification_contexts, old["raw"],
+                            json.loads(old["snapshot"]), bytes(raw), snapshot, floor, self.zone)
                     self.store.replace(feed, name, bytes(raw), snapshot, response.headers.get("etag", ""),
-                                       response.headers.get("last-modified", ""), when, self.settings)
+                                       response.headers.get("last-modified", ""), when, self.settings, eligible)
             except Exception as error:
                 self.store.checked(feed, when, type(error).__name__)
                 logger.warning("Calendar refresh failed (%s); cached data retained", type(error).__name__)
@@ -282,9 +315,37 @@ class Calendars:
                 pass
 
     async def deliver_once(self, url: str) -> int:
-        """Send a pending page; acknowledge only HTTP success, retaining stable IDs across retries."""
+        """Process a pending page, suppressing excluded history and retrying eligible HTTP failures."""
         pending = self.store.pending([self.settings.feed_id(name) for name in self.settings.urls])
         for identifier, event in pending:
+            name = event["metadata"]["calendar"]
+            floor = self.notification_floor(name)
+            if floor is not None:
+                payload = json.loads(event["text"])
+                retained = []
+                row = self.store.get(self.settings.feed_id(name))
+                snapshot = json.loads(row["snapshot"]) if row else {}
+                unresolved = {change["event"]["id"]: snapshot[change["event"]["id"]]
+                              for change in payload["changes"]
+                              if change["event"]["id"] in snapshot
+                              and not notification_time(change.get("notification_context") or change["event"], floor)}
+                contexts = {}
+                if unresolved and row["raw"] is not None:
+                    contexts = await asyncio.to_thread(notification_contexts, None, {}, row["raw"],
+                                                       unresolved, floor, self.zone)
+                for change in payload["changes"]:
+                    context = change.get("notification_context") or change["event"]
+                    if notification_time(context, floor):
+                        retained.append(change)
+                        continue
+                    key = change["event"]["id"]
+                    if key in contexts:
+                        retained.append({**change, "notification_context": contexts[key]})
+                if not retained:
+                    self.store.acknowledge(identifier)
+                    continue
+                payload["changes"] = retained
+                event = {**event, "text": json.dumps(payload)}
             response = await self.http.post(f"{url.rstrip('/')}/event", json=event)
             response.raise_for_status()
             self.store.acknowledge(identifier)

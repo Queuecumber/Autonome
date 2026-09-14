@@ -3,6 +3,7 @@
 import asyncio
 import base64
 from datetime import date, datetime, timedelta, timezone
+from dataclasses import replace
 import json
 import logging
 import sqlite3
@@ -49,7 +50,7 @@ def feed(*components, zone=None):
 @pytest.fixture
 def settings():
     """A named calendar whose fake token must never appear in tool results or logs."""
-    return model.Settings({"Personal": "https://calendar.test/private.ics?token=private-test-token"})
+    return model.Settings({"Personal": "https://calendar.test/private.ics?token=private-test-token"}, notify_since="all")
 
 
 @pytest.fixture
@@ -95,6 +96,7 @@ def test_invalid_calendar_settings(changes):
 def test_settings_env_and_opaque_ids(settings, monkeypatch):
     """Private URL tokens are excluded from repr and opaque event IDs."""
     monkeypatch.setenv("ICAL_URLS", json.dumps(settings.urls))
+    monkeypatch.setenv("ICAL_NOTIFY_SINCE", settings.notify_since)
     assert model.Settings.from_env() == settings
     assert "private-test-token" not in repr(settings)
     key = model.EventKey(feed=settings.feed_id("Personal"), uid="shared UID / special")
@@ -377,7 +379,7 @@ async def test_multiple_calendars_do_not_collide_on_shared_uids(settings, store)
 @pytest.mark.asyncio
 async def test_explicit_routing_and_cancellation_change(settings, store):
     """Confirmed source cancellation is distinct from removal and preserves configured routing."""
-    config = model.Settings(settings.urls, session_id="calendar-session", energy="active")
+    config = model.Settings(settings.urls, session_id="calendar-session", energy="active", notify_since="all")
     data = {"body": feed(event())}
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, content=data["body"]))) as http:
@@ -503,3 +505,119 @@ async def test_half_open_range_and_long_event_deduplication(service):
                                    event("boundary", START + timedelta(days=3)))
     result = await service.range(START, START + timedelta(days=3), None, 10)
     assert [item["uid"] for item in result["events"]] == ["long"]
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("startup", None), ("all", None), ("2026-09-14", START),
+    ("2026-09-14T09:00:00-04:00", START + timedelta(hours=13)),
+])
+def test_calendar_notification_date_modes(value, expected):
+    """Date floors normalize to UTC, while startup and all remain explicit modes."""
+    assert model.notification_date(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "invalid", "2026-09-14T09:00:00", "2026-02-31"])
+def test_invalid_calendar_notification_dates(settings, value):
+    """Bad cutoff configuration cannot silently disable filtering."""
+    with pytest.raises(ValueError):
+        replace(settings, notify_since=value)
+
+
+@pytest.mark.asyncio
+async def test_incremental_calendar_history_import_is_quiet_and_stays_readable(service, store, tmp_path):
+    """History added after an initially empty export is stored without flooding the event stream."""
+    service.settings = replace(service.settings, notify_since="startup")
+    floor = service.notification_floor("Personal")
+    service.backend["body"] = feed()
+    await service.refresh("Personal")
+    old = event("history", datetime(1982, 1, 1, tzinfo=timezone.utc))
+    fresh = event("upcoming", floor + timedelta(days=1))
+    service.backend["body"] = feed(old, fresh)
+    await service.refresh("Personal")
+    fid = service.settings.feed_id("Personal")
+    changes = json.loads(store.pending([fid])[0][1]["text"])["changes"]
+    assert [change["event"]["uid"] for change in changes] == ["upcoming"]
+    result = await service.range(datetime(1982, 1, 1, tzinfo=timezone.utc),
+                                 datetime(1982, 1, 2, tzinfo=timezone.utc), None, 10)
+    assert result["events"][0]["uid"] == "history"
+    reopened = Store(tmp_path / "state" / "ical.sqlite3")
+    try:
+        assert reopened.notification_floor(fid) == floor
+    finally:
+        reopened.close()
+    assert service.status("Personal")["notify_since"] == floor.isoformat()
+
+
+def test_calendar_cutoff_respects_recurrence_not_master_start():
+    """An ongoing 1982 anniversary qualifies, but an expired series and old exceptions do not."""
+    annual = event("anniversary", datetime(1982, 10, 1, tzinfo=timezone.utc), rrule={"freq": "yearly"})
+    expired = event("expired", datetime(1982, 1, 1, tzinfo=timezone.utc), rrule={"freq": "daily", "count": 2})
+    exception = event("anniversary", datetime(2025, 10, 1, tzinfo=timezone.utc),
+                      recurrence_id=datetime(2025, 10, 1, tzinfo=timezone.utc))
+    raw = feed(annual, expired, exception)
+    _, snapshot = model.parse_feed(raw, "Personal", "feed", ZoneInfo("UTC"))
+    contexts = model.notification_contexts(None, {}, raw, snapshot, START, ZoneInfo("UTC"))
+    assert len(contexts) == 1
+    key, context = next(iter(contexts.items()))
+    assert model.EventKey.decode(key).uid == "anniversary"
+    assert context["start"].startswith("2026-10-01")
+
+
+@pytest.mark.asyncio
+async def test_calendar_cutoff_preserves_cancellation_and_moves_to_past(service, store):
+    """Both versions participate in relevance, so changes removing upcoming plans still notify."""
+    service.settings = replace(service.settings, notify_since="2026-09-14")
+    service.backend["body"] = feed(event("move", START + timedelta(days=1)),
+                                   event("cancel", START + timedelta(days=2)))
+    await service.refresh("Personal")
+    service.backend["body"] = feed(event("move", START - timedelta(days=30)),
+                                   event("cancel", start=None, status="CANCELLED"))
+    await service.refresh("Personal")
+    pending = store.pending([service.settings.feed_id("Personal")])
+    changes = json.loads(pending[0][1]["text"])["changes"]
+    assert {change["event"]["uid"] for change in changes} == {"move", "cancel"}
+    assert all(model.notification_time(change["notification_context"], START) for change in changes)
+    await service.deliver_once("http://session.test")
+    assert len(service.backend["deliveries"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_calendar_legacy_outbox_is_filtered_and_recurrences_rechecked(service, store):
+    """Old queued batches lose obsolete history, not still-active recurring series."""
+    service.backend["body"] = feed()
+    await service.refresh("Personal")
+    service.backend["body"] = feed(event("history", START - timedelta(days=365)),
+        event("next", START + timedelta(days=2)),
+        event("annual", datetime(1982, 10, 1, tzinfo=timezone.utc), rrule={"freq": "yearly"}))
+    await service.refresh("Personal")
+    service.settings = replace(service.settings, notify_since="2026-09-14")
+    assert await service.deliver_once("http://session.test") == 1
+    changes = json.loads(service.backend["deliveries"][0]["text"])["changes"]
+    assert {change["event"]["uid"] for change in changes} == {"next", "annual"}
+    service.backend["body"] = feed()
+    service.settings = replace(service.settings, notify_since="all")
+    await service.refresh("Personal")
+    service.settings = replace(service.settings, notify_since="2100-01-01")
+    await service.deliver_once("http://session.test")
+    assert len(service.backend["deliveries"]) == 1
+    assert store.pending([service.settings.feed_id("Personal")]) == []
+
+
+def test_recurring_future_range_modification_is_not_filtered_as_old_exception():
+    """An old THISANDFUTURE exception remains relevant to future occurrences."""
+    master = event("series", datetime(2020, 1, 1, 9, tzinfo=timezone.utc), rrule={"freq": "yearly"})
+    exception = event("series", datetime(2021, 1, 1, 10, tzinfo=timezone.utc),
+                      recurrence_id=datetime(2021, 1, 1, 9, tzinfo=timezone.utc))
+    exception["RECURRENCE-ID"].params["RANGE"] = "THISANDFUTURE"
+    raw = feed(master, exception)
+    _, snapshot = model.parse_feed(raw, "Personal", "feed", ZoneInfo("UTC"))
+    assert len(model.notification_contexts(None, {}, raw, snapshot, START, ZoneInfo("UTC"))) == 2
+
+
+def test_notification_contexts_handle_unchanged_missing_and_unavailable_sources():
+    """Unchanged records and absent source evidence cannot create dated notifications."""
+    raw = feed(event("old", START - timedelta(days=365)))
+    _, snapshot = model.parse_feed(raw, "Personal", "feed", ZoneInfo("UTC"))
+    assert model.notification_contexts(raw, snapshot, raw, snapshot, START, ZoneInfo("UTC")) == {}
+    assert model.notification_contexts(None, snapshot, feed(), {}, START, ZoneInfo("UTC")) == {}
+    assert model.notification_contexts(None, {}, feed(), snapshot, START, ZoneInfo("UTC")) == {}

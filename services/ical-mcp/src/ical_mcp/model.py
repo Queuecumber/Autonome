@@ -15,6 +15,25 @@ from pydantic import BaseModel, Field, field_validator
 import recurring_ical_events
 
 
+def notification_date(value: str) -> datetime | None:
+    """Parse startup/all modes or an explicit ISO date/aware timestamp for notifications.
+
+    Returns:
+        UTC timestamp for a date/timestamp, or None for either named mode.
+
+    Raises:
+        ValueError: Invalid input or an ISO timestamp without a timezone.
+    """
+    if value in {"startup", "all"}:
+        return None
+    result = datetime.fromisoformat(value)
+    if len(value) == 10:
+        result = result.replace(tzinfo=timezone.utc)
+    if result.utcoffset() is None:
+        raise ValueError("ICAL_NOTIFY_SINCE requires a date or timezone-aware timestamp")
+    return result.astimezone(timezone.utc)
+
+
 @dataclass(frozen=True)
 class Settings:
     """Named private feeds and refresh/query limits; URLs are omitted from repr.
@@ -27,6 +46,8 @@ class Settings:
         max_feed_bytes: Maximum downloaded/decoded feed size.
         session_id: Optional explicit session route.
         energy: Passive by default; active preempts ongoing generation.
+        notify_since: startup persists first activation; all disables the date
+            filter; an ISO date or aware timestamp sets an explicit cutoff.
 
     Raises:
         ValueError: Invalid URLs, timezone, routing, or bounds.
@@ -38,6 +59,7 @@ class Settings:
     max_feed_bytes: int = 5 * 1024 * 1024
     session_id: str = ""
     energy: str = "passive"
+    notify_since: str = "startup"
 
     def __post_init__(self):
         """Validate configuration without fetching any private feed."""
@@ -57,6 +79,7 @@ class Settings:
             raise ValueError("Calendar refresh and size limits must be positive")
         if self.energy not in {"active", "passive"}:
             raise ValueError("ICAL_EVENT_ENERGY must be passive or active")
+        notification_date(self.notify_since)
 
     def feed_id(self, name: str) -> str:
         """Return an opaque name/URL identity; unknown calendar names raise KeyError."""
@@ -70,7 +93,8 @@ class Settings:
                    float(os.environ.get("ICAL_REFRESH_SECONDS", "300")),
                    float(os.environ.get("ICAL_TIMEOUT_SECONDS", "20")),
                    int(os.environ.get("ICAL_MAX_FEED_BYTES", str(5 * 1024 * 1024))),
-                   os.environ.get("ICAL_SESSION_ID", ""), os.environ.get("ICAL_EVENT_ENERGY", "passive"))
+                   os.environ.get("ICAL_SESSION_ID", ""), os.environ.get("ICAL_EVENT_ENERGY", "passive"),
+                   os.environ.get("ICAL_NOTIFY_SINCE", "startup"))
 
 
 class EventKey(BaseModel):
@@ -132,6 +156,80 @@ def instant(value: datetime | date, zone: ZoneInfo) -> datetime:
     if value.utcoffset() is None:
         value = value.replace(tzinfo=zone)
     return value.astimezone(timezone.utc)
+
+
+def notification_time(item: dict, since: datetime) -> bool:
+    """Return whether an event/occurrence starts on or after the floor or overlaps it."""
+    zone = ZoneInfo(item.get("calendar_timezone", "UTC"))
+    start = Event.preserve_date_type(item.get("start"))
+    end = Event.preserve_date_type(item.get("end"))
+    return bool((start is not None and instant(start, zone) >= since)
+                or (end is not None and instant(end, zone) > since))
+
+
+def notification_contexts(old_raw: bytes | None, previous: dict, raw: bytes, current: dict,
+                          since: datetime, zone: ZoneInfo) -> dict[str, dict]:
+    """Find qualifying dates for changed source records without filtering stored history.
+
+    Args:
+        old_raw: Previous feed, or None for a source lookup.
+        previous: Previous source snapshot.
+        raw: Current complete feed.
+        current: Current source snapshot, possibly narrowed to queued source IDs.
+        since: Inclusive notification date floor.
+        zone: Fallback zone for floating/all-day dates.
+
+    Returns:
+        Source IDs mapped to a qualifying source/recurrence interval. Both old
+        and new dates are checked, preserving cancellations and moves out of the
+        window. Past recurring masters qualify only if the recurrence engine
+        finds an occurrence after the floor; a past individual exception does not
+        qualify merely because its parent still recurs.
+    """
+    calendars = {}
+    result = {}
+    for identifier in previous.keys() | current.keys():
+        if previous.get(identifier) == current.get(identifier):
+            continue
+        for item, content in [(current.get(identifier), raw), (previous.get(identifier), old_raw)]:
+            if item is None:
+                continue
+            event = item["event"]
+            candidate = event
+            if not notification_time(candidate, since):
+                if content is None:
+                    continue
+                if content not in calendars:
+                    calendars[content] = Calendar.from_ical(content)
+                cal = calendars[content]
+                related = [entry for entry in cal.walk("VEVENT") if str(entry.get("UID")) == event["uid"]]
+                key = EventKey.decode(identifier)
+                source = next((entry for entry in related if component_key(entry, key.feed) == key), None)
+                if source is None:
+                    continue
+                rid = source.get("RECURRENCE-ID")
+                if rid is not None and str(rid.params.get("RANGE", "")) != "THISANDFUTURE":
+                    continue
+                if not any(entry.get("RRULE") or entry.get("RDATE") for entry in related):
+                    continue
+                selected = copy.copy(cal)
+                selected.subcomponents = [entry for entry in cal.subcomponents
+                                          if entry.name != "VEVENT" or entry in related]
+                effective_zone = calendar_zone(cal, zone)
+                query = recurrence_query(selected, effective_zone)
+                candidate = None
+                for occurrence in query.after(since.astimezone(effective_zone)):
+                    value = render(occurrence, event["calendar"], key.feed, effective_zone, occurrence=True)
+                    data = value.model_dump(mode="json")
+                    if notification_time(data, since):
+                        candidate = data
+                        break
+                if candidate is None:
+                    continue
+            result[identifier] = {key: candidate.get(key) for key in
+                                  ["start", "end", "all_day", "calendar_timezone", "recurrence_id"]}
+            break
+    return result
 
 
 def recurrence_id(component) -> str:

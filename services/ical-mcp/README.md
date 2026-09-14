@@ -37,6 +37,25 @@ webhook. Conditional GET uses stored ETag and Last-Modified validators. The
 default refresh period is five minutes. Initial successful loading establishes a
 quiet baseline rather than announcing historical entries.
 
+`ICAL_NOTIFY_SINCE` additionally filters history that appears in later snapshots.
+The default `startup` persists the first updated adapter activation time for each
+feed; restarts do not move it forward. Existing state from older versions gets
+its cutoff on the first startup with this policy. An ISO date (midnight UTC) or
+timezone-aware timestamp sets an explicit floor; `all` disables the date filter.
+The initial complete snapshot is quiet in every mode.
+
+Notification eligibility is based on event intervals at/after the cutoff, not
+only the original start of a recurring master. The recurrence engine checks for
+a qualifying occurrence, so an ongoing anniversary beginning in 1982 is not
+mistaken for a finished historical event. Expired series and past individual
+exceptions are suppressed. Both previous and new source dates are considered:
+cancelling or moving an upcoming event into the past still generates a change.
+`notification_context` on each change provides the qualifying interval; this is
+not necessarily the next occurrence relative to today's wall clock.
+
+All source snapshots and historical reads remain intact. `list_calendars`
+reports the effective `notify_since`. Suppression only affects notifications.
+
 Source additions, updates, explicit cancellations, and removals produce passive
 `calendar_changed` events at `/event`, in batches of at most 20 changes. Recurrence
 expansion and the passage of time alone do not produce notifications. Metadata-only
@@ -66,13 +85,19 @@ never loaded fails explicitly instead of returning an empty or partial calendar.
 Freshness is observational, not proof that a provider export reflects its latest
 underlying state. Concurrent reads across feeds are not one atomic snapshot.
 
-Pending events retry until successful HTTP acceptance. A lost response may cause
+Pending events are rechecked against the current cutoff before delivery. Legacy
+batches are filtered using their saved dates and available current source data;
+recurrences are re-evaluated instead of judging them solely by an old master date.
+Excluded changes are removed from the notification outbox, not from the calendar.
+Eligible pending events retry until successful HTTP acceptance. A lost response may cause
 repeat delivery with the same `metadata.event_id`. Session-manager's HTTP 202
 acknowledges scheduling, not durable processing; end-to-end exactly-once processing
 and event-ID deduplication are not provided. Retain the state volume and run one
 replica. Replacing a feed URL, even for token rotation, establishes a new feed
 identity and quiet baseline; old pending events remain stored but are not delivered
 under the new configuration. Removing the volume loses pending notifications.
+Changing the cutoff to an earlier date does not replay already processed source
+changes. The adapter cannot retract events already accepted by session-manager.
 
 These are calendar change notifications, not appointment reminders. Use the time
 service for scheduled reminders. This adapter does not create, update, cancel, or
@@ -88,6 +113,7 @@ Run `python -m ical_mcp.server` for HTTP MCP at `/mcp`.
 | `ICAL_TIMEZONE` | `UTC` | Floating/all-day fallback timezone |
 | `ICAL_MCP_PORT` | `8008` | HTTP MCP port |
 | `ICAL_REFRESH_SECONDS` | `300` | Adapter-side refresh period |
+| `ICAL_NOTIFY_SINCE` | `startup` | Persisted first activation, explicit ISO date/aware timestamp, or `all` |
 | `ICAL_TIMEOUT_SECONDS` | `20` | Overall refresh and HTTP timeout |
 | `ICAL_MAX_FEED_BYTES` | `5242880` | Maximum decoded feed size |
 | `ICAL_STATE_PATH` | `/data/ical.sqlite3` | Persistent state database |
