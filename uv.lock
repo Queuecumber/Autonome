@@ -6,10 +6,12 @@ requires-python = ">=3.12"
 members = [
     "autonome",
     "autonome-graphiti-mcp",
+    "autonome-imap-mcp",
     "autonome-matrix-adapter",
     "autonome-memory-mcp",
     "autonome-session-manager",
     "autonome-signal-adapter",
+    "autonome-smtp-mcp",
     "autonome-system-mcp",
     "autonome-time-mcp",
     "autonome-workspace-fs-mcp",
@@ -225,10 +227,12 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "autonome-graphiti-mcp" },
+    { name = "autonome-imap-mcp" },
     { name = "autonome-matrix-adapter" },
     { name = "autonome-memory-mcp" },
     { name = "autonome-session-manager" },
     { name = "autonome-signal-adapter" },
+    { name = "autonome-smtp-mcp" },
     { name = "autonome-system-mcp" },
     { name = "autonome-time-mcp" },
     { name = "autonome-workspace-fs-mcp" },
@@ -242,10 +246,12 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "autonome-graphiti-mcp", editable = "services/graphiti-mcp" },
+    { name = "autonome-imap-mcp", editable = "services/imap-mcp" },
     { name = "autonome-matrix-adapter", editable = "services/matrix-adapter" },
     { name = "autonome-memory-mcp", editable = "services/memory-mcp" },
     { name = "autonome-session-manager", editable = "services/session-manager" },
     { name = "autonome-signal-adapter", editable = "services/signal-adapter" },
+    { name = "autonome-smtp-mcp", editable = "services/smtp-mcp" },
     { name = "autonome-system-mcp", editable = "services/system-mcp" },
     { name = "autonome-time-mcp", editable = "services/time-mcp" },
     { name = "autonome-workspace-fs-mcp", editable = "services/workspace-fs-mcp" },
@@ -271,6 +277,25 @@ requires-dist = [
     { name = "graphiti-core", extras = ["falkordb"], specifier = ">=0.30,<0.31" },
     { name = "networkx", specifier = ">=3.4,<4" },
     { name = "openai", specifier = ">=1.91.0,<3" },
+]
+
+[[package]]
+name = "autonome-imap-mcp"
+version = "0.1.0"
+source = { editable = "services/imap-mcp" }
+dependencies = [
+    { name = "fastmcp" },
+    { name = "httpx" },
+    { name = "imapclient" },
+    { name = "markdownify" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastmcp", specifier = ">=2.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "imapclient", specifier = ">=3.1,<4" },
+    { name = "markdownify", specifier = ">=1.0" },
 ]
 
 [[package]]
@@ -356,6 +381,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "autonome-smtp-mcp"
+version = "0.1.0"
+source = { editable = "services/smtp-mcp" }
+dependencies = [
+    { name = "fastmcp" },
+    { name = "icalendar" },
+    { name = "mistune" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastmcp", specifier = ">=2.0" },
+    { name = "icalendar", specifier = ">=6,<7" },
+    { name = "mistune", specifier = ">=3.0" },
+]
+
+[[package]]
 name = "autonome-system-mcp"
 version = "0.1.0"
 source = { editable = "services/system-mcp" }
@@ -420,6 +462,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/94/1009e248bbfbab11397abca7193bea6626806be9a327d399810d523a07cb/beartype-0.22.9.tar.gz", hash = "sha256:8f82b54aa723a2848a56008d18875f91c1db02c32ef6a62319a002e3e25a975f", size = 1608866, upload-time = "2025-12-13T06:50:30.72Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl", hash = "sha256:d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2", size = 1333658, upload-time = "2025-12-13T06:50:28.266Z" },
+]
+
+[[package]]
+name = "beautifulsoup4"
+version = "4.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "soupsieve" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/65/318323f98dbee45d42dff61d8f047181bc6f2268a9068cfad035a46be5af/beautifulsoup4-4.15.0.tar.gz", hash = "sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7", size = 632571, upload-time = "2026-06-07T16:44:20.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl", hash = "sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9", size = 109924, upload-time = "2026-06-07T16:44:21.566Z" },
 ]
 
 [[package]]
@@ -1145,12 +1200,34 @@ wheels = [
 ]
 
 [[package]]
+name = "icalendar"
+version = "6.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "tzdata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5d/70/458092b3e7c15783423fe64d07e63ea3311a597e723be6a1060513e3db93/icalendar-6.3.2.tar.gz", hash = "sha256:e0c10ecbfcebe958d33af7d491f6e6b7580d11d475f2eeb29532d0424f9110a1", size = 178422, upload-time = "2025-11-05T12:49:32.286Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/ee/2ff96bb5bd88fe03ab90aedf5180f96dc0f3ae4648ca264b473055bcaaff/icalendar-6.3.2-py3-none-any.whl", hash = "sha256:d400e9c9bb8c025e5a3c77c236941bb690494be52528a0b43cc7e8b7c9505064", size = 242403, upload-time = "2025-11-05T12:49:30.691Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.11"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6f/6d/0703ccc57f3a7233505399edb88de3cbd678da106337b9fcde432b65ed60/idna-3.11.tar.gz", hash = "sha256:795dafcc9c04ed0c1fb032c2aa73654d8e8c5023a7df64a53f39190ada629902", size = 194582, upload-time = "2025-10-12T14:55:20.501Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0e/61/66938bbb5fc52dbdf84594873d5b51fb1f7c7794e9c0f5bd885f30bc507b/idna-3.11-py3-none-any.whl", hash = "sha256:771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea", size = 71008, upload-time = "2025-10-12T14:55:18.883Z" },
+]
+
+[[package]]
+name = "imapclient"
+version = "3.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/79/8138f8c91e791f49cf4c2269b1eaaaddb93013d162e92ddc249b84d38105/imapclient-3.1.0.tar.gz", hash = "sha256:b0413a516ffcc4b4d69f2c611c0e95da57968edf5a5c78ac82d1bf882305facc", size = 199675, upload-time = "2026-01-17T18:50:12.186Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/a8/a0f86ed51f792d9e6afcc062db2766033be7d1028d1fd5deaf38b075430a/imapclient-3.1.0-py2.py3-none-any.whl", hash = "sha256:34c192ffe82936e940a998ac89c474296942cd7c4f6c208f0fccfcd972946038", size = 182536, upload-time = "2026-01-17T18:49:09.105Z" },
 ]
 
 [[package]]
@@ -1361,6 +1438,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5b/f5/4ec618ed16cc4f8fb3b701563655a69816155e79e24a17b651541804721d/markdown_it_py-4.0.0.tar.gz", hash = "sha256:cb0a2b4aa34f932c007117b194e945bd74e0ec24133ceb5bac59009cda1cb9f3", size = 73070, upload-time = "2025-08-11T12:57:52.854Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/54/e7d793b573f298e1c9013b8c4dade17d481164aa517d1d7148619c2cedbf/markdown_it_py-4.0.0-py3-none-any.whl", hash = "sha256:87327c59b172c5011896038353a81343b6754500a08cd7a4973bb48c6d578147", size = 87321, upload-time = "2025-08-11T12:57:51.923Z" },
+]
+
+[[package]]
+name = "markdownify"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/ab/d1297139c0e2ceb151ae564c8c4f57ac0155d8f1f8b4cbd5d6523c82ea36/markdownify-1.2.3.tar.gz", hash = "sha256:1a176f05522c8a2cb1dd3ab9d307dcdadbed5c26ae717855bfc42b3b6d38d937", size = 18852, upload-time = "2026-06-30T20:27:39.06Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/10/fa543d484e8b1199243fe20eedd02cc5af050edebce98a7293a5773df592/markdownify-1.2.3-py3-none-any.whl", hash = "sha256:a189a0bedfd14009030fde5f85bb6f77c56897cb839b5c25315dd7d4e3e290ba", size = 15732, upload-time = "2026-06-30T20:27:38.094Z" },
 ]
 
 [[package]]
@@ -2383,6 +2473,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
+]
+
+[[package]]
+name = "soupsieve"
+version = "2.9.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/69/99/a6ca3beb3ccacb41fb3321d8a60e5566f9e6467601ef8eba6a17e1b89778/soupsieve-2.9.2.tar.gz", hash = "sha256:4a55d8cf158a9c2e587fa4922f1bbb91d68ac829e2d6f25403a85747c71daf74", size = 122445, upload-time = "2026-08-07T00:57:24.801Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/dc/ad025c1ee131eba60c69f4dd5779b18fcf1e6b21a343e2162a84d5d133c7/soupsieve-2.9.2-py3-none-any.whl", hash = "sha256:8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823", size = 37370, upload-time = "2026-08-07T00:57:23.524Z" },
 ]
 
 [[package]]

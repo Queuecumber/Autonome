@@ -1,0 +1,291 @@
+"""Read-only IMAP access and MIME parsing, adapted from aibs/imap/model.py."""
+
+import base64
+import binascii
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from email import policy
+from email.message import EmailMessage
+from email.parser import BytesParser
+from email.utils import getaddresses, parseaddr, parsedate_to_datetime
+import hashlib
+import json
+import os
+import ssl
+from urllib.parse import urlparse
+
+from imapclient import IMAPClient
+from markdownify import markdownify
+from pydantic import BaseModel, Field
+
+
+@dataclass(frozen=True)
+class Settings:
+    """One mail account; TLS is required and passwords are excluded from repr.
+
+    Args:
+        server: imaps:// (or tls://) host, or starttls:// host.
+        username: Login name.
+        password: Login password or app password.
+        folders: Case-sensitive folders to watch, not a restriction on searches.
+        timeout: Socket timeout in seconds.
+        max_message_bytes: Maximum full message size accepted by detail tools.
+
+    Raises:
+        ValueError: If the account, URL, folders, or limits are invalid.
+    """
+    server: str
+    username: str
+    password: str = field(repr=False)
+    folders: tuple[str, ...] = ("INBOX",)
+    timeout: float = 20
+    max_message_bytes: int = 25 * 1024 * 1024
+
+    def __post_init__(self):
+        """Reject invalid configuration before opening a network connection."""
+        url = urlparse(self.server)
+        if (url.scheme not in {"imaps", "tls", "starttls"} or not url.hostname
+                or url.username or url.password or url.path not in {"", "/"}
+                or url.query or url.fragment):
+            raise ValueError("IMAP_SERVER must be an imaps:// or starttls:// host URL")
+        if url.port is not None and not 1 <= url.port <= 65535:
+            raise ValueError("Invalid IMAP port")
+        if not self.username or not self.password:
+            raise ValueError("IMAP_USERNAME and IMAP_PASSWORD are required")
+        if (not self.folders or len(set(self.folders)) != len(self.folders)
+                or any(not folder or any(c in folder for c in "\r\n\x00") for folder in self.folders)):
+            raise ValueError("IMAP_FOLDERS must contain unique, nonempty folder names")
+        if self.timeout <= 0 or self.max_message_bytes <= 0:
+            raise ValueError("IMAP limits must be positive")
+
+    @property
+    def account(self) -> str:
+        """Return an opaque identity scoped to server, port, and login, not password."""
+        url = urlparse(self.server)
+        identity = [url.hostname, url.port or (143 if url.scheme == "starttls" else 993), self.username]
+        return hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        """Read IMAP_* settings; raises ValueError for malformed configuration."""
+        folders = json.loads(os.environ.get("IMAP_FOLDERS", '["INBOX"]'))
+        if not isinstance(folders, list) or not all(isinstance(folder, str) for folder in folders):
+            raise ValueError("IMAP_FOLDERS must be a JSON list of names")
+        return cls(os.environ.get("IMAP_SERVER", ""), os.environ.get("IMAP_USERNAME", ""),
+                   os.environ.get("IMAP_PASSWORD", ""), tuple(folders),
+                   float(os.environ.get("IMAP_TIMEOUT_SECONDS", "20")),
+                   int(os.environ.get("IMAP_MAX_MESSAGE_BYTES", str(25 * 1024 * 1024))))
+
+
+class MessageKey(BaseModel):
+    """An account, folder, UIDVALIDITY, and UID that identify exactly one mailbox item."""
+    account: str
+    folder: str = Field(min_length=1)
+    validity: int = Field(gt=0)
+    uid: int = Field(gt=0)
+
+    def encode(self) -> str:
+        """Return a URL-safe opaque message ID for tools and resource URIs."""
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode().rstrip("=")
+
+    @classmethod
+    def decode(cls, value: str) -> "MessageKey":
+        """Parse a complete message ID; raises ValueError for malformed IDs."""
+        if not value or len(value) > 4096:
+            raise ValueError("Invalid message ID")
+        try:
+            return cls.model_validate_json(base64.b64decode(
+                value + "=" * (-len(value) % 4), altchars=b"-_", validate=True))
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("Invalid message ID") from error
+
+
+class EmailAddress(BaseModel):
+    """A parsed display name and address; missing headers produce empty strings."""
+    name: str
+    address: str
+
+
+class AttachmentMetadata(BaseModel):
+    """Attachment index, display filename, MIME type, decoded byte count, and resource URI."""
+    id: str
+    name: str
+    content_type: str
+    size: int
+    uri: str
+
+
+class Message(BaseModel):
+    """Mail details or a header-only summary; None means a field was not fetched."""
+    id: str
+    subject: str
+    from_: EmailAddress
+    date_time: datetime | None = None
+    to: list[EmailAddress] | None = None
+    cc: list[EmailAddress] | None = None
+    body: str | None = None
+    has_attachments: bool | None = None
+    attachment_metadata: list[AttachmentMetadata] | None = None
+
+
+def attachment_bytes(part: EmailMessage) -> bytes:
+    """Decode an attachment, including an attached RFC822 message, into bytes."""
+    payload = part.get_payload(decode=True)
+    if payload is not None:
+        return payload
+    nested = part.get_payload()
+    if isinstance(nested, list):
+        return b"\r\n".join(item.as_bytes() for item in nested)
+    return str(nested or "").encode()
+
+
+def parse_message(raw: bytes, key: MessageKey, summary: bool = False) -> Message:
+    """Parse MIME without changing mailbox state.
+
+    Args:
+        raw: RFC822 message or headers.
+        key: Stable mailbox identity to attach to results.
+        summary: Omit body, recipients, and attachment claims for header-only data.
+
+    Returns:
+        A message; malformed or absent dates are represented as None.
+    """
+    mail = BytesParser(policy=policy.default).parsebytes(raw)
+    sent = None
+    try:
+        sent = parsedate_to_datetime(str(mail.get("Date", "")))
+    except (ValueError, TypeError, OverflowError):
+        pass
+    name, address = parseaddr(str(mail.get("From", "")))
+    result = Message(id=key.encode(), subject=str(mail.get("Subject", "")),
+                     from_=EmailAddress(name=name, address=address), date_time=sent)
+    if summary:
+        return result
+    for header in ["to", "cc"]:
+        setattr(result, header, [EmailAddress(name=name, address=address)
+            for name, address in getaddresses([str(value) for value in mail.get_all(header, [])])])
+    body = mail.get_body(preferencelist=("plain", "html"))
+    result.body = ""
+    if body is not None:
+        content = body.get_content()
+        result.body = markdownify(content) if body.get_content_type() == "text/html" else content
+    result.attachment_metadata = [AttachmentMetadata(
+        id=str(index), name=part.get_filename() or f"attachment-{index}",
+        content_type=part.get_content_type(), size=len(attachment_bytes(part)),
+        uri=f"imap://attachments/{key.encode()}/{index}",
+    ) for index, part in enumerate(mail.iter_attachments())]
+    result.has_attachments = bool(result.attachment_metadata)
+    return result
+
+
+class Mailbox:
+    """Read-only tools with a separate connection per call, isolated from IDLE workers.
+
+    Args:
+        settings: Validated account settings.
+    """
+    def __init__(self, settings: Settings):
+        """Retain settings without connecting to the mail server."""
+        self.settings = settings
+
+    @contextmanager
+    def connect(self):
+        """Yield an authenticated TLS connection; connection/authentication errors propagate."""
+        url = urlparse(self.settings.server)
+        direct_tls = url.scheme != "starttls"
+        with IMAPClient(url.hostname, port=url.port or (993 if direct_tls else 143),
+                        ssl=direct_tls, ssl_context=ssl.create_default_context(),
+                        timeout=self.settings.timeout, use_uid=True) as client:
+            if not direct_tls:
+                client.starttls(ssl_context=ssl.create_default_context())
+            client.login(self.settings.username, self.settings.password)
+            yield client
+
+    def folders(self) -> list[str]:
+        """Return selectable folder names with case and hierarchy preserved."""
+        with self.connect() as client:
+            return [name for flags, _, name in client.list_folders()
+                    if b"\\Noselect" not in flags]
+
+    def raw_message(self, message_id: str) -> tuple[bytes, MessageKey]:
+        """Fetch full mail using BODY.PEEK; reject stale IDs or oversized messages.
+
+        Args:
+            message_id: ID from a search or incoming-mail event.
+
+        Returns:
+            Message bytes and their validated key.
+
+        Raises:
+            ValueError: For an invalid/foreign ID, UIDVALIDITY change, or size limit.
+            KeyError: If the mail has been removed.
+        """
+        key = MessageKey.decode(message_id)
+        if key.account != self.settings.account:
+            raise ValueError("Message ID belongs to another account")
+        with self.connect() as client:
+            selected = client.select_folder(key.folder, readonly=True)
+            if int(selected[b"UIDVALIDITY"]) != key.validity:
+                raise ValueError("Mailbox UIDVALIDITY changed; search again for a current ID")
+            size = client.fetch([key.uid], ["RFC822.SIZE"]).get(key.uid)
+            if size is None:
+                raise KeyError("Message no longer exists")
+            if size[b"RFC822.SIZE"] > self.settings.max_message_bytes:
+                raise ValueError("Message exceeds IMAP_MAX_MESSAGE_BYTES")
+            data = client.fetch([key.uid], ["BODY.PEEK[]"]).get(key.uid, {}).get(b"BODY[]")
+            if data is None:
+                raise KeyError("Message no longer exists")
+            if len(data) > self.settings.max_message_bytes:
+                raise ValueError("Message exceeds IMAP_MAX_MESSAGE_BYTES")
+            return data, key
+
+    def get(self, message_id: str) -> Message:
+        """Return full details for an ID; propagates missing, stale, and oversized-mail errors."""
+        raw, key = self.raw_message(message_id)
+        return parse_message(raw, key)
+
+    def attachment(self, message_id: str, attachment_id: str) -> tuple[bytes, AttachmentMetadata]:
+        """Return attachment bytes and metadata; raises KeyError for an absent attachment."""
+        raw, key = self.raw_message(message_id)
+        mail = BytesParser(policy=policy.default).parsebytes(raw)
+        for index, part in enumerate(mail.iter_attachments()):
+            if str(index) == attachment_id:
+                data = attachment_bytes(part)
+                return data, AttachmentMetadata(id=attachment_id, name=part.get_filename() or f"attachment-{index}",
+                    content_type=part.get_content_type(), size=len(data),
+                    uri=f"imap://attachments/{key.encode()}/{index}")
+        raise KeyError("Attachment not found")
+
+    def search(self, search: str, folder: str | None = "INBOX", limit: int = 10) -> list[Message]:
+        """Return at most 100 header summaries, newest UID first within each folder.
+
+        Args:
+            search: IMAP search criteria, not a Graph/KQL query.
+            folder: Exact folder name, or None to search all selectable folders.
+            limit: Total result limit from 1 to 100 across all selected folders.
+
+        Returns:
+            Header summaries; use get for bodies and attachment details.
+
+        Raises:
+            ValueError: For invalid limits or command control characters.
+        """
+        if not 1 <= limit <= 100 or not search.strip() or any(c in search for c in "\r\n\x00"):
+            raise ValueError("Use nonempty IMAP criteria and a limit from 1 to 100")
+        results = []
+        with self.connect() as client:
+            folders = [folder] if folder is not None else [name for flags, _, name in client.list_folders()
+                                                          if b"\\Noselect" not in flags]
+            for name in folders:
+                selected = client.select_folder(name, readonly=True)
+                uids = sorted(client.search(search), reverse=True)[:limit - len(results)]
+                records = client.fetch(uids, ["BODY.PEEK[HEADER]"]) if uids else {}
+                for uid in uids:
+                    if uid in records:
+                        key = MessageKey(account=self.settings.account, folder=name,
+                                         validity=int(selected[b"UIDVALIDITY"]), uid=uid)
+                        results.append(parse_message(records[uid][b"BODY[HEADER]"], key, summary=True))
+                if len(results) >= limit:
+                    break
+        return results

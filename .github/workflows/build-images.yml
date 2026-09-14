@@ -28,6 +28,8 @@ jobs:
           - system-mcp
           - time-mcp
           - graphiti-mcp
+          - imap-mcp
+          - smtp-mcp
     steps:
       - uses: actions/checkout@v4
 
