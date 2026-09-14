@@ -82,6 +82,8 @@ services:
     enabled: false
     image: { name: autonome-imap-mcp }
     port: 8006
+    # For a trusted in-cluster relay (e.g. Proton Mail Bridge) use a plaintext
+    # imap:// URL; bridge logins still require username and passwordSecretRef.
     server: ""
     username: ""
     passwordSecretRef: { name: "", key: IMAP_PASSWORD }
@@ -96,6 +98,8 @@ services:
     enabled: false
     image: { name: autonome-smtp-mcp }
     port: 8007
+    # For a trusted in-cluster relay use a plaintext smtp:// URL and leave
+    # username and passwordSecretRef.name empty (both empty together).
     server: ""
     username: ""
     passwordSecretRef: { name: "", key: SMTP_PASSWORD }

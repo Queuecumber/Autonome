@@ -75,7 +75,7 @@ and `MAILCAL_MCP_*` variables are not retained.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `IMAP_SERVER` | required | `imaps://host[:993]`, `tls://host[:993]`, or `starttls://host[:143]` |
+| `IMAP_SERVER` | required | `imaps://host[:993]`, `tls://host[:993]`, `starttls://host[:143]`, or `imap://host[:143]` |
 | `IMAP_USERNAME` | required | Login name |
 | `IMAP_PASSWORD` | required | Password or app password |
 | `IMAP_FOLDERS` | `["INBOX"]` | JSON list of exact watched folder names |
@@ -89,7 +89,9 @@ and `MAILCAL_MCP_*` variables are not retained.
 | `IMAP_STATE_PATH` | `/data/imap.sqlite3` | Persistent checkpoint/outbox file |
 
 TLS certificate validation is enabled, including STARTTLS before login. Plaintext
-`imap://` authentication is intentionally not ported. Private certificate roots
+`imap://` exists only for trusted in-cluster relays such as a co-located Proton Mail
+Bridge pod; do not use it for external servers. Bridge logins still require
+`IMAP_USERNAME` and `IMAP_PASSWORD` (the bridge-local mailbox password). Private certificate roots
 must be trusted by the container's SSL configuration. Passwords are not logged.
 The state volume contains mail headers and must be treated as private data.
 

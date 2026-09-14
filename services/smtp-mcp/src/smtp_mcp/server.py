@@ -1,4 +1,4 @@
-"""SMTP tools adapted from aibs/smtp with TLS, recipient policy, and binary resources."""
+"""SMTP tools adapted from aibs/smtp with optional TLS/auth, recipient policy, and binary resources."""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -35,8 +35,8 @@ class Settings:
     """SMTP account and explicit outbound policy; an empty allowlist denies all recipients.
 
     Args:
-        server: smtps:// or tls:// URL, or starttls:// URL.
-        username: Login name.
+        server: smtps://, tls://, or starttls:// URL, or smtp:// for a trusted plaintext relay.
+        username: Login name; empty with password skips AUTH (trusted relay).
         password: Login password, omitted from repr.
         sender: Only permitted sender mailbox.
         allowed_recipients: Exact permitted mailboxes, including CC and invitees.
@@ -59,13 +59,15 @@ class Settings:
     def __post_init__(self):
         """Validate outbound configuration without connecting or sending mail."""
         url = urlparse(self.server)
-        if (url.scheme not in {"smtps", "tls", "starttls"} or not url.hostname
+        if (url.scheme not in {"smtps", "tls", "starttls", "smtp"} or not url.hostname
                 or url.username or url.password or url.path not in {"", "/"} or url.query or url.fragment):
-            raise ValueError("SMTP_SERVER must be a smtps:// or starttls:// host URL")
+            raise ValueError("SMTP_SERVER must be a smtps://, starttls://, or smtp:// host URL")
         if url.port is not None and not 1 <= url.port <= 65535:
             raise ValueError("Invalid SMTP port")
-        if not self.username or not self.password or self.timeout <= 0 or self.max_attachment_bytes <= 0:
-            raise ValueError("SMTP credentials and positive limits are required")
+        if bool(self.username) != bool(self.password):
+            raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be set together or both empty")
+        if self.timeout <= 0 or self.max_attachment_bytes <= 0:
+            raise ValueError("Positive timeout and size limits are required")
         address(self.sender)
         for recipient in self.allowed_recipients:
             address(recipient)
@@ -169,13 +171,15 @@ class Mailer:
             msg.add_attachment(item.content, maintype=parts[0], subtype=parts[1], filename=item.name, params=params)
         url = urlparse(self.settings.server)
         context = ssl.create_default_context()
-        connection = (SMTP(url.hostname, url.port or 587, timeout=self.settings.timeout)
-                      if url.scheme == "starttls" else
+        connection = (SMTP(url.hostname, url.port or (587 if url.scheme == "starttls" else 25),
+                           timeout=self.settings.timeout)
+                      if url.scheme in {"starttls", "smtp"} else
                       SMTP_SSL(url.hostname, url.port or 465, timeout=self.settings.timeout, context=context))
         with connection as smtp:
             if url.scheme == "starttls":
                 smtp.starttls(context=context)
-            smtp.login(self.settings.username, self.settings.password)
+            if self.settings.username:
+                smtp.login(self.settings.username, self.settings.password)
             refused = smtp.send_message(msg, from_addr=address(sender), to_addrs=recipients)
         return {"message_id": msg["Message-ID"], "status": "partial" if refused else "accepted",
                 "accepted": [value for value in recipients if value not in refused],

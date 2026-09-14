@@ -22,10 +22,10 @@ from pydantic import BaseModel, Field
 
 @dataclass(frozen=True)
 class Settings:
-    """One mail account; TLS is required and passwords are excluded from repr.
+    """One mail account; TLS is required except trusted plaintext relays. Passwords are excluded from repr.
 
     Args:
-        server: imaps:// (or tls://) host, or starttls:// host.
+        server: imaps:// (or tls://) host, starttls:// host, or imap:// for a trusted plaintext relay.
         username: Login name.
         password: Login password or app password.
         folders: Case-sensitive folders to watch, not a restriction on searches.
@@ -45,10 +45,10 @@ class Settings:
     def __post_init__(self):
         """Reject invalid configuration before opening a network connection."""
         url = urlparse(self.server)
-        if (url.scheme not in {"imaps", "tls", "starttls"} or not url.hostname
+        if (url.scheme not in {"imaps", "tls", "starttls", "imap"} or not url.hostname
                 or url.username or url.password or url.path not in {"", "/"}
                 or url.query or url.fragment):
-            raise ValueError("IMAP_SERVER must be an imaps:// or starttls:// host URL")
+            raise ValueError("IMAP_SERVER must be an imaps://, starttls://, or imap:// host URL")
         if url.port is not None and not 1 <= url.port <= 65535:
             raise ValueError("Invalid IMAP port")
         if not self.username or not self.password:
@@ -63,7 +63,7 @@ class Settings:
     def account(self) -> str:
         """Return an opaque identity scoped to server, port, and login, not password."""
         url = urlparse(self.server)
-        identity = [url.hostname, url.port or (143 if url.scheme == "starttls" else 993), self.username]
+        identity = [url.hostname, url.port or (143 if url.scheme in {"starttls", "imap"} else 993), self.username]
         return hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
 
     @classmethod
@@ -191,13 +191,14 @@ class Mailbox:
 
     @contextmanager
     def connect(self):
-        """Yield an authenticated TLS connection; connection/authentication errors propagate."""
+        """Yield an authenticated connection; TLS unless imap://. Errors propagate."""
         url = urlparse(self.settings.server)
-        direct_tls = url.scheme != "starttls"
+        direct_tls = url.scheme in {"imaps", "tls"}
         with IMAPClient(url.hostname, port=url.port or (993 if direct_tls else 143),
-                        ssl=direct_tls, ssl_context=ssl.create_default_context(),
+                        ssl=direct_tls,
+                        ssl_context=None if url.scheme == "imap" else ssl.create_default_context(),
                         timeout=self.settings.timeout, use_uid=True) as client:
-            if not direct_tls:
+            if url.scheme == "starttls":
                 client.starttls(ssl_context=ssl.create_default_context())
             client.login(self.settings.username, self.settings.password)
             yield client

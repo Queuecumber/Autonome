@@ -15,7 +15,9 @@ are individual mailboxes, not comma-separated lists. Sending permission should
 also remain part of the agent's operating policy; incoming mail is not authority
 to send a reply, forward an attachment, or schedule a meeting.
 
-All connections require verified TLS (`smtps://`, `tls://`, or `starttls://`).
+Connections use verified TLS (`smtps://`, `tls://`, or `starttls://`). Plaintext `smtp://`
+without AUTH is supported for a trusted in-cluster relay: leave `SMTP_USERNAME` and
+`SMTP_PASSWORD` empty (both must be empty together).
 Plaintext SMTP and arbitrary sender mailboxes are not carried over from aibs.
 Passwords and raw provider errors are not exposed in MCP error responses.
 
@@ -49,9 +51,9 @@ entrypoints and `MAILCAL_MCP_*` variables are not retained.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SMTP_SERVER` | required | `smtps://host[:465]`, `tls://host[:465]`, or `starttls://host[:587]` |
-| `SMTP_USERNAME` | required | Login name |
-| `SMTP_PASSWORD` | required | Password or app password |
+| `SMTP_SERVER` | required | `smtps://host[:465]`, `tls://host[:465]`, `starttls://host[:587]`, or `smtp://host[:25]` |
+| `SMTP_USERNAME` | required unless `smtp://` no-auth | Login name; empty skips AUTH |
+| `SMTP_PASSWORD` | required unless `smtp://` no-auth | Password or app password; empty with `SMTP_USERNAME` skips AUTH |
 | `SMTP_FROM` | required | Permitted sender mailbox |
 | `SMTP_ALLOWED_RECIPIENTS` | `[]` | JSON list of allowed To/CC/invitation addresses |
 | `SMTP_ALLOW_ANY_RECIPIENT` | `false` | Explicitly bypass the recipient allowlist |

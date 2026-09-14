@@ -4,8 +4,15 @@
 {{- $name := printf "%s-mcp" $kind }}
 {{- $prefix := upper $kind }}
 {{- $server := required (printf "services.%sMcp.server is required" $kind) $svc.server }}
-{{- $username := required (printf "services.%sMcp.username is required" $kind) $svc.username }}
-{{- $secret := required (printf "services.%sMcp.passwordSecretRef.name is required" $kind) $svc.passwordSecretRef.name }}
+{{- $username := $svc.username | default "" }}
+{{- $secret := dig "passwordSecretRef" "name" "" $svc }}
+{{- if eq $kind "imap" }}
+{{- $username = required "services.imapMcp.username is required" $username }}
+{{- $secret = required "services.imapMcp.passwordSecretRef.name is required" $secret }}
+{{- end }}
+{{- if ne (empty $username) (empty $secret) }}
+{{- fail (printf "services.%sMcp.username and passwordSecretRef.name must be set together or both empty (no-auth relay)" $kind) }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -41,25 +48,27 @@ spec:
             - { name: {{ $prefix }}_SERVER, value: {{ $server | quote }} }
             - { name: {{ $prefix }}_USERNAME, value: {{ $username | quote }} }
             - { name: {{ $prefix }}_TIMEOUT_SECONDS, value: {{ $svc.timeoutSeconds | quote }} }
+            {{- if $secret }}
             - name: {{ $prefix }}_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ $secret | quote }}
                   key: {{ required "passwordSecretRef.key is required" $svc.passwordSecretRef.key | quote }}
                   optional: false
+            {{- end }}
             {{- if eq $kind "imap" }}
             - { name: SESSION_MANAGER_URL, value: "http://session-manager:{{ $.Values.services.sessionManager.port }}" }
             - { name: IMAP_FOLDERS, value: {{ $svc.folders | toJson | quote }} }
             - { name: IMAP_EVENT_ENERGY, value: {{ $svc.eventEnergy | quote }} }
             - { name: IMAP_SESSION_ID, value: {{ $svc.sessionId | quote }} }
             - { name: IMAP_POLL_SECONDS, value: {{ $svc.pollSeconds | quote }} }
-            - { name: IMAP_MAX_MESSAGE_BYTES, value: {{ $svc.maxMessageBytes | quote }} }
+            - { name: IMAP_MAX_MESSAGE_BYTES, value: {{ $svc.maxMessageBytes | int | quote }} }
             - { name: IMAP_STATE_PATH, value: /data/imap.sqlite3 }
             {{- else }}
             - { name: SMTP_FROM, value: {{ required "services.smtpMcp.from is required" $svc.from | quote }} }
             - { name: SMTP_ALLOWED_RECIPIENTS, value: {{ $svc.allowedRecipients | toJson | quote }} }
             - { name: SMTP_ALLOW_ANY_RECIPIENT, value: {{ $svc.allowAnyRecipient | quote }} }
-            - { name: SMTP_MAX_ATTACHMENT_BYTES, value: {{ $svc.maxAttachmentBytes | quote }} }
+            - { name: SMTP_MAX_ATTACHMENT_BYTES, value: {{ $svc.maxAttachmentBytes | int | quote }} }
             {{- end }}
           {{- if eq $kind "imap" }}
           volumeMounts:

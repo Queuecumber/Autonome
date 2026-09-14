@@ -43,7 +43,7 @@ spec:
             - { name: ICAL_TIMEZONE, value: {{ default (default "UTC" .Values.timezone) $svc.timezone | quote }} }
             - { name: ICAL_REFRESH_SECONDS, value: {{ $svc.refreshSeconds | quote }} }
             - { name: ICAL_TIMEOUT_SECONDS, value: {{ $svc.timeoutSeconds | quote }} }
-            - { name: ICAL_MAX_FEED_BYTES, value: {{ $svc.maxFeedBytes | quote }} }
+            - { name: ICAL_MAX_FEED_BYTES, value: {{ $svc.maxFeedBytes | int | quote }} }
             - { name: ICAL_EVENT_ENERGY, value: {{ $svc.eventEnergy | quote }} }
             - { name: ICAL_SESSION_ID, value: {{ $svc.sessionId | quote }} }
             - { name: ICAL_STATE_PATH, value: /data/ical.sqlite3 }

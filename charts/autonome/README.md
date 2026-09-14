@@ -173,6 +173,9 @@ services:
 
 The referenced Kubernetes Secret must already exist in the release namespace;
 these credentials are not copied into chart values or session-manager's env.
+For an in-cluster relay that trusts pod networks, use `server: smtp://host:25`
+and leave `username` and `passwordSecretRef.name` empty together; the service
+then connects without TLS or AUTH, and no Secret is needed for SMTP.
 External password rotation requires restarting the corresponding mail deployment.
 Keep the IMAP deployment at one replica, with its Recreate strategy and persistent
 `<release>-imap` PVC, to retain checkpoints and pending events. The PVC is only
@@ -187,7 +190,9 @@ mcp_servers:
 ```
 
 Register IMAP's MCP even when only using push notifications, so the agent can
-retrieve message bodies and attachment resources. First IMAP startup is quiet
+retrieve message bodies and attachment resources. For Proton Mail, run a Bridge pod in the
+release namespace and set `server: imap://protonmail-bridge:143` with the
+bridge-local mailbox password in the referenced Secret. First IMAP startup is quiet
 for existing mail; subsequent arrivals trigger events. Servers lacking IDLE use
 adapter-side polling. HTTP acceptance is not durable agent-processing acknowledgement;
 ambiguous responses may repeat an event. See the [IMAP service documentation](../../services/imap-mcp/README.md)
