@@ -193,3 +193,33 @@ adapter-side polling. HTTP acceptance is not durable agent-processing acknowledg
 ambiguous responses may repeat an event. See the [IMAP service documentation](../../services/imap-mcp/README.md)
 and [SMTP service documentation](../../services/smtp-mcp/README.md) for guarantees,
 environment variables, migration differences, and outbound restrictions.
+
+## Optional iCal Feeds
+
+iCal is also disabled by default. Put a JSON calendar-name/HTTPS-URL mapping in
+the `ICAL_URLS` key of an existing Secret in the release namespace, for example
+`{"Personal":"https://calendar.example.test/private.ics"}`. Treat the entire
+URL as a credential; do not put real private feed URLs into a committed values file.
+
+```yaml
+services:
+  icalMcp:
+    enabled: true
+    urlsSecretRef: { name: calendar-feeds, key: ICAL_URLS }
+    refreshSeconds: 300
+    eventEnergy: passive
+    stateStorage: { size: 100Mi }
+```
+
+Register `ical: http://ical-mcp:8008/mcp` in `agent.config.mcp_servers`. The adapter
+refreshes feeds and pushes source changes to session-manager; no recurring agent
+calendar-check task is necessary. `services.icalMcp.timezone` defaults to the
+chart's global timezone, then UTC, for feeds with floating dates and no declared
+timezone. First loading is quiet. Calendar changes are not appointment reminders.
+
+The `<release>-ical` PVC retains snapshots and pending events. Keep one replica
+and the Recreate strategy. Rotate the external Secret by restarting the iCal
+deployment; changing a feed URL establishes a new baseline. See the
+[iCal service documentation](../../services/ical-mcp/README.md) for stale reads,
+recurrence handling, token privacy, and delivery limitations. Outlook is not
+being ported because it is superseded by the NVIDIA-provided integration.

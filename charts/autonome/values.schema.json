@@ -5,6 +5,21 @@
     "services": {
       "type": "object",
       "properties": {
+        "icalMcp": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "urlsSecretRef": { "$ref": "#/definitions/mailPassword" },
+            "timezone": { "type": "string" },
+            "refreshSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "maxFeedBytes": { "type": "integer", "minimum": 1 },
+            "eventEnergy": { "enum": ["passive", "active"] },
+            "sessionId": { "type": "string" },
+            "stateStorage": { "type": "object", "properties": { "size": { "type": "string", "minLength": 1 } } }
+          }
+        },
         "imapMcp": {
           "type": "object",
           "properties": {

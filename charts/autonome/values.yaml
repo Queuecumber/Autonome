@@ -104,6 +104,18 @@ services:
     allowAnyRecipient: false
     timeoutSeconds: 20
     maxAttachmentBytes: 26214400
+  icalMcp:
+    enabled: false
+    image: { name: autonome-ical-mcp }
+    port: 8008
+    urlsSecretRef: { name: "", key: ICAL_URLS }
+    timezone: ""
+    refreshSeconds: 300
+    timeoutSeconds: 20
+    maxFeedBytes: 5242880
+    eventEnergy: passive
+    sessionId: ""
+    stateStorage: { size: 100Mi }
   graphitiMcp:
     image: { name: autonome-graphiti-mcp }
     port: 8005
