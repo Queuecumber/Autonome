@@ -3,6 +3,8 @@
 import asyncio
 import base64
 from contextlib import contextmanager
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import json
 from pathlib import Path
@@ -17,7 +19,7 @@ from imap_mcp import events, model, server
 @pytest.fixture
 def settings():
     """Synthetic account configuration; no real credentials or mail servers are used."""
-    return model.Settings("imaps://mail.test", "test-user", "test-password")
+    return model.Settings("imaps://mail.test", "test-user", "test-password", notify_since="all")
 
 
 @pytest.fixture
@@ -52,7 +54,8 @@ def client(mime):
 
     def fetch(uids, fields):
         """Return requested records keyed by UID, not sequence number."""
-        return {uid: {b"RFC822.SIZE": len(mime), b"BODY[]": mime, b"BODY[HEADER]": mime.split(b"\n\n", 1)[0]}
+        return {uid: {b"RFC822.SIZE": len(mime), b"BODY[]": mime, b"BODY[HEADER]": mime.split(b"\n\n", 1)[0],
+                      b"INTERNALDATE": datetime(2026, 9, 14, 13, tzinfo=timezone.utc)}
                 for uid in uids}
 
     result.fetch.side_effect = fetch
@@ -98,7 +101,7 @@ def test_invalid_message_ids_fail(value):
 
 
 @pytest.mark.parametrize("changes", [
-    {"server": "imap://mail.test"}, {"server": "imaps://u:p@mail.test"},
+    {"server": "http://mail.test"}, {"server": "imaps://u:p@mail.test"},
     {"server": "imaps://mail.test/path"}, {"server": "imaps://mail.test:0"},
     {"username": ""}, {"password": ""}, {"folders": ()},
     {"folders": ("INBOX", "INBOX")}, {"folders": ("bad\nfolder",)}, {"timeout": 0},
@@ -122,7 +125,7 @@ def test_environment_configuration(monkeypatch):
         model.Settings.from_env()
 
 
-@pytest.mark.parametrize("scheme,port", [("imaps", 993), ("tls", 993), ("starttls", 143)])
+@pytest.mark.parametrize("scheme,port", [("imaps", 993), ("tls", 993), ("starttls", 143), ("imap", 143)])
 def test_connection_uses_tls_before_login(settings, monkeypatch, scheme, port):
     """Every authentication uses verified TLS and bounded sockets, then closes the connection."""
     protocol = Mock()
@@ -140,7 +143,8 @@ def test_connection_uses_tls_before_login(settings, monkeypatch, scheme, port):
         assert [call[0] for call in protocol.method_calls][:2] == ["starttls", "login"]
     else:
         protocol.starttls.assert_not_called()
-        assert factory.call_args.kwargs["ssl"] is True
+        assert factory.call_args.kwargs["ssl"] is (scheme != "imap")
+    assert protocol.normalise_times is False
     protocol.__exit__.assert_called_once()
 
 
@@ -461,4 +465,130 @@ def test_watcher_supports_servers_without_idle(mailbox, client, store, monkeypat
 
     monkeypatch.setattr(monitor, "wait_for_change", end_after_first_scan)
     monitor.watch("INBOX")
+    assert store.checkpoint(mailbox.settings.account, "INBOX", 21, 0) == 7
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("startup", None), ("all", None),
+    ("2026-09-14", datetime(2026, 9, 14, tzinfo=timezone.utc)),
+    ("2026-09-14T09:00:00-04:00", datetime(2026, 9, 14, 13, tzinfo=timezone.utc)),
+])
+def test_imap_notification_date_modes(value, expected):
+    """Modes and explicit dates have predictable, timezone-safe meanings."""
+    assert model.notification_date(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "yesterday", "2026-02-31", "2026-09-14T09:00:00"])
+def test_invalid_imap_notification_dates(settings, value):
+    """Malformed cutoffs fail configuration rather than silently disabling filtering."""
+    with pytest.raises(ValueError):
+        replace(settings, notify_since=value)
+
+
+def test_bridge_backfill_is_suppressed_by_receipt_date_without_hiding_mail(mailbox, client, store, tmp_path):
+    """Increasing UIDs for old imported mail do not bypass the default persisted cutoff."""
+    mailbox.settings = replace(mailbox.settings, notify_since="startup")
+    monitor = events.Monitor(mailbox, store)
+    floor = monitor.notification_floor("INBOX")
+    monitor.scan(client, "INBOX", 21, 7)
+    original_fetch = client.fetch.side_effect
+
+    def fetch(uids, fields):
+        """Supply old and new receipt times while leaving the sender's Date header unchanged."""
+        records = original_fetch(uids, fields)
+        for uid in uids:
+            records[uid][b"INTERNALDATE"] = floor + (timedelta(seconds=1) if uid == 9 else -timedelta(days=365))
+        return records
+
+    client.fetch.side_effect = fetch
+    client.search.return_value = [7, 8, 9]
+    monitor.scan(client, "INBOX", 21, 7)
+    pending = store.pending(mailbox.settings.account)
+    assert [event["metadata"]["uid"] for _, event in pending] == [9]
+    assert pending[0][1]["metadata"]["received_at"] == (floor + timedelta(seconds=1)).isoformat()
+    assert store.checkpoint(mailbox.settings.account, "INBOX", 21, 0) == 9
+    assert len(mailbox.search("ALL", "INBOX")) == 3
+    reopened = events.EventStore(tmp_path / "state" / "imap.sqlite3")
+    try:
+        assert events.Monitor(mailbox, reopened).notification_floor("INBOX") == floor
+        reopened.checkpoint(mailbox.settings.account, "INBOX", 22, 0)
+        assert reopened.notification_floor(mailbox.settings.account, "INBOX") == floor
+    finally:
+        reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_imap_legacy_outbox_is_filtered_using_server_dates(mailbox, client, store):
+    """An upgrade suppresses historical notifications already queued by the old adapter."""
+    original = events.Monitor(mailbox, store)
+    store.checkpoint(mailbox.settings.account, "INBOX", 21, 0)
+    client.search.return_value = [7, 8]
+    original.scan(client, "INBOX", 21, 0)
+    for identifier, event in store.pending(mailbox.settings.account):
+        del event["metadata"]["received_at"]
+        with store.db:
+            store.db.execute("UPDATE outbox SET payload=? WHERE id=?", (json.dumps(event), identifier))
+    fetch = client.fetch.side_effect
+
+    def dates(uids, fields):
+        """Receipt dates, not sender headers, determine eligibility of legacy queued records."""
+        values = fetch(uids, fields)
+        for uid in uids:
+            values[uid][b"INTERNALDATE"] = datetime(2025 if uid == 7 else 2026, 9, 14, 13, tzinfo=timezone.utc)
+        return values
+
+    client.fetch.side_effect = dates
+    mailbox.settings = replace(mailbox.settings, notify_since="2026-09-14")
+    monitor = events.Monitor(mailbox, store)
+    posted = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: (posted.append(json.loads(request.content)), httpx.Response(202))[1])) as http:
+        assert await monitor.deliver_once(http, "http://session.test") == 2
+    assert [event["metadata"]["uid"] for event in posted] == [8]
+    assert store.pending(mailbox.settings.account) == []
+
+
+@pytest.mark.asyncio
+async def test_imap_legacy_receipt_lookup_failure_retains_queue(mailbox, client, store, monkeypatch):
+    """Transient IMAP failure during legacy filtering cannot discard an eligible notification."""
+    monitor = events.Monitor(mailbox, store)
+    store.checkpoint(mailbox.settings.account, "INBOX", 21, 0)
+    monitor.scan(client, "INBOX", 21, 0)
+    identifier, event = store.pending(mailbox.settings.account)[0]
+    event["metadata"].pop("received_at")
+    with store.db:
+        store.db.execute("UPDATE outbox SET payload=? WHERE id=?", (json.dumps(event), identifier))
+    mailbox.settings = replace(mailbox.settings, notify_since="startup")
+    monitor = events.Monitor(mailbox, store)
+    monkeypatch.setattr(mailbox, "received_at", Mock(side_effect=OSError("offline")))
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(OSError):
+            await monitor.deliver_once(http, "http://session.test")
+        assert len(store.pending(mailbox.settings.account)) == 1
+        monkeypatch.setattr(mailbox, "received_at", Mock(side_effect=ValueError("stale ID")))
+        await monitor.deliver_once(http, "http://session.test")
+    assert store.pending(mailbox.settings.account) == []
+
+
+def test_receipt_lookup_handles_unknown_foreign_and_reset_ids(mailbox, client, key):
+    """Receipt rechecks use readonly selection and never accept ambiguous naive timestamps."""
+    assert mailbox.received_at(key.encode()) == datetime(2026, 9, 14, 13, tzinfo=timezone.utc)
+    client.select_folder.assert_called_with(key.folder, readonly=True)
+    with pytest.raises(ValueError):
+        mailbox.received_at(key.model_copy(update={"account": "foreign"}).encode())
+    client.select_folder.return_value[b"UIDVALIDITY"] = 22
+    assert mailbox.received_at(key.encode()) is None
+    assert model.received_time("2026-09-14T13:00:00Z") == datetime(2026, 9, 14, 13, tzinfo=timezone.utc)
+    assert model.received_time("invalid") is None
+    assert model.received_time(datetime(2026, 9, 14)) is None
+
+
+def test_missing_receipt_date_does_not_emit_or_block_backfill_cursor(mailbox, client, store):
+    """Unreadable receipt dates do not create notifications, but the mail remains searchable."""
+    mailbox.settings = replace(mailbox.settings, notify_since="startup")
+    monitor = events.Monitor(mailbox, store)
+    store.checkpoint(mailbox.settings.account, "INBOX", 21, 0)
+    client.fetch.side_effect = lambda uids, fields: {uid: {b"BODY[HEADER]": b"Subject: Test\n"} for uid in uids}
+    monitor.scan(client, "INBOX", 21, 0)
+    assert store.pending(mailbox.settings.account) == []
     assert store.checkpoint(mailbox.settings.account, "INBOX", 21, 0) == 7

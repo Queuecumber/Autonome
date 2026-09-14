@@ -4,7 +4,7 @@ import base64
 import binascii
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
@@ -20,6 +20,40 @@ from markdownify import markdownify
 from pydantic import BaseModel, Field
 
 
+def notification_date(value: str) -> datetime | None:
+    """Parse a notification floor; startup/all are modes, dates mean midnight UTC.
+
+    Args:
+        value: startup, all, an ISO date, or a timezone-aware ISO timestamp.
+
+    Returns:
+        A UTC timestamp for an explicit floor, or None for a mode.
+
+    Raises:
+        ValueError: Invalid value or a timestamp without a timezone.
+    """
+    if value in {"startup", "all"}:
+        return None
+    result = datetime.fromisoformat(value)
+    if len(value) == 10:
+        result = result.replace(tzinfo=timezone.utc)
+    if result.utcoffset() is None:
+        raise ValueError("IMAP_NOTIFY_SINCE requires a date or timezone-aware timestamp")
+    return result.astimezone(timezone.utc)
+
+
+def received_time(value) -> datetime | None:
+    """Normalize an aware INTERNALDATE or saved ISO receipt time; unknown values return None."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if isinstance(value, datetime) and value.utcoffset() is not None:
+        return value.astimezone(timezone.utc)
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     """One mail account; TLS is required except trusted plaintext relays. Passwords are excluded from repr.
@@ -31,6 +65,8 @@ class Settings:
         folders: Case-sensitive folders to watch, not a restriction on searches.
         timeout: Socket timeout in seconds.
         max_message_bytes: Maximum full message size accepted by detail tools.
+        notify_since: startup persists the first watcher time; all disables the
+            receipt-date filter; an ISO date/timestamp sets an explicit floor.
 
     Raises:
         ValueError: If the account, URL, folders, or limits are invalid.
@@ -41,6 +77,7 @@ class Settings:
     folders: tuple[str, ...] = ("INBOX",)
     timeout: float = 20
     max_message_bytes: int = 25 * 1024 * 1024
+    notify_since: str = "startup"
 
     def __post_init__(self):
         """Reject invalid configuration before opening a network connection."""
@@ -58,6 +95,7 @@ class Settings:
             raise ValueError("IMAP_FOLDERS must contain unique, nonempty folder names")
         if self.timeout <= 0 or self.max_message_bytes <= 0:
             raise ValueError("IMAP limits must be positive")
+        notification_date(self.notify_since)
 
     @property
     def account(self) -> str:
@@ -75,7 +113,8 @@ class Settings:
         return cls(os.environ.get("IMAP_SERVER", ""), os.environ.get("IMAP_USERNAME", ""),
                    os.environ.get("IMAP_PASSWORD", ""), tuple(folders),
                    float(os.environ.get("IMAP_TIMEOUT_SECONDS", "20")),
-                   int(os.environ.get("IMAP_MAX_MESSAGE_BYTES", str(25 * 1024 * 1024))))
+                   int(os.environ.get("IMAP_MAX_MESSAGE_BYTES", str(25 * 1024 * 1024))),
+                   os.environ.get("IMAP_NOTIFY_SINCE", "startup"))
 
 
 class MessageKey(BaseModel):
@@ -201,7 +240,31 @@ class Mailbox:
             if url.scheme == "starttls":
                 client.starttls(ssl_context=ssl.create_default_context())
             client.login(self.settings.username, self.settings.password)
+            client.normalise_times = False
             yield client
+
+    def received_at(self, message_id: str) -> datetime | None:
+        """Read a message's authoritative receipt time for legacy queued notifications.
+
+        Args:
+            message_id: Complete account-scoped ID.
+
+        Returns:
+            UTC INTERNALDATE, or None if removed, reset, or missing a usable date.
+
+        Raises:
+            ValueError: Invalid/foreign ID.
+            Exception: Connection or protocol failure; callers must retain queued events.
+        """
+        key = MessageKey.decode(message_id)
+        if key.account != self.settings.account:
+            raise ValueError("Message ID belongs to another account")
+        with self.connect() as client:
+            selected = client.select_folder(key.folder, readonly=True)
+            if int(selected[b"UIDVALIDITY"]) != key.validity:
+                return None
+            record = client.fetch([key.uid], ["INTERNALDATE"]).get(key.uid, {})
+            return received_time(record.get(b"INTERNALDATE"))
 
     def folders(self) -> list[str]:
         """Return selectable folder names with case and hierarchy preserved."""

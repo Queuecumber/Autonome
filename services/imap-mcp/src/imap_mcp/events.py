@@ -1,6 +1,7 @@
 """IMAP IDLE notifications with persistent checkpoints and an HTTP delivery outbox."""
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
@@ -9,8 +10,9 @@ import threading
 import time
 
 import httpx
+from imapclient import IMAPClient
 
-from imap_mcp.model import Mailbox, MessageKey, parse_message
+from imap_mcp.model import Mailbox, MessageKey, notification_date, parse_message, received_time
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,19 @@ class EventStore:
                 uid INTEGER NOT NULL, PRIMARY KEY(account, folder));
             CREATE TABLE IF NOT EXISTS outbox (
                 id TEXT PRIMARY KEY, account TEXT NOT NULL, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS notification_floors (
+                account TEXT NOT NULL, folder TEXT NOT NULL, since TEXT NOT NULL,
+                PRIMARY KEY(account, folder));
         """)
+
+    def notification_floor(self, account: str, folder: str) -> datetime:
+        """Return a persisted first-use cutoff without resetting it on restart or UID changes."""
+        with self.lock, self.db:
+            self.db.execute("INSERT OR IGNORE INTO notification_floors VALUES (?, ?, ?)",
+                            (account, folder, datetime.now(timezone.utc).isoformat()))
+            value = self.db.execute("SELECT since FROM notification_floors WHERE account=? AND folder=?",
+                                    (account, folder)).fetchone()[0]
+            return datetime.fromisoformat(value)
 
     def checkpoint(self, account: str, folder: str, validity: int, baseline: int) -> int:
         """Return the cursor, baselining first use or a UIDVALIDITY reset without replay.
@@ -125,6 +139,15 @@ class Monitor:
         self.session_id, self.energy = session_id, energy
         self.poll_seconds, self.retry_seconds = poll_seconds, retry_seconds
         self.stop = threading.Event()
+        for folder in mailbox.settings.folders:
+            self.notification_floor(folder)
+
+    def notification_floor(self, folder: str) -> datetime | None:
+        """Return the configured receipt-date floor for one folder, or None in all mode."""
+        configured = self.mailbox.settings.notify_since
+        if configured == "startup":
+            return self.store.notification_floor(self.mailbox.settings.account, folder)
+        return notification_date(configured)
 
     def scan(self, client, folder: str, validity: int, baseline: int) -> None:
         """Stage unseen UIDs in order; duplicates and messages expunged before fetch are skipped.
@@ -140,15 +163,17 @@ class Monitor:
         """
         account = self.mailbox.settings.account
         last_uid = self.store.checkpoint(account, folder, validity, baseline)
+        floor = self.notification_floor(folder)
         # UID n:* can return the current maximum even when it is smaller than n.
         uids = sorted(uid for uid in client.search(["UID", f"{last_uid + 1}:*"]) if uid > last_uid)
         for uid in uids:
             if self.stop.is_set():
                 return
             key = MessageKey(account=account, folder=folder, validity=validity, uid=uid)
-            record = client.fetch([uid], ["BODY.PEEK[HEADER]"]).get(uid)
+            record = client.fetch([uid], ["BODY.PEEK[HEADER]", "INTERNALDATE"]).get(uid)
             event = None
-            if record is not None:
+            received = received_time(record.get(b"INTERNALDATE")) if record is not None else None
+            if record is not None and (floor is None or (received is not None and received >= floor)):
                 message = parse_message(record[b"BODY[HEADER]"], key, summary=True)
                 summary = message.model_dump(mode="json", exclude_none=True)
                 summary["subject"] = summary["subject"][:500]
@@ -157,7 +182,8 @@ class Monitor:
                          "text": json.dumps(summary), "metadata": {
                              "event_id": key.encode(), "message_id": key.encode(),
                              "account": account, "folder": folder,
-                             "uidvalidity": validity, "uid": uid}}
+                             "uidvalidity": validity, "uid": uid,
+                             "received_at": received.isoformat() if received else None}}
                 if self.session_id:
                     event["session_id"] = self.session_id
             self.store.stage(key, event)
@@ -204,7 +230,8 @@ class Monitor:
             url: Session manager base URL.
 
         Returns:
-            Number accepted by the endpoint, not confirmation of agent processing.
+            Number processed, including notifications suppressed by the current
+            cutoff. HTTP acceptance is not confirmation of agent processing.
 
         Raises:
             httpx.HTTPError: Failed/ambiguous requests stay queued for retry. A lost
@@ -212,6 +239,17 @@ class Monitor:
         """
         pending = self.store.pending(self.mailbox.settings.account)
         for identifier, event in pending:
+            floor = self.notification_floor(event["metadata"]["folder"])
+            if floor is not None:
+                received = received_time(event["metadata"].get("received_at"))
+                if received is None:
+                    try:
+                        received = await asyncio.to_thread(self.mailbox.received_at, identifier)
+                    except ValueError:
+                        received = None
+                if received is None or received < floor:
+                    self.store.acknowledge(identifier)
+                    continue
             response = await http.post(f"{url.rstrip('/')}/event", json=event)
             response.raise_for_status()
             self.store.acknowledge(identifier)
@@ -222,7 +260,7 @@ class Monitor:
         while not self.stop.is_set():
             try:
                 count = await self.deliver_once(http, url)
-            except (httpx.HTTPError, sqlite3.Error) as error:
+            except (httpx.HTTPError, sqlite3.Error, OSError, IMAPClient.Error) as error:
                 logger.warning("IMAP event delivery retry after %s", type(error).__name__)
                 count = 0
             if not count:
