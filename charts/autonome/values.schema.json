@@ -5,6 +5,55 @@
     "services": {
       "type": "object",
       "properties": {
+        "icalMcp": {
+          "type": "object",
+          "properties": {
+            "notifySince": { "$ref": "#/definitions/notificationSince" },
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "urlsSecretRef": { "$ref": "#/definitions/mailPassword" },
+            "timezone": { "type": "string" },
+            "refreshSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "maxFeedBytes": { "type": "integer", "minimum": 1 },
+            "eventEnergy": { "enum": ["passive", "active"] },
+            "sessionId": { "type": "string" },
+            "stateStorage": { "type": "object", "properties": { "size": { "type": "string", "minLength": 1 } } }
+          }
+        },
+        "imapMcp": {
+          "type": "object",
+          "properties": {
+            "notifySince": { "$ref": "#/definitions/notificationSince" },
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "server": { "type": "string", "pattern": "^$|^(imaps|tls|starttls|imap)://" },
+            "username": { "type": "string" },
+            "passwordSecretRef": { "$ref": "#/definitions/mailPassword" },
+            "folders": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+            "eventEnergy": { "enum": ["passive", "active"] },
+            "sessionId": { "type": "string" },
+            "pollSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "maxMessageBytes": { "type": "integer", "minimum": 1 },
+            "stateStorage": { "type": "object", "properties": { "size": { "type": "string", "minLength": 1 } } }
+          }
+        },
+        "smtpMcp": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "server": { "type": "string", "pattern": "^$|^(smtps|tls|starttls|smtp)://" },
+            "username": { "type": "string" },
+            "passwordSecretRef": { "$ref": "#/definitions/mailPassword" },
+            "from": { "type": "string" },
+            "allowedRecipients": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+            "allowAnyRecipient": { "type": "boolean" },
+            "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "maxAttachmentBytes": { "type": "integer", "minimum": 1 }
+          }
+        },
         "graphitiMcp": {
           "type": "object",
           "properties": {
@@ -29,6 +78,23 @@
             }
           }
         }
+      }
+    }
+  },
+  "definitions": {
+    "notificationSince": {
+      "type": "string",
+      "oneOf": [
+        { "enum": ["startup", "all"] },
+        { "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        { "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T" }
+      ]
+    },
+    "mailPassword": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "key": { "type": "string", "minLength": 1 }
       }
     }
   }
