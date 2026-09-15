@@ -7,12 +7,14 @@ from dataclasses import replace
 import json
 import logging
 import sqlite3
+import traceback
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 from fastmcp import Client
 import httpx
 from icalendar import Calendar, Event as ICalEvent
+from icalendar.parser import Contentlines
 import pytest
 
 from ical_mcp import model, server
@@ -621,3 +623,143 @@ def test_notification_contexts_handle_unchanged_missing_and_unavailable_sources(
     assert model.notification_contexts(raw, snapshot, raw, snapshot, START, ZoneInfo("UTC")) == {}
     assert model.notification_contexts(None, snapshot, feed(), {}, START, ZoneInfo("UTC")) == {}
     assert model.notification_contexts(None, {}, feed(), snapshot, START, ZoneInfo("UTC")) == {}
+
+
+def description_export(text: str) -> tuple[bytes, bytes]:
+    """Return canonical and malformed exports differing only in DESCRIPTION newline encoding."""
+    canonical = feed(event(description=text, duration=timedelta(hours=1)))
+    unfolded = b"\r\n".join(str(line).encode() for line in Contentlines.from_ical(canonical) if line) + b"\r\n"
+    return canonical, unfolded.replace(b"\\n", b"\r\n")
+
+
+def test_description_continuations_are_recovered_without_losing_text_or_event_fields(caplog):
+    """Prose and HTML after a raw description newline are preserved, not discarded as bad properties."""
+    text = ('Opening line\nA continuation with commas, semicolons; and a literal \\ path.\n'
+            '<p>Link: https://example.test/private-sentinel?a=1</p>\nA caf\u00e9 note.')
+    canonical, raw = description_export(text)
+    assert any(component.errors for component in Calendar.from_ical(raw).walk())
+    expected = model.parse_feed(canonical, "Personal", "feed", ZoneInfo("UTC"))[1]
+    with caplog.at_level(logging.WARNING):
+        parsed, actual = model.parse_feed(raw, "Personal", "feed", ZoneInfo("UTC"))
+    assert actual == expected
+    assert next(iter(actual.values()))["event"]["body"] == text
+    assert not any(component.errors for component in parsed.walk())
+    assert "Recovered 3" in caplog.text
+    assert "private-sentinel" not in caplog.text and "Opening line" not in caplog.text
+    events = model.query_range(raw, "Personal", "feed", ZoneInfo("UTC"), START, START + timedelta(days=1), 10)
+    assert events[0].body == text
+
+
+@pytest.mark.parametrize("line", ["DTSTART invalid", "DTEND invalid", "RRULE FREQ=DAILY",
+                                  "EXDATE invalid", "UID missing-colon", "X-CUSTOM invalid", "END VEVENT"])
+def test_description_recovery_does_not_swallow_broken_calendar_properties(line):
+    """Malformed temporal, identity, structural, and extension fields remain fatal."""
+    raw = feed(event(description="Text")).replace(b"DESCRIPTION:Text", b"DESCRIPTION:Text\r\n" + line.encode())
+    with pytest.raises(model.CalendarValidationError) as caught:
+        model.parse_feed(raw, "Personal", "feed", ZoneInfo("UTC"))
+    assert caught.value.code == "malformed_content"
+
+
+@pytest.mark.parametrize("property_name", [b"SUMMARY", b"LOCATION", b"COMMENT"])
+def test_only_description_continuations_are_repaired(property_name):
+    """The narrow compatibility path is not a general ignore-parser-errors mode."""
+    raw = feed(event()).replace(b"SUMMARY:Planning", property_name + b":Text\r\nUnescaped private-sentinel text")
+    with pytest.raises(model.CalendarValidationError) as caught:
+        model.read_calendar(raw)
+    assert "private-sentinel" not in "".join(traceback.format_exception(caught.value))
+
+
+def test_parsed_but_invalid_dates_are_not_hidden_by_description_recovery():
+    """A recovered description cannot mask an independent property-value validation failure."""
+    _, raw = description_export("Start\nA continuation line")
+    raw = raw.replace(b"DTSTART:20260914T090000Z", b"DTSTART:invalid-private-sentinel")
+    with pytest.raises(model.CalendarValidationError) as caught:
+        model.parse_feed(raw, "Personal", "feed", ZoneInfo("UTC"))
+    assert caught.value.code == "malformed_content"
+    assert "private-sentinel" not in "".join(traceback.format_exception(caught.value))
+
+
+def test_description_repair_rejects_invalid_component_nesting():
+    """Compatibility normalization cannot repair malformed BEGIN/END structure."""
+    for raw in [b"BEGIN:VCALENDAR\r\nEND:VEVENT\r\n", b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"]:
+        with pytest.raises(model.CalendarValidationError):
+            model.repair_description_lines(raw)
+
+
+def test_description_parameters_and_valid_folded_text_survive_recovery():
+    """LANGUAGE parameters and properly folded long UTF-8 descriptions retain their meaning."""
+    text = "An introduction " + "long-word " * 15 + "\nA second descriptive line."
+    component = event(description=text)
+    component["DESCRIPTION"].params["LANGUAGE"] = "en-US"
+    canonical = feed(component)
+    raw = canonical.replace(b"\\n", b"\r\n")
+    parsed = model.read_calendar(raw).walk("VEVENT")[0]
+    assert str(parsed["DESCRIPTION"]) == text
+    assert parsed["DESCRIPTION"].params["LANGUAGE"] == "en-US"
+    assert model.read_calendar(canonical).walk("VEVENT")[0]["DESCRIPTION"] == parsed["DESCRIPTION"]
+
+
+@pytest.mark.asyncio
+async def test_repaired_refresh_clears_stale_state_without_replaying_unchanged_events(service, store):
+    """A provider encoding error recovers freshness while retaining original bytes and semantic identity."""
+    text = "Opening line\nA continuation with private-sentinel text."
+    canonical, raw = description_export(text)
+    service.backend["body"] = canonical
+    await service.refresh("Personal")
+    fid = service.settings.feed_id("Personal")
+    original = store.get(fid)
+    store.checked(fid, original["checked"], "ValueError")
+    assert service.status("Personal")["stale"]
+    service.backend["body"] = raw
+    await service.refresh("Personal")
+    current = store.get(fid)
+    assert service.status("Personal")["error"] == "" and not service.status("Personal")["stale"]
+    assert current["as_of"] >= original["as_of"] and current["raw"] == raw
+    assert json.loads(current["snapshot"]) == json.loads(original["snapshot"])
+    assert store.pending([fid]) == []
+    source_id = next(iter(json.loads(current["snapshot"])))
+    assert (await service.get(source_id)).body == text
+    result = await service.range(START, START + timedelta(days=1), None, 10)
+    assert (await service.get(result["events"][0]["id"])).body == text
+
+
+@pytest.mark.asyncio
+async def test_new_events_refresh_even_when_an_old_description_has_bad_newlines(service, store):
+    """An old malformed description no longer prevents seeing newly exported events."""
+    service.backend["body"] = feed(event("old", START - timedelta(days=365), description="Old text"))
+    await service.refresh("Personal")
+    service.settings = replace(service.settings, notify_since="2026-09-14")
+    service.backend["body"] = feed(event("old", START - timedelta(days=365), description="Old text\nA recovered line"),
+                                   event("new", START + timedelta(days=1))).replace(b"\\n", b"\r\n")
+    await service.refresh("Personal")
+    assert not service.status("Personal")["stale"]
+    pending = store.pending([service.settings.feed_id("Personal")])
+    changes = json.loads(pending[0][1]["text"])["changes"]
+    assert [change["event"]["uid"] for change in changes] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_validation_status_is_actionable_without_disclosing_source_data(service, store, caplog):
+    """Unrecoverable errors retain the cache and expose fixed diagnostic codes, not provider text."""
+    await service.refresh("Personal")
+    previous = store.get(service.settings.feed_id("Personal"))["raw"]
+    service.backend["body"] = feed(event()).replace(b"SUMMARY:Planning", b"SUMMARY:Planning\r\nprivate-sentinel text")
+    with caplog.at_level(logging.WARNING):
+        await service.refresh("Personal")
+    assert service.status("Personal")["error"] == "CalendarValidationError:malformed_content"
+    assert service.status("Personal")["stale"]
+    assert store.get(service.settings.feed_id("Personal"))["raw"] == previous
+    assert "private-sentinel" not in caplog.text
+
+
+def test_recurrence_validation_errors_do_not_expose_parser_messages(monkeypatch):
+    """Recurrence errors provide a stable category while suppressing private exception details."""
+    def invalid(*args, **kwargs):
+        """Simulate the recurrence library rejecting private source text."""
+        raise ValueError("private-sentinel")
+
+    monkeypatch.setattr(model.recurring_ical_events, "of", invalid)
+    with pytest.raises(model.CalendarValidationError) as caught:
+        model.parse_feed(feed(event()), "Personal", "feed", ZoneInfo("UTC"))
+    assert caught.value.code == "invalid_recurrence"
+    assert "private-sentinel" not in "".join(traceback.format_exception(caught.value))

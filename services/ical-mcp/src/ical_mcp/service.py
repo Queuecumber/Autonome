@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from ical_mcp.model import (Event, EventKey, Settings, calendar_zone, instant, notification_contexts,
+from ical_mcp.model import (CalendarValidationError, Event, EventKey, Settings, calendar_zone, instant, notification_contexts,
                             notification_date, notification_time, parse_feed, query_range)
 
 logger = logging.getLogger(__name__)
@@ -215,8 +215,10 @@ class Calendars:
                     self.store.replace(feed, name, bytes(raw), snapshot, response.headers.get("etag", ""),
                                        response.headers.get("last-modified", ""), when, self.settings, eligible)
             except Exception as error:
-                self.store.checked(feed, when, type(error).__name__)
-                logger.warning("Calendar refresh failed (%s); cached data retained", type(error).__name__)
+                diagnostic = (f"CalendarValidationError:{error.code}"
+                              if isinstance(error, CalendarValidationError) else type(error).__name__)
+                self.store.checked(feed, when, diagnostic)
+                logger.warning("Calendar refresh failed (%s); cached data retained", diagnostic)
 
     async def cached(self, name: str) -> dict:
         """Return cached bytes, refreshing when due; unavailable feeds raise RuntimeError."""

@@ -30,6 +30,30 @@ exceptions use [recurring-ical-events](https://recurring-ical-events.readthedocs
 Queries expand only bounded day-sized windows, never an entire infinite series.
 Result and feed-size limits are not a hard CPU budget for pathological rules.
 
+## Provider Text Compatibility
+
+Some exports put unescaped physical line breaks inside event descriptions. The
+parser can then mistake prose or HTML after `DESCRIPTION` for malformed calendar
+properties. Rejecting the entire feed for these lines would leave unrelated
+events stale.
+
+The adapter narrowly recovers malformed continuation lines immediately after a
+VEVENT `DESCRIPTION`, using the iCalendar library's text escaping and folding.
+Their text is preserved in event details, and the original downloaded bytes
+remain in the cache. Recoveries log a count, never description text or feed URLs.
+Proper properties are not merged into descriptions. Malformed lines outside a
+description, broken standard/extension properties, invalid dates, invalid
+recurrences, and ambiguous event identities still reject the refresh and retain
+the previous valid snapshot.
+
+Known validation failures expose safe categories in the existing `error` field:
+`CalendarValidationError:malformed_content`, `invalid_timezone`, `missing_start`,
+`mixed_date_types`, `invalid_interval`, `ambiguous_event_id`, or
+`invalid_recurrence` (each with the same `CalendarValidationError:` prefix).
+Underlying parser messages are suppressed because they can contain private
+source data. A successful refresh clears the error and updates freshness;
+neither a manual cache reset nor simply clearing the error flag is required.
+
 ## Updates And Reliability
 
 An iCal feed URL is fetched periodically by the adapter; it is not a provider

@@ -6,13 +6,115 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
+import logging
 import os
+import re
+from typing import Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from icalendar import Calendar
+from icalendar import Calendar, vText
+from icalendar.parser import Contentline, Contentlines
+from icalendar.prop import TypesFactory
 from pydantic import BaseModel, Field, field_validator
 import recurring_ical_events
+
+logger = logging.getLogger(__name__)
+
+
+class CalendarValidationError(ValueError):
+    """A calendar validation failure with a safe, source-free diagnostic code.
+
+    Args:
+        code: Fixed category suitable for status responses and logs. Event
+            contents, URLs, and the underlying parser message are never included.
+    """
+    def __init__(self, code: Literal["malformed_content", "invalid_timezone", "missing_start",
+                                    "mixed_date_types", "invalid_interval", "ambiguous_event_id",
+                                    "invalid_recurrence"]):
+        """Retain the diagnostic code while remaining compatible with ValueError callers."""
+        self.code = code
+        super().__init__(code)
+
+
+def repair_description_lines(raw: bytes) -> tuple[bytes, int]:
+    """Recover malformed continuation text immediately following a VEVENT DESCRIPTION.
+
+    Args:
+        raw: Original feed bytes, left unchanged.
+
+    Returns:
+        Parser-normalized bytes and the number of recovered lines. Proper
+        properties remain properties; text uses icalendar's TEXT escaping.
+
+    Raises:
+        CalendarValidationError: A malformed line is outside DESCRIPTION, looks
+            like a broken standard/extension property, or has unsafe structure.
+    """
+    lines = Contentlines()
+    stack = []
+    description = None
+    repaired = 0
+    reserved = set(TypesFactory.types_map) | {"BEGIN", "END"}
+    for line in Contentlines.from_ical(raw):
+        if not line:
+            continue
+        try:
+            name, params, value = line.parts()
+        except ValueError:
+            token = re.match(r"[A-Za-z0-9-]+", str(line))
+            prefix = token.group().upper() if token else ""
+            if (description is None or not stack or stack[-1] != "VEVENT"
+                    or prefix in reserved or prefix.startswith("X-")):
+                raise CalendarValidationError("malformed_content") from None
+            index, params, text = description
+            text += "\n" + str(vText.from_ical(str(line)))
+            lines[index] = Contentline.from_parts("DESCRIPTION", params, vText(text))
+            description = (index, params, text)
+            repaired += 1
+            continue
+        name = name.upper()
+        if name == "BEGIN":
+            stack.append(value.upper())
+        elif name == "END":
+            if not stack or stack.pop() != value.upper():
+                raise CalendarValidationError("malformed_content")
+        description = ((len(lines), params, str(vText.from_ical(value)))
+                       if name == "DESCRIPTION" and stack and stack[-1] == "VEVENT" else None)
+        lines.append(line)
+    if stack:
+        raise CalendarValidationError("malformed_content")
+    return lines.to_ical(), repaired
+
+
+def read_calendar(raw: bytes) -> Calendar:
+    """Parse a calendar, narrowly recovering malformed DESCRIPTION continuations.
+
+    Args:
+        raw: Original complete feed bytes; callers can retain them for auditing.
+
+    Returns:
+        Parsed calendar with recovered text, without dropping malformed properties.
+        Recovery logs contain counts only, never description text or feed URLs.
+
+    Raises:
+        CalendarValidationError: Unsafe or unrecoverable syntax; previous cached
+            data must remain in use until a valid refresh succeeds.
+    """
+    try:
+        cal = Calendar.from_ical(raw)
+        if any(component.errors for component in cal.walk()):
+            repaired, count = repair_description_lines(raw)
+            cal = Calendar.from_ical(repaired)
+            if count:
+                logger.warning("Recovered %d malformed DESCRIPTION continuation line(s)", count)
+        if cal.name != "VCALENDAR" or any(component.errors for component in cal.walk()):
+            raise CalendarValidationError("malformed_content")
+        return cal
+    except (ValueError, IndexError) as error:
+        if isinstance(error, CalendarValidationError):
+            raise
+        raise CalendarValidationError("malformed_content") from None
 
 
 def notification_date(value: str) -> datetime | None:
@@ -200,7 +302,7 @@ def notification_contexts(old_raw: bytes | None, previous: dict, raw: bytes, cur
                 if content is None:
                     continue
                 if content not in calendars:
-                    calendars[content] = Calendar.from_ical(content)
+                    calendars[content] = read_calendar(content)
                 cal = calendars[content]
                 related = [entry for entry in cal.walk("VEVENT") if str(entry.get("UID")) == event["uid"]]
                 key = EventKey.decode(identifier)
@@ -252,8 +354,8 @@ def calendar_zone(cal: Calendar, fallback: ZoneInfo) -> ZoneInfo:
     """Use a feed's declared timezone for floating/all-day values, or the configured fallback."""
     try:
         return ZoneInfo(str(cal.get("X-WR-TIMEZONE", fallback.key)))
-    except (KeyError, ValueError) as error:
-        raise ValueError("Invalid calendar timezone") from error
+    except (KeyError, ValueError):
+        raise CalendarValidationError("invalid_timezone") from None
 
 
 def recurrence_query(cal: Calendar, zone: ZoneInfo):
@@ -273,7 +375,10 @@ def recurrence_query(cal: Calendar, zone: ZoneInfo):
     prepared.subcomponents = [component for component in prepared.subcomponents
                               if component.name != "VEVENT" or component.get("DTSTART") is not None]
     prepared["X-WR-TIMEZONE"] = zone.key
-    return recurring_ical_events.of(prepared, keep_recurrence_attributes=True)
+    try:
+        return recurring_ical_events.of(prepared, keep_recurrence_attributes=True)
+    except ValueError:
+        raise CalendarValidationError("invalid_recurrence") from None
 
 
 def render(component, name: str, feed: str, zone: ZoneInfo, occurrence: bool = False) -> Event:
@@ -331,23 +436,21 @@ def parse_feed(raw: bytes, name: str, feed: str, zone: ZoneInfo) -> tuple[Calend
         ValueError: Malformed calendar, ambiguous components, missing required dates,
             or an invalid interval. No previous snapshot should be replaced on error.
     """
-    cal = Calendar.from_ical(raw)
-    if cal.name != "VCALENDAR" or any(component.errors for component in cal.walk()):
-        raise ValueError("Malformed iCalendar feed")
+    cal = read_calendar(raw)
     zone = calendar_zone(cal, zone)
     snapshot = {}
     for component in cal.walk("VEVENT"):
         item = render(component, name, feed, zone)
         if item.start is None and item.status != "CANCELLED":
-            raise ValueError("Event is missing DTSTART")
+            raise CalendarValidationError("missing_start")
         if item.start is not None and item.end is not None:
             if isinstance(item.start, datetime) != isinstance(item.end, datetime):
-                raise ValueError("DTSTART and DTEND must use the same date type")
+                raise CalendarValidationError("mixed_date_types")
             duration = instant(item.end, zone) - instant(item.start, zone)
             if duration < timedelta() or (item.all_day and duration == timedelta()):
-                raise ValueError("Event interval is invalid")
+                raise CalendarValidationError("invalid_interval")
         if item.id in snapshot:
-            raise ValueError("Duplicate UID and RECURRENCE-ID in one feed")
+            raise CalendarValidationError("ambiguous_event_id")
         stable = copy.deepcopy(component)
         for attribute in ["DTSTAMP", "LAST-MODIFIED", "SEQUENCE"]:
             stable.pop(attribute, None)
@@ -375,7 +478,7 @@ def query_range(raw: bytes, name: str, feed: str, zone: ZoneInfo,
         Start-ordered occurrences with distinct retrievable IDs. Recurrence logic
         and exception handling are delegated to recurring-ical-events.
     """
-    cal = Calendar.from_ical(raw)
+    cal = read_calendar(raw)
     zone = calendar_zone(cal, zone)
     query = recurrence_query(cal, zone)
     result, seen = [], set()
