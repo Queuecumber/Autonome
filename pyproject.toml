@@ -18,6 +18,10 @@ members = [
     "services/system-mcp",
     "services/matrix-adapter",
     "services/time-mcp",
+    "services/graphiti-mcp",
+    "services/imap-mcp",
+    "services/smtp-mcp",
+    "services/ical-mcp",
 ]
 
 [tool.uv.sources]
@@ -28,6 +32,10 @@ autonome-memory-mcp = { workspace = true }
 autonome-system-mcp = { workspace = true }
 autonome-matrix-adapter = { workspace = true }
 autonome-time-mcp = { workspace = true }
+autonome-graphiti-mcp = { workspace = true }
+autonome-imap-mcp = { workspace = true }
+autonome-smtp-mcp = { workspace = true }
+autonome-ical-mcp = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
@@ -41,6 +49,10 @@ dev-dependencies = [
     "autonome-system-mcp",
     "autonome-matrix-adapter",
     "autonome-time-mcp",
+    "autonome-graphiti-mcp",
+    "autonome-imap-mcp",
+    "autonome-smtp-mcp",
+    "autonome-ical-mcp",
 ]
 
 [tool.coverage.run]
