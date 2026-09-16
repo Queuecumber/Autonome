@@ -9,6 +9,8 @@ storage:
   sessions:     { size: 5Gi }
   binaries:     { size: 10Gi }
   workspace:    { size: 10Gi }
+  # Retained archive for upgrades from markdown memory; no service mounts it.
+  # New installs can set storage.memory=null to omit this legacy claim.
   memory:       { size: 1Gi }
   matrixCrypto: { size: 100Mi }
   time:         { size: 100Mi }
@@ -75,7 +77,6 @@ services:
   sessionManager: { image: { name: autonome-session-manager }, port: 5000 }
   matrixAdapter:  { image: { name: autonome-matrix-adapter },  port: 8200 }
   workspaceFsMcp: { image: { name: autonome-workspace-fs-mcp }, port: 8000 }
-  memoryMcp:      { image: { name: autonome-memory-mcp },      port: 8001 }
   systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
   timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }
   graphitiMcp:

@@ -119,7 +119,7 @@ spec:
           ports:
             - { name: redis, containerPort: {{ $graph.port }} }
           volumeMounts:
-            - { name: graph, mountPath: /data }
+            - { name: graph, mountPath: /var/lib/falkordb/data }
           readinessProbe:
             tcpSocket: { port: {{ $graph.port }} }
             initialDelaySeconds: 5

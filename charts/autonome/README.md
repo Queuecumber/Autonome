@@ -27,6 +27,48 @@ helm install <release> ./charts/autonome \
 
 Keys: `OPENAI_API_KEY` (required), `MATRIX_PASSWORD` (required), `SEARCH_API_KEY` and `EMBEDDING_API_KEY` (optional).
 
+## Memory Deployment
+
+Graph memory replaces the legacy markdown memory MCP in this chart. The chart no
+longer deploys the `memory-mcp` Deployment or Service, and release builds no longer
+publish that service's image. Old `services.memoryMcp` values left by
+`--reuse-values` are ignored; they do not restore the retired deployment.
+
+Replace any legacy local memory endpoint in your supplied `agent.config` with:
+
+```yaml
+mcp_servers:
+  graph: http://graphiti-mcp:8005/mcp
+```
+
+Keep your other MCP registrations. The chart does not rewrite operator-supplied
+agent configuration, including custom URLs or authentication headers. Restart
+session-manager after updating its mounted config so it reconnects to the graph
+service rather than retrying a removed memory endpoint.
+
+The existing `<release>-memory` PVC remains as an unmounted archive, with
+`helm.sh/resource-policy: keep`, so this upgrade does not delete markdown history.
+The legacy Python package remains available for manual archival access. No automatic
+markdown-to-graph import or source-data deletion is performed. On a fresh install,
+set `storage.memory: null` to avoid creating that archive claim. For an existing
+release, first apply this upgrade with the archive retained; only then omit it
+after verifying backups. Kept PVCs require deliberate manual cleanup later.
+
+## FalkorDB Storage
+
+The graph PVC is mounted at `/var/lib/falkordb/data`, matching the deployed
+FalkorDB image's persistence directory, rather than `/data`. The existing
+`<release>-graph` claim name is unchanged.
+
+Before upgrading a deployment that still mounts only `/data`, check the running
+server's actual directory with `redis-cli CONFIG GET dir`. If it has been writing
+outside the PVC, take a verified backup and migrate the persistence files onto
+the graph PVC **before replacing the pod**. A mount-path change alone does not
+copy data and can otherwise hide the old container's persistence files behind an
+empty mount. This chart does not run an automatic migration or change the Redis
+RDB/AOF policy. Deployments already corrected to `/var/lib/falkordb/data` need no
+path migration; keep their existing claim.
+
 ## Graph Exploration
 
 The graph MCP exposes structural exploration tools alongside semantic and keyword
@@ -131,11 +173,10 @@ ready so its MCP connection is refreshed.
 | session-manager | 5000 | agent-config (ConfigMap, ro), sessions, binaries |
 | matrix-adapter | 8200 | matrix-crypto |
 | workspace-fs-mcp | 8000 | workspace |
-| memory-mcp | 8001 | memory |
 | system-mcp | 8002 | — |
 | time-mcp | 8300 | time |
 | graphiti-mcp | 8005 | — |
-| falkordb | 6379 | graph |
+| falkordb | 6379 | graph at `/var/lib/falkordb/data` |
 
 All ClusterIP. Nothing exposed externally.
 

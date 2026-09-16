@@ -1,4 +1,4 @@
-"""Render the embedding chart contract with Helm."""
+"""Render graph-memory deployment and embedding contracts with Helm."""
 
 import json
 import os
@@ -179,3 +179,60 @@ def test_null_embedding_configuration_still_renders(render):
     """Explicitly disabling the optional configuration remains valid."""
     objects = resources(render({"services": {"graphitiMcp": {"embedding": None}}}))
     assert graph_container(objects)["name"] == "graphiti-mcp"
+
+
+@pytest.mark.parametrize("overrides", [{}, {"services": {"memoryMcp": {
+    "image": {"name": "autonome-memory-mcp"}, "port": 8001}}}])
+def test_graph_memory_replaces_legacy_memory_deployment(render, overrides):
+    """Old values retained by helm --reuse-values cannot resurrect the retired service."""
+    objects = resources(render(overrides))
+    deployments = {item["metadata"]["name"] for item in objects if item["kind"] == "Deployment"}
+    services = {item["metadata"]["name"] for item in objects if item["kind"] == "Service"}
+    assert "embedding-test-memory-mcp" not in deployments
+    assert "memory-mcp" not in services
+    assert {"embedding-test-graphiti-mcp", "embedding-test-falkordb"} <= deployments
+    assert {"graphiti-mcp", "falkordb"} <= services
+
+
+def test_legacy_memory_volume_is_retained_without_being_mounted(render):
+    """Retiring a service preserves its old markdown data instead of deleting the PVC."""
+    objects = resources(render({}))
+    claim = next(item for item in objects if item["kind"] == "PersistentVolumeClaim"
+                 and item["metadata"]["name"] == "embedding-test-memory")
+    assert claim["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+    assert claim["spec"]["resources"]["requests"]["storage"] == "1Gi"
+    for deployment in (item for item in objects if item["kind"] == "Deployment"):
+        volumes = deployment["spec"]["template"]["spec"].get("volumes", [])
+        assert all(volume.get("persistentVolumeClaim", {}).get("claimName") != "embedding-test-memory"
+                   for volume in volumes)
+
+
+def test_falkordb_volume_uses_the_actual_persistence_directory(render):
+    """The existing graph claim mounts where the selected FalkorDB image writes persistence files."""
+    objects = resources(render({}))
+    pod = next(item for item in objects if item["kind"] == "Deployment"
+               and item["metadata"]["name"] == "embedding-test-falkordb")["spec"]["template"]["spec"]
+    assert pod["containers"][0]["volumeMounts"] == [{"name": "graph", "mountPath": "/var/lib/falkordb/data"}]
+    assert pod["volumes"] == [{"name": "graph", "persistentVolumeClaim": {"claimName": "embedding-test-graph"}}]
+
+
+def test_fresh_install_can_omit_the_legacy_archive_claim(render):
+    """New deployments can opt out of provisioning an unused legacy memory volume."""
+    objects = resources(render({"storage": {"memory": None}}))
+    assert not any(item["kind"] == "PersistentVolumeClaim" and item["metadata"]["name"] == "embedding-test-memory"
+                   for item in objects)
+
+
+def test_example_registers_graph_instead_of_legacy_memory():
+    """The shipped agent example discovers the graph service rather than a retired endpoint."""
+    example = yaml.safe_load((CHART.parents[1] / "agent.yaml.example").read_text())
+    assert example["mcp_servers"]["graph"] == "http://graphiti-mcp:8005/mcp"
+    assert "http://memory-mcp:8001/mcp" not in example["mcp_servers"].values()
+
+
+def test_images_no_longer_build_the_legacy_memory_service():
+    """The release workflow builds graph memory, not the retired markdown MCP image."""
+    workflow = yaml.safe_load((CHART.parents[1] / ".github/workflows/build-images.yml").read_text())
+    services = workflow["jobs"]["build"]["strategy"]["matrix"]["service"]
+    assert "memory-mcp" not in services
+    assert "graphiti-mcp" in services
