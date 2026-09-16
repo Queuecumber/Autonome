@@ -174,7 +174,7 @@ class Monitor:
             event = None
             received = received_time(record.get(b"INTERNALDATE")) if record is not None else None
             if record is not None and (floor is None or (received is not None and received >= floor)):
-                message = parse_message(record[b"BODY[HEADER]"], key, summary=True)
+                message = parse_message(record[b"BODY[HEADER]"], key, summary=True, received_at=received)
                 summary = message.model_dump(mode="json", exclude_none=True)
                 summary["subject"] = summary["subject"][:500]
                 summary["from_"] = {name: value[:500] for name, value in summary["from_"].items()}

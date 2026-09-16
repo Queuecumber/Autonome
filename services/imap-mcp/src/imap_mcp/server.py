@@ -55,7 +55,12 @@ async def lifespan(app: FastMCP):
 
 
 mcp = FastMCP("imap", lifespan=lifespan, mask_error_details=True, instructions="""
-Read-only email access. New arrivals in watched folders produce passive mail_received
+Read-only email access. Searches default to all selectable folders, including Archive,
+and rank results by server receipt time, not UID. Explicitly set folder only to narrow
+the search. date_time is the sender's Date header; received_at is the server receipt
+time used for ordering. A limited result is not an exhaustive mailbox audit: narrow
+the query or use disjoint date ranges before concluding an older message is absent.
+New arrivals in watched folders produce passive mail_received
 events with message IDs; use get_mail when the body matters. You do not need a recurring
 inbox-check task. Initial startup does not replay old mail. Searches remain available
 for history and other folders. The configured notification cutoff also suppresses old
@@ -98,20 +103,24 @@ def get_mail(message_id: str) -> Message:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def search_mail(search: str, folder: str | None = "INBOX",
+def search_mail(search: str, folder: str | None = None,
                 limit: Annotated[int, Field(ge=1, le=100)] = 10) -> list[Message]:
     """Search read-only mail by IMAP criteria, such as UNSEEN or SUBJECT \"meeting\".
 
     Args:
         search: IMAP search expression, not KQL or a semantic query.
-        folder: Exact folder name, or null for all selectable folders.
-        limit: Total cap, from 1 to 100; newest UIDs first within each folder.
+        folder: Exact folder name, or null (default) for all selectable folders.
+        limit: Total cap, from 1 to 100, newest server receipt dates first across folders.
 
     Returns:
-        Header-only summaries. Missing bodies/attachment flags mean not fetched.
+        Header-only summaries including folder and received_at (server INTERNALDATE).
+        date_time remains the sender's Date header. Unknown receipt dates sort last;
+        copies in different folders remain separate. Results are capped, not an
+        exhaustive audit. Missing bodies/attachment flags mean not fetched.
 
     Raises:
         ValueError: Invalid criteria or limit.
+        RuntimeError: Mailbox identity changed during the search; retry.
     """
     return account().search(search, folder, limit)
 

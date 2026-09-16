@@ -180,7 +180,10 @@ def test_missing_headers_html_and_attached_message(key):
 
 def test_mail_tools_are_readonly_and_keep_folder_case(mailbox, client, key):
     """Read and search use UID fetches, BODY.PEEK, and read-only selection."""
-    assert mailbox.get(key.encode()).subject == "Status update"
+    details = mailbox.get(key.encode())
+    assert details.subject == "Status update"
+    assert details.folder == key.folder
+    assert details.received_at == datetime(2026, 9, 14, 13, tzinfo=timezone.utc)
     data, metadata = mailbox.attachment(key.encode(), "0")
     assert data == b"\x00\xffbinary" and metadata.name == "report.bin"
     with pytest.raises(KeyError):
@@ -192,7 +195,7 @@ def test_mail_tools_are_readonly_and_keep_folder_case(mailbox, client, key):
     for call in client.select_folder.call_args_list:
         assert call.args == (key.folder,) and call.kwargs == {"readonly": True}
     assert all("RFC822" not in call.args[1] for call in client.fetch.call_args_list)
-    assert all(field == "RFC822.SIZE" or field.startswith("BODY.PEEK")
+    assert all(field in {"RFC822.SIZE", "INTERNALDATE"} or field.startswith("BODY.PEEK")
                for call in client.fetch.call_args_list for field in call.args[1])
 
 
@@ -220,6 +223,144 @@ def test_search_is_bounded_newest_first_and_handles_empty_results(mailbox, clien
     client.fetch.reset_mock()
     assert mailbox.search("ALL") == []
     client.fetch.assert_not_called()
+
+
+def _search_folders(client, mime, folders):
+    """Configure read-only folder records keyed by UID with independently controlled receipt dates."""
+    current = {}
+    client.list_folders.return_value = [((), b"/", name) for name in folders]
+
+    def select(name, readonly=False):
+        """Select only a known fake folder and preserve the readonly contract."""
+        assert readonly is True
+        current["folder"] = name
+        return {b"UIDVALIDITY": 21, b"UIDNEXT": max(folders[name], default=0) + 1}
+
+    def fetch(uids, fields):
+        """Return only requested metadata or headers, never full bodies during search."""
+        assert set(fields) <= {"INTERNALDATE", "BODY.PEEK[HEADER]"}
+        return {uid: {b"INTERNALDATE": folders[current["folder"]][uid],
+                      b"BODY[HEADER]": mime.split(b"\n\n", 1)[0]}
+                for uid in uids if uid in folders[current["folder"]]}
+
+    client.select_folder.side_effect = select
+    client.search.side_effect = lambda criteria: list(folders[current["folder"]])
+    client.fetch.side_effect = fetch
+    return current
+
+
+def test_search_defaults_to_all_selectable_folders(mailbox, client, mime):
+    """An omitted folder must not hide archived mail from an agent's search."""
+    _search_folders(client, mime, {
+        "INBOX": {}, "Archive": {434: datetime(2026, 8, 28, tzinfo=timezone.utc)}})
+    result = mailbox.search('SUBJECT "Weekly Update"')
+    assert len(result) == 1
+    assert model.MessageKey.decode(result[0].id).folder == "Archive"
+
+
+def test_search_orders_by_receipt_date_before_applying_limit(mailbox, client, mime):
+    """Imported high UIDs from old years must not push recent low UIDs below the result cap."""
+    _search_folders(client, mime, {"Archive": {
+        434: datetime(2026, 8, 28, tzinfo=timezone.utc),
+        100001: datetime(2025, 8, 28, tzinfo=timezone.utc),
+        100002: datetime(2024, 8, 28, tzinfo=timezone.utc),
+    }})
+    result = mailbox.search('SUBJECT "Weekly Update"', "Archive", limit=1)
+    assert [model.MessageKey.decode(item.id).uid for item in result] == [434]
+
+
+def test_all_folder_search_chooses_globally_newest_matches(mailbox, client, mime):
+    """Folder enumeration order cannot consume the limit before a later folder is searched."""
+    _search_folders(client, mime, {
+        "First": {999999: datetime(2024, 1, 1, tzinfo=timezone.utc)},
+        "Archive": {434: datetime(2026, 8, 28, tzinfo=timezone.utc)},
+        "INBOX": {3: datetime(2026, 9, 16, tzinfo=timezone.utc)},
+    })
+    result = mailbox.search("ALL", None, limit=2)
+    assert [(model.MessageKey.decode(item.id).folder, model.MessageKey.decode(item.id).uid)
+            for item in result] == [("INBOX", 3), ("Archive", 434)]
+
+
+def test_explicit_folder_search_does_not_expand_scope(mailbox, client, mime):
+    """Callers can still restrict a search to INBOX rather than the new all-folder default."""
+    _search_folders(client, mime, {
+        "Archive": {434: datetime(2026, 9, 16, tzinfo=timezone.utc)},
+        "INBOX": {3: datetime(2026, 8, 1, tzinfo=timezone.utc)},
+    })
+    result = mailbox.search("ALL", "INBOX")
+    assert [(item.folder, model.MessageKey.decode(item.id).uid) for item in result] == [("INBOX", 3)]
+    client.list_folders.assert_not_called()
+
+
+def test_search_normalizes_receipt_timezones_and_sorts_unknown_dates_last(mailbox, client, mime):
+    """Receipt instants determine order; sender dates, naive values, and large UIDs cannot override it."""
+    _search_folders(client, mime, {"Archive": {
+        1: datetime(2026, 9, 16, 1, tzinfo=timezone(timedelta(hours=2))),
+        2: datetime(2026, 9, 15, 23, 30, tzinfo=timezone.utc),
+        1000001: None,
+        1000002: "not-a-date",
+        1000003: datetime(2026, 9, 17),
+    }})
+    result = mailbox.search("ALL", limit=5)
+    assert [model.MessageKey.decode(item.id).uid for item in result] == [2, 1, 1000003, 1000002, 1000001]
+    assert result[0].received_at == datetime(2026, 9, 15, 23, 30, tzinfo=timezone.utc)
+    assert result[1].received_at == datetime(2026, 9, 15, 23, tzinfo=timezone.utc)
+    assert all(item.received_at is None for item in result[2:])
+    assert result[0].date_time == datetime(2026, 9, 14, 9, tzinfo=timezone(timedelta(hours=-4)))
+
+
+def test_search_dates_are_batched_and_only_winning_headers_are_fetched(mailbox, client, mime):
+    """Global newest selection considers every match but bounds each request and retained headers."""
+    count = model.DATE_FETCH_BATCH_SIZE * 2 + 3
+    records = {uid: datetime(2025, 1, 1, tzinfo=timezone.utc) for uid in range(1, count + 1)}
+    records[7] = datetime(2026, 9, 16, tzinfo=timezone.utc)
+    _search_folders(client, mime, {"Archive": records})
+    result = mailbox.search("ALL", limit=3)
+    assert model.MessageKey.decode(result[0].id).uid == 7
+    date_calls = [call for call in client.fetch.call_args_list if call.args[1] == ["INTERNALDATE"]]
+    header_calls = [call for call in client.fetch.call_args_list if call.args[1] == ["BODY.PEEK[HEADER]"]]
+    assert [len(call.args[0]) for call in date_calls] == [model.DATE_FETCH_BATCH_SIZE, model.DATE_FETCH_BATCH_SIZE, 3]
+    assert sum(len(call.args[0]) for call in header_calls) == 3
+    assert all(item.body is None and item.attachment_metadata is None for item in result)
+
+
+def test_search_skips_messages_expunged_during_metadata_or_header_reads(mailbox, client, mime):
+    """Concurrent removals cannot fabricate messages or prevent the remaining results from returning."""
+    _search_folders(client, mime, {"Archive": {
+        1: datetime(2026, 9, 14, tzinfo=timezone.utc),
+        2: datetime(2026, 9, 15, tzinfo=timezone.utc),
+        3: datetime(2026, 9, 16, tzinfo=timezone.utc),
+    }})
+    fetch = client.fetch.side_effect
+
+    def disappearing(uids, fields):
+        """Remove one UID before dates are read, and another before headers are read."""
+        values = fetch(uids, fields)
+        values.pop(2 if fields == ["INTERNALDATE"] else 3, None)
+        return values
+
+    client.fetch.side_effect = disappearing
+    result = mailbox.search("ALL", limit=3)
+    assert [model.MessageKey.decode(item.id).uid for item in result] == [1]
+
+
+def test_search_rejects_uidvalidity_change_before_fetching_headers(mailbox, client, mime):
+    """Re-selecting a reset folder must not bind an old UID to an unrelated new message."""
+    _search_folders(client, mime, {"Archive": {1: datetime(2026, 9, 16, tzinfo=timezone.utc)}})
+    select = client.select_folder.side_effect
+    calls = []
+
+    def reset(name, readonly=False):
+        """Change epochs on the second selection, after metadata ranking has completed."""
+        calls.append(name)
+        selected = select(name, readonly)
+        selected[b"UIDVALIDITY"] += len(calls) - 1
+        return selected
+
+    client.select_folder.side_effect = reset
+    with pytest.raises(RuntimeError, match="Mailbox changed"):
+        mailbox.search("ALL")
+    assert all(call.args[1] == ["INTERNALDATE"] for call in client.fetch.call_args_list)
 
 
 def test_detail_rejects_foreign_stale_missing_and_oversized_ids(mailbox, client, key):
@@ -411,6 +552,11 @@ async def test_mcp_lifespan_tools_resources_and_worker_shutdown(mailbox, key, mo
         tools = {tool.name: tool for tool in await client.list_tools()}
         assert {"get_mail", "search_mail", "get_attachment", "list_folders"} == set(tools)
         assert all(tool.annotations.readOnlyHint for tool in tools.values())
+        assert tools["search_mail"].inputSchema["properties"]["folder"]["default"] is None
+        search = await client.call_tool("search_mail", {"search": "ALL", "limit": 1})
+        summary = search.structured_content["result"][0]
+        assert summary["folder"] == key.folder
+        assert summary["received_at"] == "2026-09-14T13:00:00Z"
         details = await client.call_tool("get_mail", {"message_id": key.encode()})
         assert not details.is_error
         binary = await client.call_tool("get_attachment", {"message_id": key.encode(), "attachment_id": "0"})

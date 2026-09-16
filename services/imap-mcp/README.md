@@ -7,10 +7,12 @@ agent-side inbox checks. SMTP is a separate, explicitly invoked service.
 ## Tools
 
 - `list_folders()` returns selectable, case-sensitive folder names.
-- `search_mail(search, folder="INBOX", limit=10)` accepts IMAP criteria, not KQL.
-  Set `folder=null` to search all folders. Results contain headers, not bodies or
-  attachment claims. The total limit is 1..100, newest UIDs first per folder;
-  searching multiple folders is not a globally date-sorted query.
+- `search_mail(search, folder=null, limit=10)` accepts IMAP criteria, not KQL.
+  Omit `folder` or set it to null to search all selectable folders, including
+  Archive, Spam, and Trash when exposed by the server. An explicit folder such
+  as `INBOX` narrows the search. Results contain headers, not bodies or attachment
+  claims. The total limit is 1..100, applied after sorting by server receipt time
+  (`INTERNALDATE`) across all selected folders, not by UID or folder order.
 - `get_mail(message_id)` returns the body, recipients, and attachment metadata.
 - `get_attachment(message_id, attachment_id)` returns an embedded binary resource.
   The same bytes are available at `imap://attachments/{message_id}/{attachment_id}`.
@@ -20,6 +22,24 @@ moves/deletes mail, or marks it as read. IDs encode the account, exact folder,
 UIDVALIDITY, and UID; they are opaque to callers. Old `folder:uid` IDs from aibs
 must be reacquired through search. A changed account or UIDVALIDITY causes a
 stale-ID error instead of reading an unrelated message with a reused UID.
+
+Search summaries and full details include `folder` and `received_at`. The existing
+`date_time` field is still the sender's Date header, not the sorting timestamp.
+Missing/invalid receipt dates sort last; folder and UID only break ties.
+Copies exposed in multiple folders remain separate mailbox entries, so `All Mail`
+and label folders can yield duplicates of the same underlying email.
+
+The implementation works without IMAP SORT support, including Proton Bridge:
+it fetches INTERNALDATE metadata for all matching UIDs in batches of at most 200,
+retains only the best `limit` candidates, then fetches their headers. Broad queries
+can therefore take longer than specific subjects/date ranges, but old high UIDs
+cannot push newer low-UID messages below the result cap. It never fetches message
+bodies or attachments merely to sort search results. A folder epoch change during
+the search raises a retryable error; concurrent removals can shorten the result.
+
+A capped list is not a full mailbox audit. Use narrower criteria or disjoint date
+ranges when looking beyond the returned results; there is no pagination cursor in
+this API. Search remains independent of notification cutoffs and watch folders.
 
 ## Push Events
 
