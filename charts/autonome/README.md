@@ -117,6 +117,43 @@ deploying the graphiti-mcp image. Stored Graphiti property names, UUIDs, vectors
 stories, and date-correction history are unchanged. No FalkorDB migration,
 re-embedding, deletion, or restart is required.
 
+## Graph Model And Resources
+
+The graph MCP separates persistence, the public data model, and the MCP view:
+
+- `store.py` handles Graphiti/FalkorDB persistence; `traversal.py` handles bounded
+  graph algorithms and `embed.py` handles the embedding endpoint.
+- `model.py` owns backend coercion and memory data flow. Its operations return
+  Pydantic objects such as `MemorySaved`, `RelationshipRecord`, `EntityResult`,
+  `Story`, typed inventory pages, paths, and explanations. Nested corrections and
+  source previews are models too, and timestamps are native Python `datetime`s.
+- `server.py` contains prompting, tool registration, and resource handlers. Tools
+  expose model operations directly, so FastMCP derives output schemas and handles
+  JSON serialization. Resource handlers put typed objects into `ResourceContent`,
+  without converting them to dictionaries or writing custom JSON serialization.
+
+The existing tool names and identifier fields remain available. JSON responses
+also expose `uri` links for entities, relationships, and stories, and `story_uri`
+on saved batches and relationships with provenance:
+
+| Resource | Content |
+|---|---|
+| `graph:///entities/{entity_id}` | Entity details and its relationships, including history. |
+| `graph:///relationships/{relationship_id}` | One relationship, with dates and correction history. |
+| `graph:///stories/{story_id}` | Full narrative, attribution, and recording/source dates. |
+
+All resources use `application/json` and enforce the configured memory group.
+Unknown resource IDs raise errors rather than returning invented records.
+Name-based tool lookups retain `found=false` for absent entities; resource reads
+are by stable UUID. Story reuse is also restricted to the configured group.
+
+Output schemas now explicitly describe optional fields and empty collections,
+including empty `valid_at_corrections` lists. Dates remain ISO-8601 on the wire;
+the standard serializer uses `Z` for UTC. Consumers should parse timestamps
+rather than rely on the former `+00:00` spelling. No stored-data migration is
+required. After updating the graph MCP image, reconnect session-manager so it
+discovers the output schemas and the `graph` resource scheme.
+
 ## Graph Exploration
 
 The graph MCP exposes structural exploration tools alongside semantic and keyword
