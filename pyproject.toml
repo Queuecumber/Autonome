@@ -18,6 +18,7 @@ members = [
     "services/system-mcp",
     "services/matrix-adapter",
     "services/time-mcp",
+    "services/graphiti-mcp",
 ]
 
 [tool.uv.sources]
@@ -28,6 +29,7 @@ autonome-memory-mcp = { workspace = true }
 autonome-system-mcp = { workspace = true }
 autonome-matrix-adapter = { workspace = true }
 autonome-time-mcp = { workspace = true }
+autonome-graphiti-mcp = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
@@ -41,6 +43,7 @@ dev-dependencies = [
     "autonome-system-mcp",
     "autonome-matrix-adapter",
     "autonome-time-mcp",
+    "autonome-graphiti-mcp",
 ]
 
 [tool.coverage.run]

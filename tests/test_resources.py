@@ -63,6 +63,27 @@ async def test_register_schemes_picks_scheme_from_template(orchestrator):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["entities", "relationships", "stories"])
+async def test_memory_scheme_dispatches_to_graph_connection(orchestrator, kind):
+    """Memory resource URIs resolve through the existing graph MCP registration."""
+    content = MagicMock(spec=["text"])
+    content.text = '{"name":"saved memory"}'
+    conn = _mock_conn("graph", [
+        "memory:///entities/{entity_id}",
+        "memory:///relationships/{relationship_id}",
+        "memory:///stories/{story_id}",
+    ])
+    conn.read_resource = AsyncMock(return_value=[content])
+    await orchestrator._register_schemes(conn)
+
+    uri = f"memory:///{kind}/test-id"
+    assert await orchestrator.resolve_uri(uri) == content.text.encode()
+    conn.read_resource.assert_awaited_once_with(uri)
+    assert orchestrator._scheme_to_mcp["memory"] is conn
+    assert "graph" not in orchestrator._scheme_to_mcp
+
+
+@pytest.mark.asyncio
 async def test_register_schemes_collision_raises(orchestrator):
     """Two MCP servers claiming the same scheme is a config error."""
     a = _mock_conn("a", ["pointer://{name}"])

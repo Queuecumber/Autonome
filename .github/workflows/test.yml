@@ -11,6 +11,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GRAPH_HOST: localhost
+      GRAPH_PORT: "6379"
+      REQUIRE_GRAPH_TESTS: "1"
+      REQUIRE_HELM_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -19,10 +34,15 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.20.2
+
       - name: Run tests with coverage
         run: |
           set -o pipefail
-          uv run pytest --cov --cov-report=term-missing --cov-report=xml
+          uv run --locked pytest --cov --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage to Codecov
         if: always()
