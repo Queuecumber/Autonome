@@ -70,13 +70,13 @@ class RelationshipRecord(BaseModel):
     @property
     def uri(self) -> str:
         """Return the MCP resource URI for this relationship."""
-        return f"graph:///relationships/{self.relationship_id}"
+        return f"memory:///relationships/{self.relationship_id}"
 
     @computed_field
     @property
     def story_uri(self) -> str | None:
         """Return the full story's resource URI, or None without linked provenance."""
-        return f"graph:///stories/{self.story_id}" if self.story_id is not None else None
+        return f"memory:///stories/{self.story_id}" if self.story_id is not None else None
 
 
 class PathStep(RelationshipRecord):
@@ -122,7 +122,7 @@ class Entity(BaseModel):
     @property
     def uri(self) -> str:
         """Return the MCP resource URI for this entity."""
-        return f"graph:///entities/{self.entity_id}"
+        return f"memory:///entities/{self.entity_id}"
 
     @classmethod
     def from_node(cls, node: EntityNode) -> Self:
@@ -167,7 +167,7 @@ class EntityResult(BaseModel):
     @property
     def uri(self) -> str | None:
         """Return the entity resource URI, or None for a missing entity."""
-        return f"graph:///entities/{self.entity_id}" if self.entity_id is not None else None
+        return f"memory:///entities/{self.entity_id}" if self.entity_id is not None else None
 
 
 class Story(BaseModel):
@@ -186,7 +186,7 @@ class Story(BaseModel):
     @property
     def uri(self) -> str:
         """Return the MCP resource URI for the full story."""
-        return f"graph:///stories/{self.story_id}"
+        return f"memory:///stories/{self.story_id}"
 
     @classmethod
     def from_episode(cls, episode: EpisodicNode, story_chars: int | None = None,
@@ -220,7 +220,7 @@ class MemorySaved(BaseModel):
     @property
     def story_uri(self) -> str | None:
         """Return the saved story's resource URI, or None for an unlinked batch."""
-        return f"graph:///stories/{self.story_id}" if self.story_id is not None else None
+        return f"memory:///stories/{self.story_id}" if self.story_id is not None else None
 
 
 class EntityPage(BaseModel):

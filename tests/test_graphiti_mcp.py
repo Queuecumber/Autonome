@@ -1590,7 +1590,7 @@ async def test_model_returns_typed_records_all_the_way_through(graph):
     entity = await graph.get_entity("A")
     assert isinstance(entity, graph.EntityResult)
     assert isinstance(entity.relationships[0], graph.RelationshipRecord)
-    assert entity.uri == f"graph:///entities/{relationship.subject_id}"
+    assert entity.uri == f"memory:///entities/{relationship.subject_id}"
     assert (await graph.get_entity("missing")).uri is None
     assert isinstance(await graph.list_vocabulary(), graph.Vocabulary)
     preview = (await graph.search("A"))[0]
@@ -1620,12 +1620,12 @@ async def test_typed_graph_resources_round_trip_through_mcp(graph):
     relationship = saved.relationships[0]
     async with Client(server.mcp) as client:
         templates = {template.uriTemplate for template in await client.list_resource_templates()}
-        assert templates == {"graph:///entities/{entity_id}",
-                             "graph:///relationships/{relationship_id}", "graph:///stories/{story_id}"}
+        assert templates == {"memory:///entities/{entity_id}",
+                             "memory:///relationships/{relationship_id}", "memory:///stories/{story_id}"}
         for uri, expected, result_type in [
             (relationship.uri, relationship, graph.RelationshipRecord),
             (saved.story_uri, await graph.get_story(saved.story_id), graph.Story),
-            (f"graph:///entities/{relationship.subject_id}", await graph.get_entity("A"), graph.EntityResult),
+            (f"memory:///entities/{relationship.subject_id}", await graph.get_entity("A"), graph.EntityResult),
         ]:
             contents = await client.read_resource(uri)
             assert len(contents) == 1 and contents[0].mimeType == "application/json"
@@ -1661,7 +1661,7 @@ async def test_resource_reads_and_story_reuse_enforce_memory_group(graph, monkey
         )], story_id=saved.story_id)
     assert (await graph.list_entities()).entities == []
     async with Client(server.mcp) as client:
-        for uri in [relationship.uri, saved.story_uri, f"graph:///entities/{relationship.subject_id}"]:
+        for uri in [relationship.uri, saved.story_uri, f"memory:///entities/{relationship.subject_id}"]:
             with pytest.raises(McpError, match="group"):
                 await client.read_resource(uri)
 

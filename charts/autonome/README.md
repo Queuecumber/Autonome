@@ -138,9 +138,9 @@ on saved batches and relationships with provenance:
 
 | Resource | Content |
 |---|---|
-| `graph:///entities/{entity_id}` | Entity details and its relationships, including history. |
-| `graph:///relationships/{relationship_id}` | One relationship, with dates and correction history. |
-| `graph:///stories/{story_id}` | Full narrative, attribution, and recording/source dates. |
+| `memory:///entities/{entity_id}` | Entity details and its relationships, including history. |
+| `memory:///relationships/{relationship_id}` | One relationship, with dates and correction history. |
+| `memory:///stories/{story_id}` | Full narrative, attribution, and recording/source dates. |
 
 All resources use `application/json` and enforce the configured memory group.
 Unknown resource IDs raise errors rather than returning invented records.
@@ -152,7 +152,7 @@ including empty `valid_at_corrections` lists. Dates remain ISO-8601 on the wire;
 the standard serializer uses `Z` for UTC. Consumers should parse timestamps
 rather than rely on the former `+00:00` spelling. No stored-data migration is
 required. After updating the graph MCP image, reconnect session-manager so it
-discovers the output schemas and the `graph` resource scheme.
+discovers the output schemas and the `memory` resource scheme.
 
 ## Graph Exploration
 

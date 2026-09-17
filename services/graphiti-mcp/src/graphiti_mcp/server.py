@@ -109,7 +109,7 @@ mcp.tool(model.get_story, annotations={"readOnlyHint": True})
 mcp.tool(model.get_entity, annotations={"readOnlyHint": True})
 mcp.tool(model.list_vocabulary, annotations={"readOnlyHint": True})
 
-@mcp.resource("graph:///entities/{entity_id}", mime_type="application/json")
+@mcp.resource("memory:///entities/{entity_id}", mime_type="application/json")
 async def entity_resource(entity_id: str) -> ResourceResult:
     """Read a stored entity and its relationships as a JSON resource.
 
@@ -127,7 +127,7 @@ async def entity_resource(entity_id: str) -> ResourceResult:
     return ResourceResult([ResourceContent(await model.read_entity(entity_id), mime_type="application/json")])
 
 
-@mcp.resource("graph:///relationships/{relationship_id}", mime_type="application/json")
+@mcp.resource("memory:///relationships/{relationship_id}", mime_type="application/json")
 async def relationship_resource(relationship_id: str) -> ResourceResult:
     """Read a stored relationship, including its dates and audit history.
 
@@ -145,7 +145,7 @@ async def relationship_resource(relationship_id: str) -> ResourceResult:
     return ResourceResult([ResourceContent(await model.read_relationship(relationship_id), mime_type="application/json")])
 
 
-@mcp.resource("graph:///stories/{story_id}", mime_type="application/json")
+@mcp.resource("memory:///stories/{story_id}", mime_type="application/json")
 async def story_resource(story_id: str) -> ResourceResult:
     """Read the full saved narrative and source attribution.
 
