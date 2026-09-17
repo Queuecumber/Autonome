@@ -69,6 +69,54 @@ empty mount. This chart does not run an automatic migration or change the Redis
 RDB/AOF policy. Deployments already corrected to `/var/lib/falkordb/data` need no
 path migration; keep their existing claim.
 
+## Graph Memory Terminology
+
+Stories are the memories; entities and directed relationships help locate them.
+Descriptions may record observations, feelings, interpretations, or uncertainty.
+An evidence label describes how something was recorded, not whether it is
+objectively verified. `story` is the narrative; `source` is its attribution.
+
+`save_memory(relationships, story, source)` records them together. Each
+relationship supplies `subject`, `relation`, `object`, and `description`, with
+optional entity types, dates, and reasoning. Reuse `story_id` to attach more
+relationships to an existing story instead of duplicating its narrative.
+
+| Previous API | Current API |
+|---|---|
+| `save_facts(facts=...)` | `save_memory(relationships=...)` |
+| `search_facts(query)` | `search(query, kind="relationships")` |
+| `list_facts(...)` | `list_relationships(...)` |
+| `get_neighborhood(...)` | `explore(...)` |
+| `explain_fact(fact_id)` | `explain_relationship(relationship_id)` |
+| `supersede_fact(fact_id)` | `supersede(relationship_id)` |
+| `set_fact_valid_at(fact_id, ...)` | `set_valid_at(relationship_id, ...)` |
+
+Public fields use `relationship_id`, `description`, `relationships`, `story_id`,
+`relationship_count`, `entities`, `explored_relationships`, and `missing_story_ids`
+instead of `fact_id`, `fact`, `facts`, `episode_id`, `fact_count`, `nodes`,
+`explored_facts`, and `missing_episode_ids`. `get_story` takes `story_id`;
+entity IDs identify entities, never relationships. The relationship input model
+is named `Relationship`. The predicate field remains `relation`.
+
+`search(query)` now finds entities by name or meaning, returning up to five
+relationship previews per entity by default. `relationship_limit` can be set
+from 1 to 20; `relationships_truncated` identifies incomplete previews. Search
+relationship descriptions explicitly with `kind="relationships"`. Both modes
+combine optional embeddings with keyword retrieval. `include_superseded` controls
+relationship history, not whether an entity exists.
+
+`list_entities(limit, cursor)` lists actual entities, including isolated ones;
+`list_relationships(limit, cursor)` inventories relationships, including history.
+Both are bounded to 100 results per page and return `next_cursor`. They order by
+ID rather than date and are not snapshots of concurrent changes. `get_entity`
+returns an entity's `entity_id` and all its relationships, including history.
+
+These are intentional MCP API renames; the old tool names are not advertised.
+Refresh session-manager's tool discovery and update any scripted callers after
+deploying the graphiti-mcp image. Stored Graphiti property names, UUIDs, vectors,
+stories, and date-correction history are unchanged. No FalkorDB migration,
+re-embedding, deletion, or restart is required.
+
 ## Graph Exploration
 
 The graph MCP exposes structural exploration tools alongside semantic and keyword
@@ -77,29 +125,33 @@ language model.
 
 | Tool | Purpose |
 |---|---|
-| `get_neighborhood(name, max_hops=2, limit=50, direction="both")` | Explore nearby facts and entities, including hop distances. Direction can be `both`, `outgoing`, or `incoming`. |
-| `find_path(source, target, max_hops=4, limit=100, directed=false)` | Return one shortest path in the bounded exploration, with ordered facts and explicit traversal direction. |
-| `explain_fact(fact_id, source_limit=5, story_chars=2000)` | Inspect the stored evidence label, rationale, provenance, date corrections, and supersession reason. |
+| `explore(name, max_hops=2, limit=50, direction="both")` | Explore nearby relationships and entities, including hop distances. Direction can be `both`, `outgoing`, or `incoming`. |
+| `find_path(source, target, max_hops=4, limit=100, directed=false)` | Return one shortest path in the bounded exploration, with ordered relationships and explicit traversal direction. |
+| `explain_relationship(relationship_id, source_limit=5, story_chars=2000)` | Inspect saved reasoning, provenance, date corrections, and the supersession reason for one relationship. |
+| `explain_entity(name, limit=5, source_limit=3, story_chars=1000)` | Explain an entity's nearby relationships, with bounded source previews. |
 
-Neighborhood and path requests allow at most six hops and 100 explored facts.
+Exploration and path requests allow at most six hops and 100 explored relationships.
 They have a ten-second overall deadline; each frontier query has a two-second
-database execution limit. An extra fact may be read to detect truncation. A
+database execution limit. An extra relationship may be read to detect truncation. A
 `truncated: true` result is incomplete; `found: false` means only that the bounded
 search found no route. Graph reads are not snapshots of concurrent writes.
 
-Superseded facts are excluded before every traversal step unless
+Superseded relationships are excluded before every traversal step unless
 `include_superseded=true`. They cannot act as hidden bridges in a current
-exploration. A historical path may combine facts whose validity dates do not
-overlap. Reverse traversal preserves each fact's original subject/object and
+exploration. A historical path may combine relationships whose validity dates do not
+overlap. Reverse traversal preserves each relationship's original subject/object and
 sets `traversed_forward=false`; a connection is not a new transitive or causal
 claim.
 
-Facts may include `evidence_kind` (`reported`, `inferred`, `uncertain`, or
-`unspecified`) and `rationale`. The label records how a claim was established,
-not a probability or independent truth verification. Legacy facts remain
+Relationships may include `evidence_kind` (`reported`, `inferred`, `uncertain`, or
+`unspecified`) and `rationale`. The label records how a memory was formed,
+not a probability or independent truth verification. Legacy relationships remain
 `unspecified`. Explanations report unavailable source links and truncation
 explicitly; use `get_story` to read a full narrative when needed. Source previews
-are limited to ten records and 5000 narrative characters per record.
+are limited to ten records per relationship and 5000 narrative characters per
+record. Entity explanations cover at most 20 relationships, with a ten-second
+overall deadline and explicit truncation. Use `explain_relationship` to inspect
+a specific relationship outside the preview.
 
 Deploy the updated graphiti-mcp image and restart session-manager after the
 service is ready to discover these tools. No graph migration is required.
