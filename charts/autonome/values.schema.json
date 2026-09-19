@@ -24,6 +24,8 @@
         "imapMcp": {
           "type": "object",
           "properties": {
+            "idProvider": { "enum": ["auto", "generic", "proton"] },
+            "lookupMaxMessages": { "type": "integer", "minimum": 1, "maximum": 5000 },
             "notifySince": { "$ref": "#/definitions/notificationSince" },
             "enabled": { "type": "boolean" },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },

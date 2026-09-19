@@ -88,6 +88,9 @@ services:
     username: ""
     passwordSecretRef: { name: "", key: IMAP_PASSWORD }
     folders: [INBOX]
+    # EMAILID is always preferred. Auto recognizes provider IDs using IMAP ID.
+    idProvider: auto
+    lookupMaxMessages: 200
     notifySince: startup
     eventEnergy: passive
     sessionId: ""

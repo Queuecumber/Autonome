@@ -41,6 +41,8 @@ def test_imap_push_configuration_and_persistent_state(render):
         "name": "mail-passwords", "key": "PASSWORD", "optional": False}
     assert json.loads(env["IMAP_FOLDERS"]["value"]) == ["INBOX", "Mixed Case"]
     assert env["IMAP_NOTIFY_SINCE"]["value"] == "startup"
+    assert env["IMAP_ID_PROVIDER"]["value"] == "auto"
+    assert env["IMAP_LOOKUP_MAX_MESSAGES"]["value"] == "200"
     assert env["IMAP_EVENT_ENERGY"]["value"] == "passive"
     assert env["IMAP_SESSION_ID"]["value"] == "mail"
     assert env["SESSION_MANAGER_URL"]["value"] == "http://session-manager:5000"
@@ -66,6 +68,8 @@ def test_smtp_is_restricted_and_has_no_automatic_event_loop_or_file_mount(render
     ("imap", {"passwordSecretRef": {"name": ""}}), ("imap", {"folders": []}),
     ("imap", {"folders": ["INBOX", "INBOX"]}), ("imap", {"pollSeconds": 0}),
     ("imap", {"eventEnergy": "invalid"}), ("imap", {"server": "http://mail.test"}),
+    ("imap", {"idProvider": "unknown"}), ("imap", {"lookupMaxMessages": 0}),
+    ("imap", {"lookupMaxMessages": 5001}), ("imap", {"lookupMaxMessages": 1.5}),
     ("smtp", {"from": ""}), ("smtp", {"allowAnyRecipient": "false"}),
     ("smtp", {"maxAttachmentBytes": -1}), ("smtp", {"server": "http://mail.test"}),
 ])
@@ -96,3 +100,12 @@ def test_smtp_no_auth_relay_configuration_is_preserved(render):
     env = {item["name"]: item for item in container["env"]}
     assert "SMTP_PASSWORD" not in env
     assert env["SMTP_SERVER"]["value"] == "smtp://relay.test:25"
+
+
+def test_imap_native_identity_settings_reach_the_adapter(render):
+    """Provider overrides and bounded recovery settings are available through the chart."""
+    objects = resources(render(configured("imap", idProvider="proton", lookupMaxMessages=50)))
+    env = deployment(objects, "imap")["spec"]["template"]["spec"]["containers"][0]["env"]
+    values = {item["name"]: item.get("value") for item in env}
+    assert values["IMAP_ID_PROVIDER"] == "proton"
+    assert values["IMAP_LOOKUP_MAX_MESSAGES"] == "50"

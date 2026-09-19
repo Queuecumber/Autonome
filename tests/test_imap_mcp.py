@@ -47,6 +47,7 @@ def mime():
 def client(mime):
     """An IMAPClient-shaped mock with independent header and full-body responses."""
     result = Mock()
+    result.has_capability.return_value = False
     result.select_folder.return_value = {b"UIDVALIDITY": 21, b"UIDNEXT": 8}
     result.list_folders.return_value = [((), b"/", "Projects:Mixed Case/Work"),
                                       ((b"\\Noselect",), b"/", "Container")]
@@ -73,7 +74,8 @@ def mailbox(settings, client, monkeypatch):
         yield client
 
     monkeypatch.setattr(box, "connect", connect)
-    return box
+    yield box
+    box.close()
 
 
 @pytest.fixture
@@ -134,8 +136,12 @@ def test_connection_uses_tls_before_login(settings, monkeypatch, scheme, port):
     factory = Mock(return_value=protocol)
     monkeypatch.setattr(model, "IMAPClient", factory)
     configured = model.Settings(f"{scheme}://mail.test", "user", "secret")
-    with model.Mailbox(configured).connect() as connected:
-        assert connected is protocol
+    box = model.Mailbox(configured)
+    try:
+        with box.connect() as connected:
+            assert connected is protocol
+    finally:
+        box.close()
     assert factory.call_args.kwargs["port"] == port
     assert factory.call_args.kwargs["use_uid"] is True
     assert factory.call_args.kwargs["timeout"] == 20
@@ -538,7 +544,7 @@ async def test_mcp_lifespan_tools_resources_and_worker_shutdown(mailbox, key, mo
     from fastmcp import Client
 
     monkeypatch.setattr(server.Settings, "from_env", lambda: mailbox.settings)
-    monkeypatch.setattr(server, "Mailbox", lambda settings: mailbox)
+    monkeypatch.setattr(server, "Mailbox", lambda settings, state_path=None: mailbox)
     monkeypatch.setenv("IMAP_STATE_PATH", str(tmp_path / "lifespan.sqlite3"))
     stopped = []
 

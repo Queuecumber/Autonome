@@ -12,7 +12,7 @@ import time
 import httpx
 from imapclient import IMAPClient
 
-from imap_mcp.model import Mailbox, MessageKey, notification_date, parse_message, received_time
+from imap_mcp.model import IdentityCapabilities, Mailbox, MessageKey, notification_date, received_time
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,8 @@ class Monitor:
             return self.store.notification_floor(self.mailbox.settings.account, folder)
         return notification_date(configured)
 
-    def scan(self, client, folder: str, validity: int, baseline: int) -> None:
+    def scan(self, client, folder: str, validity: int, baseline: int,
+             capabilities: IdentityCapabilities | None = None) -> None:
         """Stage unseen UIDs in order; duplicates and messages expunged before fetch are skipped.
 
         Args:
@@ -157,11 +158,13 @@ class Monitor:
             folder: Selected folder name.
             validity: Selected folder epoch.
             baseline: UIDNEXT minus one at initial selection.
+            capabilities: Connection's negotiated identity support, or None to discover it.
 
         Raises:
             Exception: IMAP, parsing, or storage failure; cursor stops at the last committed UID.
         """
         account = self.mailbox.settings.account
+        capabilities = capabilities or self.mailbox.identity_capabilities(client)
         last_uid = self.store.checkpoint(account, folder, validity, baseline)
         floor = self.notification_floor(folder)
         # UID n:* can return the current maximum even when it is smaller than n.
@@ -170,17 +173,17 @@ class Monitor:
             if self.stop.is_set():
                 return
             key = MessageKey(account=account, folder=folder, validity=validity, uid=uid)
-            record = client.fetch([uid], ["BODY.PEEK[HEADER]", "INTERNALDATE"]).get(uid)
+            record = client.fetch([uid], ["BODY.PEEK[HEADER]", "INTERNALDATE", *capabilities.fetch_fields]).get(uid)
             event = None
             received = received_time(record.get(b"INTERNALDATE")) if record is not None else None
             if record is not None and (floor is None or (received is not None and received >= floor)):
-                message = parse_message(record[b"BODY[HEADER]"], key, summary=True, received_at=received)
+                message = self.mailbox.summarize(key, record, capabilities)
                 summary = message.model_dump(mode="json", exclude_none=True)
                 summary["subject"] = summary["subject"][:500]
                 summary["from_"] = {name: value[:500] for name, value in summary["from_"].items()}
                 event = {"source": "imap", "event_type": "mail_received", "energy": self.energy,
                          "text": json.dumps(summary), "metadata": {
-                             "event_id": key.encode(), "message_id": key.encode(),
+                             "event_id": key.encode(), "message_id": message.id,
                              "account": account, "folder": folder,
                              "uidvalidity": validity, "uid": uid,
                              "received_at": received.isoformat() if received else None}}
@@ -212,11 +215,12 @@ class Monitor:
                     selected = client.select_folder(folder, readonly=True)
                     validity = int(selected[b"UIDVALIDITY"])
                     baseline = int(selected[b"UIDNEXT"]) - 1
+                    capabilities = self.mailbox.identity_capabilities(client)
                     idle = client.has_capability("IDLE")
                     if not idle:
                         logger.warning("IMAP IDLE unavailable; using adapter-side polling")
                     while not self.stop.is_set():
-                        self.scan(client, folder, validity, baseline)
+                        self.scan(client, folder, validity, baseline, capabilities)
                         self.wait_for_change(client, idle)
             except Exception as error:
                 logger.warning("IMAP watcher reconnecting after %s", type(error).__name__)

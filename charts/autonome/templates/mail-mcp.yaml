@@ -59,6 +59,8 @@ spec:
             {{- if eq $kind "imap" }}
             - { name: SESSION_MANAGER_URL, value: "http://session-manager:{{ $.Values.services.sessionManager.port }}" }
             - { name: IMAP_FOLDERS, value: {{ $svc.folders | toJson | quote }} }
+            - { name: IMAP_ID_PROVIDER, value: {{ $svc.idProvider | default "auto" | quote }} }
+            - { name: IMAP_LOOKUP_MAX_MESSAGES, value: {{ $svc.lookupMaxMessages | default 200 | int | quote }} }
             - { name: IMAP_NOTIFY_SINCE, value: {{ $svc.notifySince | default "startup" | quote }} }
             - { name: IMAP_EVENT_ENERGY, value: {{ $svc.eventEnergy | quote }} }
             - { name: IMAP_SESSION_ID, value: {{ $svc.sessionId | quote }} }

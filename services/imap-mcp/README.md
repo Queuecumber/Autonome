@@ -18,10 +18,72 @@ agent-side inbox checks. SMTP is a separate, explicitly invoked service.
   The same bytes are available at `imap://attachments/{message_id}/{attachment_id}`.
 
 All selections are read-only and fetches use `BODY.PEEK`. No tool sets flags,
-moves/deletes mail, or marks it as read. IDs encode the account, exact folder,
-UIDVALIDITY, and UID; they are opaque to callers. Old `folder:uid` IDs from aibs
-must be reacquired through search. A changed account or UIDVALIDITY causes a
-stale-ID error instead of reading an unrelated message with a reused UID.
+moves/deletes mail, or marks it as read. Pass the complete opaque `id` to the
+detail and attachment tools without supplying a folder. Old `folder:uid` IDs
+from aibs must be reacquired through search.
+
+## Message Identity
+
+Identifiers are selected in this order:
+
+1. Standard `EMAILID` when the authenticated server advertises `OBJECTID` and
+   returns a valid identifier ([RFC 8474](https://www.rfc-editor.org/rfc/rfc8474.html)).
+2. A recognized provider's native ID. Currently this is Proton Mail Bridge's
+   `X-Pm-Internal-Id`, populated by Bridge from the Proton API message ID.
+3. The existing account + exact folder + UIDVALIDITY + UID identity.
+
+`identity_kind` reports `emailid`, `proton`, or `mailbox`. Native IDs use a `v2.`
+URL-safe envelope containing their native value, mechanism, and account scope.
+They do not contain the folder or UID, and do not allocate a UUID or hash email
+content. Mailbox IDs retain their original encoding and safety checks. Previously
+issued IDs are decoded according to their own mechanism, not the server's current
+preferred mechanism. Existing mailbox IDs remain usable at their original location;
+they cannot retrospectively recover a native ID after that location disappears.
+
+Provider detection uses the authenticated server's IMAP `ID` response, never
+the presence of a sender-controlled header alone. `IMAP_ID_PROVIDER=auto` recognizes
+Proton Mail Bridge by its server name. `generic` disables provider fallback;
+`proton` explicitly enables it for a known Bridge endpoint that cannot identify
+itself. Standard EMAILID is preferred in all modes. This detection is not a
+replacement for transport security and trusted operator configuration.
+
+Native IDs and attachment links continue to identify a message after normal
+folder moves, while that native ID remains assigned. Deleting and importing a new
+message may create a different native ID. A mailbox-scoped fallback cannot promise
+move stability; it fails on missing mail or an epoch change instead of returning
+another message. Matching copies in different folders share a native ID but still
+appear as separate search summaries with their observed `folder`.
+
+### Location Recovery
+
+The existing SQLite state file also caches native IDs and their known IMAP
+locations. It is a lookup index, not the source of message identity. IDs acquired
+through searches, incoming-mail notifications, and recovery reads populate it.
+Losing the cache does not change native IDs; it makes their next lookup cold.
+Preserve the state PVC because the same file also contains notification checkpoints
+and the outbox, which are not disposable.
+
+A normal native-ID read validates a cached folder/epoch/UID and checks the native
+identifier before and after fetching the body. If a location is stale, EMAILID
+uses standard per-folder `SEARCH EMAILID`. Provider recovery enumerates selectable
+folder UIDs and reads only bounded `BODY.PEEK[HEADER.FIELDS (X-PM-INTERNAL-ID)]`
+batches, newest UID allocations first. This ordering is for locating newly moved
+mail, not ordering search results by date. No mailbox-wide provider `HEADER SEARCH`
+is used: Bridge versions can load every full message to execute that query.
+
+Provider recovery reads at most `IMAP_LOOKUP_MAX_MESSAGES` metadata candidates per
+attempt (default 200), in batches of at most 50 distributed among folders. It
+caches observations and returns an explicit **incomplete, retry** error if more
+work remains. Retrying the same ID continues from unexamined UIDs, including after
+restart. A cold lookup for old mail may need multiple attempts. UID enumeration
+and server-internal work still depend on mailbox size; this is a header-count
+budget, not a guaranteed wall-clock deadline. Socket timeouts remain separate.
+
+Recovery also considers unwatched folders. It does not move mail, change read
+flags, replay historical notifications, or advance notification checkpoints.
+Network/protocol failures propagate instead of being reported as missing mail.
+Cache size grows with observed metadata; provision the existing state PVC for the
+mailbox size. Only identifiers and locations are added, not message bodies.
 
 Search summaries and full details include `folder` and `received_at`. The existing
 `date_time` field is still the sender's Date header, not the sorting timestamp.
@@ -78,8 +140,8 @@ New messages produce `/event` requests with:
   "energy": "passive",
   "text": "{header summary with opaque message ID}",
   "metadata": {
-    "event_id": "opaque message ID",
-    "message_id": "opaque message ID",
+    "event_id": "mailbox-scoped notification ID",
+    "message_id": "opaque message ID (native when available)",
     "account": "opaque account identity",
     "folder": "INBOX",
     "uidvalidity": 123,
@@ -91,6 +153,8 @@ New messages produce `/event` requests with:
 
 The default route is the main session. Explicit `IMAP_SESSION_ID` overrides it.
 Header summaries are external email content, not trusted instructions.
+The notification `event_id` remains folder/epoch/UID-scoped for checkpoint and
+delivery compatibility; it is deliberately separate from a move-stable mail ID.
 
 Checkpoint advancement and outbox insertion share one SQLite transaction.
 Pending events survive restart and HTTP failures. The current cutoff is also
@@ -119,6 +183,8 @@ and `MAILCAL_MCP_*` variables are not retained.
 | `IMAP_USERNAME` | required | Login name |
 | `IMAP_PASSWORD` | required | Password or app password |
 | `IMAP_FOLDERS` | `["INBOX"]` | JSON list of exact watched folder names |
+| `IMAP_ID_PROVIDER` | `auto` | Provider fallback: `auto`, `generic`, or explicit `proton` |
+| `IMAP_LOOKUP_MAX_MESSAGES` | `200` | Provider recovery metadata budget per attempt, 1..5000 |
 | `IMAP_NOTIFY_SINCE` | `startup` | Persisted first activation, explicit ISO date/aware timestamp, or `all` |
 | `IMAP_MCP_PORT` | `8006` | HTTP MCP port |
 | `SESSION_MANAGER_URL` | `http://localhost:5000` | Event endpoint base URL |
@@ -127,7 +193,7 @@ and `MAILCAL_MCP_*` variables are not retained.
 | `IMAP_POLL_SECONDS` | `60` | Fallback interval for servers without IDLE |
 | `IMAP_TIMEOUT_SECONDS` | `20` | IMAP connection/socket timeout |
 | `IMAP_MAX_MESSAGE_BYTES` | `26214400` | Maximum full mail size for detail/attachment reads |
-| `IMAP_STATE_PATH` | `/data/imap.sqlite3` | Persistent checkpoint/outbox file |
+| `IMAP_STATE_PATH` | `/data/imap.sqlite3` | Persistent checkpoints, outbox, and native-ID location cache |
 
 TLS certificate validation is enabled, including STARTTLS before login. Plaintext
 `imap://` exists only for trusted in-cluster relays such as a co-located Proton Mail
@@ -137,3 +203,9 @@ must be trusted by the container's SSL configuration. Passwords are not logged.
 The state volume contains mail headers and must be treated as private data.
 
 The Helm service is disabled by default. See the chart's mail configuration.
+The corresponding values are `services.imapMcp.idProvider` and
+`services.imapMcp.lookupMaxMessages`. Defaults work with a Bridge that advertises
+its name through IMAP ID; no provider override is needed. Deploy the updated
+IMAP image and reconnect session-manager to refresh tool instructions and schemas.
+Cache tables are added without resetting existing event state. No Bridge restart,
+mail migration, or mailbox mutation is required.

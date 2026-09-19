@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Annotated
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ResourceError, ToolError
 import httpx
 from mcp.types import BlobResourceContents, EmbeddedResource
 from pydantic import Field
 
 from imap_mcp.events import EventStore, Monitor
 from imap_mcp.model import Mailbox, Message, Settings
+from imap_mcp.identity import LookupIncompleteError
 
 mailbox: Mailbox | None = None
 
@@ -33,9 +35,10 @@ async def lifespan(app: FastMCP):
         ValueError: Invalid account or delivery configuration.
     """
     global mailbox
-    mailbox = Mailbox(Settings.from_env())
-    store = EventStore(Path(os.environ.get("IMAP_STATE_PATH", "/data/imap.sqlite3")))
+    path = Path(os.environ.get("IMAP_STATE_PATH", "/data/imap.sqlite3"))
+    store = EventStore(path)
     try:
+        mailbox = Mailbox(Settings.from_env(), state_path=path)
         monitor = Monitor(mailbox, store, session_id=os.environ.get("IMAP_SESSION_ID", ""),
                           poll_seconds=float(os.environ.get("IMAP_POLL_SECONDS", "60")),
                           energy=os.environ.get("IMAP_EVENT_ENERGY", "passive"))
@@ -50,6 +53,8 @@ async def lifespan(app: FastMCP):
                 monitor.stop.set()
                 await asyncio.gather(*workers, delivery)
     finally:
+        if mailbox is not None:
+            mailbox.close()
         store.close()
         mailbox = None
 
@@ -60,6 +65,12 @@ and rank results by server receipt time, not UID. Explicitly set folder only to 
 the search. date_time is the sender's Date header; received_at is the server receipt
 time used for ordering. A limited result is not an exhaustive mailbox audit: narrow
 the query or use disjoint date ranges before concluding an older message is absent.
+Pass the complete returned id to get_mail; folder is not required. identity_kind
+reports emailid (standard native ID), proton (recognized provider ID), or mailbox
+(folder/UIDVALIDITY/UID). Native IDs and their attachment URIs survive folder moves;
+mailbox IDs do not. Recovery checks cached locations first and may report incomplete
+when its bounded metadata scan needs another call. That does not mean the mail is
+absent; retry the same ID to continue. Copies in multiple folders can share a native ID.
 New arrivals in watched folders produce passive mail_received
 events with message IDs; use get_mail when the body matters. You do not need a recurring
 inbox-check task. Initial startup does not replay old mail. Searches remain available
@@ -98,8 +109,12 @@ def get_mail(message_id: str) -> Message:
     Raises:
         ValueError: Invalid/stale/foreign ID or message exceeds the configured size limit.
         KeyError: Message no longer exists.
+        ToolError: Location recovery is incomplete; retry the same ID to continue.
     """
-    return account().get(message_id)
+    try:
+        return account().get(message_id)
+    except LookupIncompleteError as error:
+        raise ToolError(str(error)) from error
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -128,7 +143,10 @@ def search_mail(search: str, folder: str | None = None,
 @mcp.resource("imap://attachments/{message_id}/{attachment_id}")
 def attachment_resource(message_id: str, attachment_id: str) -> bytes:
     """Return attachment bytes for IDs from get_mail; missing/stale IDs raise errors."""
-    return account().attachment(message_id, attachment_id)[0]
+    try:
+        return account().attachment(message_id, attachment_id)[0]
+    except LookupIncompleteError as error:
+        raise ResourceError(str(error)) from error
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -145,8 +163,12 @@ def get_attachment(message_id: str, attachment_id: str) -> EmbeddedResource:
     Raises:
         KeyError: Attachment or mail no longer exists.
         ValueError: Invalid/stale ID or configured message size limit exceeded.
+        ToolError: Location recovery is incomplete; retry the same ID to continue.
     """
-    content, metadata = account().attachment(message_id, attachment_id)
+    try:
+        content, metadata = account().attachment(message_id, attachment_id)
+    except LookupIncompleteError as error:
+        raise ToolError(str(error)) from error
     return EmbeddedResource(type="resource", resource=BlobResourceContents(
         uri=metadata.uri, mimeType=metadata.content_type, blob=base64.b64encode(content).decode()))
 

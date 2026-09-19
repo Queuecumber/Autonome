@@ -1,7 +1,5 @@
 """Read-only IMAP access and MIME parsing, adapted from aibs/imap/model.py."""
 
-import base64
-import binascii
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -12,15 +10,26 @@ from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 import hashlib
 import heapq
 import json
+import logging
 import os
+from pathlib import Path
 import ssl
+from typing import Literal
 from urllib.parse import urlparse
 
 from imapclient import IMAPClient
+from imapclient.exceptions import IMAPClientError
 from markdownify import markdownify
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from imap_mcp.identity import IdentityStore, LookupIncompleteError, MessageKey, NativeKey, decode_id
 
 DATE_FETCH_BATCH_SIZE = 200
+IDENTITY_FETCH_BATCH_SIZE = 50
+PROTON_HEADER = "X-Pm-Internal-Id"
+PROTON_FETCH = "BODY.PEEK[HEADER.FIELDS (X-PM-INTERNAL-ID)]"
+logger = logging.getLogger(__name__)
+RawMessage = tuple[bytes, MessageKey, datetime | None]
 
 
 def notification_date(value: str) -> datetime | None:
@@ -70,6 +79,10 @@ class Settings:
         max_message_bytes: Maximum full message size accepted by detail tools.
         notify_since: startup persists the first watcher time; all disables the
             receipt-date filter; an ISO date/timestamp sets an explicit floor.
+        id_provider: auto detects known servers via IMAP ID; generic disables
+            provider-specific IDs; proton explicitly trusts Proton Bridge headers.
+            Standard OBJECTID support is preferred in every mode.
+        lookup_max_messages: Maximum header records read during native-ID recovery.
 
     Raises:
         ValueError: If the account, URL, folders, or limits are invalid.
@@ -81,6 +94,8 @@ class Settings:
     timeout: float = 20
     max_message_bytes: int = 25 * 1024 * 1024
     notify_since: str = "startup"
+    id_provider: Literal["auto", "generic", "proton"] = "auto"
+    lookup_max_messages: int = 200
 
     def __post_init__(self):
         """Reject invalid configuration before opening a network connection."""
@@ -98,6 +113,10 @@ class Settings:
             raise ValueError("IMAP_FOLDERS must contain unique, nonempty folder names")
         if self.timeout <= 0 or self.max_message_bytes <= 0:
             raise ValueError("IMAP limits must be positive")
+        if self.id_provider not in {"auto", "generic", "proton"}:
+            raise ValueError("IMAP_ID_PROVIDER must be auto, generic, or proton")
+        if type(self.lookup_max_messages) is not int or not 1 <= self.lookup_max_messages <= 5000:
+            raise ValueError("IMAP_LOOKUP_MAX_MESSAGES must be between 1 and 5000")
         notification_date(self.notify_since)
 
     @property
@@ -117,30 +136,55 @@ class Settings:
                    os.environ.get("IMAP_PASSWORD", ""), tuple(folders),
                    float(os.environ.get("IMAP_TIMEOUT_SECONDS", "20")),
                    int(os.environ.get("IMAP_MAX_MESSAGE_BYTES", str(25 * 1024 * 1024))),
-                   os.environ.get("IMAP_NOTIFY_SINCE", "startup"))
+                   os.environ.get("IMAP_NOTIFY_SINCE", "startup"),
+                   os.environ.get("IMAP_ID_PROVIDER", "auto"),
+                   int(os.environ.get("IMAP_LOOKUP_MAX_MESSAGES", "200")))
 
 
-class MessageKey(BaseModel):
-    """An account, folder, UIDVALIDITY, and UID that identify exactly one mailbox item."""
-    account: str
-    folder: str = Field(min_length=1)
-    validity: int = Field(gt=0)
-    uid: int = Field(gt=0)
+@dataclass(frozen=True)
+class IdentityCapabilities:
+    """Native identifier fields supported by this authenticated server connection."""
+    emailid: bool = False
+    proton: bool = False
 
-    def encode(self) -> str:
-        """Return a URL-safe opaque message ID for tools and resource URIs."""
-        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode().rstrip("=")
+    @property
+    def fetch_fields(self) -> list[str]:
+        """Return only supported native fields; provider IDs are supplied by fetched headers."""
+        return ["EMAILID"] if self.emailid else []
 
-    @classmethod
-    def decode(cls, value: str) -> "MessageKey":
-        """Parse a complete message ID; raises ValueError for malformed IDs."""
-        if not value or len(value) > 4096:
-            raise ValueError("Invalid message ID")
-        try:
-            return cls.model_validate_json(base64.b64decode(
-                value + "=" * (-len(value) % 4), altchars=b"-_", validate=True))
-        except (ValueError, binascii.Error) as error:
-            raise ValueError("Invalid message ID") from error
+
+def native_value(record: dict, kind: Literal["emailid", "proton"]) -> str | None:
+    """Extract and validate one native identifier from an IMAP fetch response.
+
+    Args:
+        record: A metadata or full-message FETCH record.
+        kind: Field to inspect; selection of trusted providers happens separately.
+
+    Returns:
+        A case-sensitive native ID, or None for absent, duplicated, or malformed data.
+    """
+    if kind == "emailid":
+        value = record.get(b"EMAILID")
+        if isinstance(value, (tuple, list)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bytes):
+            value = value.decode("ascii", errors="replace")
+        elif type(value) is int:
+            value = str(value)
+    else:
+        raw = record.get(b"BODY[]", record.get(b"BODY[HEADER]"))
+        if raw is None:
+            raw = next((value for name, value in record.items()
+                        if isinstance(name, bytes) and name.upper().startswith(b"BODY[HEADER.FIELDS")), b"")
+        headers = BytesParser(policy=policy.default).parsebytes(raw, headersonly=True)
+        values = headers.get_all(PROTON_HEADER, [])
+        value = str(values[0]).strip() if len(values) == 1 else None
+    if not isinstance(value, str):
+        return None
+    try:
+        return NativeKey(account="validation", kind=kind, value=value).value
+    except ValueError:
+        return None
 
 
 class EmailAddress(BaseModel):
@@ -161,6 +205,7 @@ class AttachmentMetadata(BaseModel):
 class Message(BaseModel):
     """Mail details or a header-only summary; None means a field was not fetched."""
     id: str
+    identity_kind: Literal["emailid", "proton", "mailbox"] = "mailbox"
     subject: str
     from_: EmailAddress
     folder: str = ""
@@ -185,7 +230,7 @@ def attachment_bytes(part: EmailMessage) -> bytes:
 
 
 def parse_message(raw: bytes, key: MessageKey, summary: bool = False,
-                  received_at: datetime | None = None) -> Message:
+                  received_at: datetime | None = None, identity: NativeKey | None = None) -> Message:
     """Parse MIME without changing mailbox state.
 
     Args:
@@ -193,6 +238,7 @@ def parse_message(raw: bytes, key: MessageKey, summary: bool = False,
         key: Stable mailbox identity to attach to results.
         summary: Omit body, recipients, and attachment claims for header-only data.
         received_at: Server INTERNALDATE, distinct from the sender's Date header.
+        identity: Validated account-scoped native ID, or None for a mailbox-scoped ID.
 
     Returns:
         A message; malformed or absent dates are represented as None.
@@ -204,7 +250,9 @@ def parse_message(raw: bytes, key: MessageKey, summary: bool = False,
     except (ValueError, TypeError, OverflowError):
         pass
     name, address = parseaddr(str(mail.get("From", "")))
-    result = Message(id=key.encode(), subject=str(mail.get("Subject", "")),
+    message_id = (identity or key).encode()
+    result = Message(id=message_id, identity_kind=identity.kind if identity else "mailbox",
+                     subject=str(mail.get("Subject", "")),
                      from_=EmailAddress(name=name, address=address), folder=key.folder,
                      date_time=sent, received_at=received_time(received_at))
     if summary:
@@ -220,7 +268,7 @@ def parse_message(raw: bytes, key: MessageKey, summary: bool = False,
     result.attachment_metadata = [AttachmentMetadata(
         id=str(index), name=part.get_filename() or f"attachment-{index}",
         content_type=part.get_content_type(), size=len(attachment_bytes(part)),
-        uri=f"imap://attachments/{key.encode()}/{index}",
+        uri=f"imap://attachments/{message_id}/{index}",
     ) for index, part in enumerate(mail.iter_attachments())]
     result.has_attachments = bool(result.attachment_metadata)
     return result
@@ -231,10 +279,16 @@ class Mailbox:
 
     Args:
         settings: Validated account settings.
+        state_path: Persistent adapter SQLite file, or None for a temporary location cache.
     """
-    def __init__(self, settings: Settings):
-        """Retain settings without connecting to the mail server."""
+    def __init__(self, settings: Settings, state_path: Path | None = None):
+        """Retain settings and open a location cache; None uses memory only, without network access."""
         self.settings = settings
+        self.identities = IdentityStore(state_path)
+
+    def close(self) -> None:
+        """Close the owned location cache after all tools and workers have stopped."""
+        self.identities.close()
 
     @contextmanager
     def connect(self):
@@ -250,6 +304,80 @@ class Mailbox:
             client.login(self.settings.username, self.settings.password)
             client.normalise_times = False
             yield client
+
+    def identity_capabilities(self, client) -> IdentityCapabilities:
+        """Negotiate standard IDs and recognize providers from authenticated server metadata.
+
+        Args:
+            client: Authenticated IMAP connection, not currently in IDLE.
+
+        Returns:
+            Supported native identity fields. Unknown or unsupported ID responses
+            do not enable provider headers; a configured proton override does.
+
+        Raises:
+            Exception: Network and capability-query failures propagate.
+        """
+        emailid = bool(client.has_capability("OBJECTID"))
+        proton = self.settings.id_provider == "proton"
+        if self.settings.id_provider == "auto" and client.has_capability("ID"):
+            try:
+                response = client.id_()
+            except IMAPClientError:
+                logger.warning("IMAP ID unavailable; provider-specific identifiers disabled")
+            else:
+                if isinstance(response, dict):
+                    fields = response.items()
+                elif (isinstance(response, (tuple, list)) and len(response) == 1
+                      and isinstance(response[0], (tuple, list)) and len(response[0]) % 2 == 0):
+                    fields = zip(response[0][::2], response[0][1::2])
+                else:
+                    fields = []
+                for key, value in fields:
+                    key = key.decode(errors="replace") if isinstance(key, bytes) else key
+                    value = value.decode(errors="replace") if isinstance(value, bytes) else value
+                    if key == "name" and isinstance(value, str):
+                        proton = value.casefold() in {"proton mail bridge", "protonmail bridge", "protonmail-bridge"}
+        return IdentityCapabilities(emailid=emailid, proton=proton)
+
+    def observe(self, location: MessageKey, record: dict,
+                capabilities: IdentityCapabilities) -> NativeKey | None:
+        """Cache fetched native fields and return the highest-priority available identity.
+
+        Args:
+            location: The mailbox epoch and UID associated with the fetch.
+            record: A header or full-message FETCH record, including requested EMAILID.
+            capabilities: Known supported identifier mechanisms for this connection.
+
+        Returns:
+            EMAILID, otherwise a recognized Proton ID, otherwise None. Both native
+            forms are cached when available so previously issued IDs keep working.
+        """
+        preferred = None
+        for kind, enabled in [("emailid", capabilities.emailid), ("proton", capabilities.proton)]:
+            if not enabled:
+                continue
+            value = native_value(record, kind)
+            self.identities.remember(location, kind, value)
+            if value is not None and preferred is None:
+                preferred = NativeKey(account=location.account, kind=kind, value=value)
+        return preferred
+
+    def summarize(self, location: MessageKey, record: dict,
+                  capabilities: IdentityCapabilities) -> Message:
+        """Return a typed header summary and remember its native identity/location mapping.
+
+        Args:
+            location: Selected mailbox epoch and fetched UID.
+            record: Header FETCH record with receipt time and supported native fields.
+            capabilities: Identifier fields requested for this connection.
+
+        Returns:
+            A header-only Message whose ID is independent of location when supported.
+        """
+        return parse_message(record[b"BODY[HEADER]"], location, summary=True,
+                             received_at=received_time(record.get(b"INTERNALDATE")),
+                             identity=self.observe(location, record, capabilities))
 
     def received_at(self, message_id: str) -> datetime | None:
         """Read a message's authoritative receipt time for legacy queued notifications.
@@ -281,7 +409,7 @@ class Mailbox:
                     if b"\\Noselect" not in flags]
 
     def raw_message(self, message_id: str) -> tuple[bytes, MessageKey, datetime | None]:
-        """Fetch full mail using BODY.PEEK; reject stale IDs or oversized messages.
+        """Fetch mail read-only, resolving native IDs across folders when necessary.
 
         Args:
             message_id: ID from a search or incoming-mail event.
@@ -292,31 +420,173 @@ class Mailbox:
         Raises:
             ValueError: For an invalid/foreign ID, UIDVALIDITY change, or size limit.
             KeyError: If the mail has been removed.
+            LookupIncompleteError: Recovery reached its metadata budget; retry
+                continues cached progress, without claiming the mail is absent.
         """
-        key = MessageKey.decode(message_id)
+        key = decode_id(message_id)
         if key.account != self.settings.account:
             raise ValueError("Message ID belongs to another account")
         with self.connect() as client:
+            if isinstance(key, NativeKey):
+                return self._native_message(client, key)
             selected = client.select_folder(key.folder, readonly=True)
             if int(selected[b"UIDVALIDITY"]) != key.validity:
                 raise ValueError("Mailbox UIDVALIDITY changed; search again for a current ID")
-            size = client.fetch([key.uid], ["RFC822.SIZE"]).get(key.uid)
-            if size is None:
-                raise KeyError("Message no longer exists")
-            if size[b"RFC822.SIZE"] > self.settings.max_message_bytes:
-                raise ValueError("Message exceeds IMAP_MAX_MESSAGE_BYTES")
-            record = client.fetch([key.uid], ["BODY.PEEK[]", "INTERNALDATE"]).get(key.uid, {})
-            data = record.get(b"BODY[]")
-            if data is None:
-                raise KeyError("Message no longer exists")
-            if len(data) > self.settings.max_message_bytes:
-                raise ValueError("Message exceeds IMAP_MAX_MESSAGE_BYTES")
-            return data, key, received_time(record.get(b"INTERNALDATE"))
+            return self._read_selected(client, key)
+
+    def _read_selected(self, client, location: MessageKey,
+                       identity: NativeKey | None = None) -> tuple[bytes, MessageKey, datetime | None]:
+        """Read a selected UID with size checks and optional native-identity verification.
+
+        Args:
+            client: Connection with location.folder selected read-only.
+            location: Confirmed epoch and UID.
+            identity: Expected native identifier, checked before and after body fetch.
+
+        Returns:
+            Full message bytes, location, and normalized server receipt date.
+
+        Raises:
+            KeyError: The message disappeared or no longer matches the native ID.
+            ValueError: The message exceeds the configured size limit.
+            RuntimeError: The server omitted required size metadata.
+        """
+        native_fields = [] if identity is None else (["EMAILID"] if identity.kind == "emailid" else [PROTON_FETCH])
+        size = client.fetch([location.uid], ["RFC822.SIZE", *native_fields]).get(location.uid)
+        if size is None or (identity is not None and native_value(size, identity.kind) != identity.value):
+            raise KeyError("Message no longer matches this location")
+        if b"RFC822.SIZE" not in size:
+            raise RuntimeError("Server omitted message size")
+        if size[b"RFC822.SIZE"] > self.settings.max_message_bytes:
+            raise ValueError("Message exceeds IMAP_MAX_MESSAGE_BYTES")
+        extra = ["EMAILID"] if identity is not None and identity.kind == "emailid" else []
+        record = client.fetch([location.uid], ["BODY.PEEK[]", "INTERNALDATE", *extra]).get(location.uid, {})
+        data = record.get(b"BODY[]")
+        if data is None:
+            raise KeyError("Message no longer exists")
+        if len(data) > self.settings.max_message_bytes:
+            raise ValueError("Message exceeds IMAP_MAX_MESSAGE_BYTES")
+        if identity is not None and native_value(record, identity.kind) != identity.value:
+            raise KeyError("Message changed during retrieval")
+        return data, location, received_time(record.get(b"INTERNALDATE"))
+
+    def _try_location(self, client, location: MessageKey, identity: NativeKey) -> RawMessage | None:
+        """Try a cached location; stale epochs/identities return None and protocol failures propagate."""
+        selected = client.select_folder(location.folder, readonly=True)
+        validity = int(selected[b"UIDVALIDITY"])
+        self.identities.prune_epoch(location.account, location.folder, validity)
+        if validity != location.validity:
+            return None
+        try:
+            return self._read_selected(client, location, identity)
+        except KeyError:
+            self.identities.forget(location, identity.kind)
+            return None
+
+    def _native_message(self, client, identity: NativeKey) -> RawMessage:
+        """Resolve a native ID using verified cached locations, then bounded protocol recovery.
+
+        Args:
+            client: Authenticated read-only tool connection.
+            identity: Already account-validated native message identity.
+
+        Returns:
+            Message bytes, its current location, and receipt date.
+
+        Raises:
+            ValueError: The native mechanism is unavailable or a matching message is too large.
+            KeyError: All available locations were checked and no matching message remains.
+            LookupIncompleteError: More metadata needs to be examined on another attempt.
+            Exception: Protocol failures propagate without being treated as absence.
+        """
+        capabilities = self.identity_capabilities(client)
+        if ((identity.kind == "emailid" and not capabilities.emailid)
+                or (identity.kind == "proton" and not capabilities.proton)):
+            raise ValueError("This server does not support the ID's native identity mechanism")
+        folders = [name for flags, _, name in client.list_folders() if b"\\Noselect" not in flags]
+        for location in self.identities.locations(identity):
+            if location.folder not in folders:
+                self.identities.forget(location, identity.kind)
+                continue
+            if result := self._try_location(client, location, identity):
+                return result
+        if identity.kind == "emailid":
+            for folder in folders:
+                selected = client.select_folder(folder, readonly=True)
+                validity = int(selected[b"UIDVALIDITY"])
+                for uid in client.search(["EMAILID", identity.value]):
+                    location = MessageKey(account=identity.account, folder=folder, validity=validity, uid=uid)
+                    if result := self._try_location(client, location, identity):
+                        self.identities.remember(location, identity.kind, identity.value)
+                        return result
+        else:
+            return self._recover_provider_id(client, identity, folders, capabilities)
+        raise KeyError("Message not found in selectable folders")
+
+    def _recover_provider_id(self, client, identity: NativeKey, folders: list[str],
+                             capabilities: IdentityCapabilities) -> RawMessage:
+        """Scan bounded native-header batches, caching progress without whole-mailbox HEADER SEARCH.
+
+        Args:
+            client: Authenticated connection used only for read-only operations.
+            identity: Account-scoped provider ID to recover.
+            folders: Selectable folders to examine, including unwatched folders.
+            capabilities: Supported native fields to cache alongside the provider ID.
+
+        Returns:
+            Full message bytes, a verified location, and receipt date on success.
+
+        Raises:
+            LookupIncompleteError: The header budget is exhausted or a mailbox changes epochs.
+            KeyError: No match remains after all listed UIDs were examined.
+            Exception: Connection or protocol errors propagate; progress remains cached.
+        """
+        remaining = self.settings.lookup_max_messages
+        batch_size = max(1, min(IDENTITY_FETCH_BATCH_SIZE, remaining // max(1, len(folders))))
+        pending = []
+        for folder in folders:
+            selected = client.select_folder(folder, readonly=True)
+            validity = int(selected[b"UIDVALIDITY"])
+            self.identities.prune_epoch(identity.account, folder, validity)
+            uids = self.identities.unseen(identity.account, folder, validity, identity.kind,
+                                          client.search(["ALL"]))
+            if uids:
+                pending.append((folder, validity, uids))
+        while pending and remaining:
+            next_round = []
+            for folder, validity, uids in pending:
+                if remaining == 0:
+                    next_round.append((folder, validity, uids))
+                    continue
+                selected = client.select_folder(folder, readonly=True)
+                if int(selected[b"UIDVALIDITY"]) != validity:
+                    raise LookupIncompleteError("Mailbox changed during ID recovery; retry get_mail")
+                batch = uids[:min(batch_size, remaining)]
+                records = client.fetch(batch, [PROTON_FETCH, *capabilities.fetch_fields])
+                remaining -= len(batch)
+                for uid in batch:
+                    record = records.get(uid)
+                    if record is None:
+                        continue
+                    location = MessageKey(account=identity.account, folder=folder, validity=validity, uid=uid)
+                    self.observe(location, record, capabilities)
+                    if native_value(record, identity.kind) == identity.value:
+                        if result := self._try_location(client, location, identity):
+                            return result
+                if len(uids) > len(batch):
+                    next_round.append((folder, validity, uids[len(batch):]))
+            pending = next_round
+        if pending:
+            raise LookupIncompleteError(
+                "Message location recovery is incomplete, not absent; retry get_mail to continue cached progress")
+        raise KeyError("Message not found in selectable folders")
 
     def get(self, message_id: str) -> Message:
         """Return full details for an ID; propagates missing, stale, and oversized-mail errors."""
         raw, key, received = self.raw_message(message_id)
-        return parse_message(raw, key, received_at=received)
+        identity = decode_id(message_id)
+        return parse_message(raw, key, received_at=received,
+                             identity=identity if isinstance(identity, NativeKey) else None)
 
     def attachment(self, message_id: str, attachment_id: str) -> tuple[bytes, AttachmentMetadata]:
         """Return attachment bytes and metadata; raises KeyError for an absent attachment."""
@@ -327,7 +597,7 @@ class Mailbox:
                 data = attachment_bytes(part)
                 return data, AttachmentMetadata(id=attachment_id, name=part.get_filename() or f"attachment-{index}",
                     content_type=part.get_content_type(), size=len(data),
-                    uri=f"imap://attachments/{key.encode()}/{index}")
+                    uri=f"imap://attachments/{decode_id(message_id).encode()}/{index}")
         raise KeyError("Attachment not found")
 
     def search(self, search: str, folder: str | None = None, limit: int = 10) -> list[Message]:
@@ -355,6 +625,7 @@ class Mailbox:
         candidates = []
         minimum = datetime.min.replace(tzinfo=timezone.utc)
         with self.connect() as client:
+            capabilities = self.identity_capabilities(client)
             folders = [folder] if folder is not None else [name for flags, _, name in client.list_folders()
                                                           if b"\\Noselect" not in flags]
             for name in folders:
@@ -382,12 +653,13 @@ class Mailbox:
                 selected = client.select_folder(name, readonly=True)
                 if int(selected[b"UIDVALIDITY"]) != entries[0][4]:
                     raise RuntimeError("Mailbox changed during search; retry for current message IDs")
-                records = client.fetch([entry[3] for entry in entries], ["BODY.PEEK[HEADER]"])
+                self.identities.prune_epoch(self.settings.account, name, entries[0][4])
+                records = client.fetch([entry[3] for entry in entries], ["BODY.PEEK[HEADER]", *capabilities.fetch_fields])
                 for known_date, received, _, uid, validity in entries:
                     raw = records.get(uid, {}).get(b"BODY[HEADER]")
                     if raw is None:
                         continue
                     key = MessageKey(account=self.settings.account, folder=name, validity=validity, uid=uid)
-                    results[name, uid] = parse_message(raw, key, summary=True,
-                                                       received_at=received if known_date else None)
+                    record = {**records[uid], b"INTERNALDATE": received if known_date else None}
+                    results[name, uid] = self.summarize(key, record, capabilities)
         return [results[name, uid] for _, _, name, uid, _ in ranked if (name, uid) in results]
