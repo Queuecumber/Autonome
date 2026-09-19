@@ -79,6 +79,53 @@ services:
   workspaceFsMcp: { image: { name: autonome-workspace-fs-mcp }, port: 8000 }
   systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
   timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }
+  imapMcp:
+    enabled: false
+    image: { name: autonome-imap-mcp }
+    port: 8006
+    # For a trusted in-cluster relay (e.g. Proton Mail Bridge) use a plaintext
+    # imap:// URL; bridge logins still require username and passwordSecretRef.
+    server: ""
+    username: ""
+    passwordSecretRef: { name: "", key: IMAP_PASSWORD }
+    folders: [INBOX]
+    # EMAILID is always preferred. Auto recognizes provider IDs using IMAP ID.
+    idProvider: auto
+    lookupMaxMessages: 200
+    notifySince: startup
+    eventEnergy: passive
+    sessionId: ""
+    pollSeconds: 60
+    timeoutSeconds: 20
+    maxMessageBytes: 26214400
+    stateStorage: { size: 100Mi }
+  smtpMcp:
+    enabled: false
+    image: { name: autonome-smtp-mcp }
+    port: 8007
+    # For a trusted in-cluster relay use a plaintext smtp:// URL and leave
+    # username and passwordSecretRef.name empty (both empty together).
+    server: ""
+    username: ""
+    passwordSecretRef: { name: "", key: SMTP_PASSWORD }
+    from: ""
+    allowedRecipients: []
+    allowAnyRecipient: false
+    timeoutSeconds: 20
+    maxAttachmentBytes: 26214400
+  icalMcp:
+    enabled: false
+    image: { name: autonome-ical-mcp }
+    port: 8008
+    urlsSecretRef: { name: "", key: ICAL_URLS }
+    timezone: ""
+    refreshSeconds: 300
+    notifySince: startup
+    timeoutSeconds: 20
+    maxFeedBytes: 5242880
+    eventEnergy: passive
+    sessionId: ""
+    stateStorage: { size: 100Mi }
   graphitiMcp:
     image: { name: autonome-graphiti-mcp }
     port: 8005
