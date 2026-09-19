@@ -529,7 +529,9 @@ def test_attachment_tools_return_portable_binary_resources(mailbox, key, monkeyp
     monkeypatch.setattr(server, "mailbox", mailbox)
     result = server.get_attachment(key.encode(), "0")
     assert base64.b64decode(result.resource.blob) == b"\x00\xffbinary"
-    assert server.attachment_resource(key.encode(), "0") == b"\x00\xffbinary"
+    resource = server.attachment_resource(key.encode(), "0").contents[0]
+    assert resource.content == b"\x00\xffbinary"
+    assert resource.mime_type == "application/octet-stream"
     assert server.get_mail(key.encode()).subject == "Status update"
     assert server.search_mail("ALL", key.folder)[0].id == key.encode()
     assert server.list_folders() == [key.folder]
@@ -570,6 +572,7 @@ async def test_mcp_lifespan_tools_resources_and_worker_shutdown(mailbox, key, mo
         assert base64.b64decode(resources[0].resource.blob) == b"\x00\xffbinary"
         contents = await client.read_resource(f"imap://attachments/{key.encode()}/0")
         assert base64.b64decode(contents[0].blob) == b"\x00\xffbinary"
+        assert contents[0].mimeType == "application/octet-stream"
     assert server.mailbox is None
     assert stopped and all(stopped)
 

@@ -17,6 +17,35 @@ agent-side inbox checks. SMTP is a separate, explicitly invoked service.
 - `get_attachment(message_id, attachment_id)` returns an embedded binary resource.
   The same bytes are available at `imap://attachments/{message_id}/{attachment_id}`.
 
+## Inline Images
+
+`get_mail` includes nested inline MIME images in `attachment_metadata`, including
+images inside `multipart/related` bodies wrapped by `multipart/mixed` or
+`multipart/alternative`. Each item includes its decoded `size`, `content_type`,
+`inline` flag, optional unbracketed `content_id`, and a fetchable `uri`.
+`has_attachments` is true when such embedded media is present, even when the email
+has no separately attached files. Header-only search results still leave these
+fields unset because the MIME body has not been fetched.
+
+Use `get_attachment` or the platform's `resources_read` with the URI to view an
+image. Both routes retain the MIME type, so image bytes reach the model as image
+content instead of a generic blob. Image bytes are not inserted into the normal
+mail-text response. Unique `cid:` image/file references in HTML are rewritten to
+the corresponding resource URIs, including images inside tables. Duplicate or
+missing Content-IDs are not guessed; available parts remain individually fetchable.
+
+Existing top-level attachment IDs remain numeric and unchanged. Newly exposed
+nested parts use IDs such as `part-0.0.1`, based on their MIME path. Treat IDs as
+opaque and use those returned by `get_mail`; adding inline-image discovery does
+not renumber existing attachments. Attached `.eml` files and explicit attached
+MIME containers remain downloadable as single items, rather than exposing their
+contents as if they belonged to the outer message.
+
+Remote images are not downloaded automatically. This exposes bytes actually
+present as MIME parts; browser-local `blob:` URLs and HTML-only `data:` images
+are not converted into attachments. Plain-text alternatives remain preferred for
+the text body, while images from HTML alternatives are still listed as attachments.
+
 All selections are read-only and fetches use `BODY.PEEK`. No tool sets flags,
 moves/deletes mail, or marks it as read. Pass the complete opaque `id` to the
 detail and attachment tools without supplying a folder. Old `folder:uid` IDs

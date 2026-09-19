@@ -1,6 +1,7 @@
 """Read-only IMAP access and MIME parsing, adapted from aibs/imap/model.py."""
 
 from contextlib import contextmanager
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email import policy
@@ -15,11 +16,11 @@ import os
 from pathlib import Path
 import ssl
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError
-from markdownify import markdownify
+from markdownify import MarkdownConverter
 from pydantic import BaseModel
 
 from imap_mcp.identity import IdentityStore, LookupIncompleteError, MessageKey, NativeKey, decode_id
@@ -194,12 +195,14 @@ class EmailAddress(BaseModel):
 
 
 class AttachmentMetadata(BaseModel):
-    """Attachment index, display filename, MIME type, decoded byte count, and resource URI."""
+    """A fetchable MIME part, including inline media and its optional Content-ID."""
     id: str
     name: str
     content_type: str
     size: int
     uri: str
+    inline: bool = False
+    content_id: str | None = None
 
 
 class Message(BaseModel):
@@ -227,6 +230,113 @@ def attachment_bytes(part: EmailMessage) -> bytes:
     if isinstance(nested, list):
         return b"\r\n".join(item.as_bytes() for item in nested)
     return str(nested or "").encode()
+
+
+def _content_id(part: EmailMessage) -> str | None:
+    """Return one unbracketed Content-ID; absent, blank, or duplicate headers return None."""
+    values = part.get_all("Content-ID", [])
+    if len(values) != 1:
+        return None
+    value = str(values[0]).strip()
+    if value.startswith("<") and value.endswith(">"):
+        value = value[1:-1].strip()
+    return value or None
+
+
+def attachment_parts(mail: EmailMessage) -> list[tuple[str, EmailMessage]]:
+    """Discover attachments and nested inline MIME media without entering attached emails.
+
+    Args:
+        mail: Parsed RFC822 message.
+
+    Returns:
+        Attachment IDs and MIME parts. Existing top-level attachments retain
+        numeric IDs. Additional parts use deterministic part-0.0-style MIME
+        paths, so discovering inline images never renumbers old attachments.
+        Body alternatives are not presented as attachments. Explicit attached
+        MIME containers and message/rfc822 parts remain single downloadable items.
+    """
+    result = [(str(index), part) for index, part in enumerate(mail.iter_attachments())]
+    known = {id(part) for _, part in result}
+    pending = [("0", mail)]
+    while pending:
+        path, part = pending.pop()
+        attached = part.is_attachment() or part.get_content_type() == "message/rfc822"
+        media = part.get_content_maintype() == "image" or (
+            part.get_content_maintype() not in {"text", "multipart"}
+            and (part.get_content_disposition() == "inline" or _content_id(part) is not None))
+        if (attached or media) and id(part) not in known:
+            result.append((f"part-{path}", part))
+            known.add(id(part))
+        if not attached and part.get_content_maintype() == "multipart":
+            children = list(part.iter_parts())
+            pending.extend((f"{path}.{index}", child)
+                           for index, child in reversed(list(enumerate(children))))
+    return result
+
+
+def attachment_content(part: EmailMessage, attachment_id: str,
+                       message_id: str) -> tuple[bytes, AttachmentMetadata]:
+    """Decode a MIME part into bytes and its public attachment metadata.
+
+    Args:
+        part: The attachment or inline MIME media to decode.
+        attachment_id: ID assigned by attachment_parts.
+        message_id: Complete account-scoped public message ID.
+
+    Returns:
+        Decoded bytes and typed metadata with the part's media type and resource URI.
+        A filename is descriptive only; it is never used as a local path.
+    """
+    data = attachment_bytes(part)
+    cid = _content_id(part)
+    inline = not part.is_attachment() and (
+        part.get_content_disposition() == "inline" or cid is not None
+        or part.get_content_maintype() == "image")
+    return data, AttachmentMetadata(
+        id=attachment_id, name=part.get_filename() or f"attachment-{attachment_id}",
+        content_type=part.get_content_type(), size=len(data),
+        uri=f"imap://attachments/{message_id}/{attachment_id}", inline=inline, content_id=cid,
+    )
+
+
+class MailMarkdown(MarkdownConverter):
+    """Render mail HTML with unique Content-ID references linked to MCP attachments.
+
+    Args:
+        attachments: Fetchable MIME parts belonging to the message.
+
+    Duplicate Content-IDs are not guessed. Remote and browser-local URLs are not
+    fetched, and no HTML scripts or remote resources are executed.
+    """
+
+    def __init__(self, attachments: list[AttachmentMetadata]):
+        """Build an unambiguous CID lookup without embedding any attachment bytes in text."""
+        super().__init__()
+        counts = Counter(item.content_id for item in attachments if item.content_id)
+        self.cid_uris = {item.content_id: item.uri for item in attachments
+                         if item.content_id and counts[item.content_id] == 1}
+
+    def _link(self, element, attribute: str) -> bool:
+        """Replace a uniquely resolved cid attribute with its resource URI; return whether changed."""
+        value = element.get(attribute, "")
+        if isinstance(value, str) and value[:4].lower() == "cid:":
+            cid = unquote(value[4:]).strip("<>")
+            if uri := self.cid_uris.get(cid):
+                element[attribute] = uri
+                return True
+        return False
+
+    def convert_img(self, el, text, parent_tags):
+        """Render an image reference, retaining resolved embedded images even inside table cells."""
+        if self._link(el, "src"):
+            parent_tags = parent_tags - {"_inline"}
+        return super().convert_img(el, text, parent_tags)
+
+    def convert_a(self, el, text, parent_tags):
+        """Render links to CID-backed files using the same attachment resource mapping."""
+        self._link(el, "href")
+        return super().convert_a(el, text, parent_tags)
 
 
 def parse_message(raw: bytes, key: MessageKey, summary: bool = False,
@@ -260,17 +370,14 @@ def parse_message(raw: bytes, key: MessageKey, summary: bool = False,
     for header in ["to", "cc"]:
         setattr(result, header, [EmailAddress(name=name, address=address)
             for name, address in getaddresses([str(value) for value in mail.get_all(header, [])])])
+    result.attachment_metadata = [attachment_content(part, identifier, message_id)[1]
+                                  for identifier, part in attachment_parts(mail)]
+    result.has_attachments = bool(result.attachment_metadata)
     body = mail.get_body(preferencelist=("plain", "html"))
     result.body = ""
     if body is not None:
         content = body.get_content()
-        result.body = markdownify(content) if body.get_content_type() == "text/html" else content
-    result.attachment_metadata = [AttachmentMetadata(
-        id=str(index), name=part.get_filename() or f"attachment-{index}",
-        content_type=part.get_content_type(), size=len(attachment_bytes(part)),
-        uri=f"imap://attachments/{message_id}/{index}",
-    ) for index, part in enumerate(mail.iter_attachments())]
-    result.has_attachments = bool(result.attachment_metadata)
+        result.body = MailMarkdown(result.attachment_metadata).convert(content) if body.get_content_type() == "text/html" else content
     return result
 
 
@@ -592,12 +699,9 @@ class Mailbox:
         """Return attachment bytes and metadata; raises KeyError for an absent attachment."""
         raw, key, _ = self.raw_message(message_id)
         mail = BytesParser(policy=policy.default).parsebytes(raw)
-        for index, part in enumerate(mail.iter_attachments()):
-            if str(index) == attachment_id:
-                data = attachment_bytes(part)
-                return data, AttachmentMetadata(id=attachment_id, name=part.get_filename() or f"attachment-{index}",
-                    content_type=part.get_content_type(), size=len(data),
-                    uri=f"imap://attachments/{decode_id(message_id).encode()}/{index}")
+        for identifier, part in attachment_parts(mail):
+            if identifier == attachment_id:
+                return attachment_content(part, identifier, decode_id(message_id).encode())
         raise KeyError("Attachment not found")
 
     def search(self, search: str, folder: str | None = None, limit: int = 10) -> list[Message]:
