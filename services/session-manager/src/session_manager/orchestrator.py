@@ -15,6 +15,7 @@ from openai import AsyncOpenAI
 
 from session_manager.binaries import BinaryStore
 from session_manager.event import Event
+from session_manager.llm_retry import ModelRequests, RetryPolicy
 from session_manager.mcp import (
     MCPConnection,
     mcp_content_to_openai,
@@ -91,6 +92,7 @@ When something happens that requires your attention (including a user interactio
   - `boot` — the platform just started up; payload includes `boot_time`, `model` (which version of you is running), and `session_id` (which session you're operating in). Sent once per session per process lifetime.
   - `continuity` — you've come back online after a gap; re-orient before doing anything else
   - `interrupted` — you were generating when new input arrived. The payload will include either `partial` (text you'd composed) or `pending` (tool calls you were about to make). Decide whether to continue that thread, pivot, or abandon.
+  - `model_error` - a previous model request failed before completing the turn. Its input and any completed tool results remain in history. Consider unfinished work together with the newest event; do not repeat completed actions just because the request failed. Any `partial` output is incomplete, and tool fragments inside it were not executed.
   - `reaction` — someone reacted to a message
 - `source` — which adapter delivered the event (`matrix`, `signal`, `time`, etc.). Platform-specific conventions — formatting, attachments, how people actually write on that platform — live in the tool docs for that source's MCP server. Read them.
 - `time` — when the event arrived, formatted as `YYYY-MM-DD HH:MM:SS TZ (Weekday)` (e.g. `2026-04-25 14:31:09 EDT (Friday)`). Trust it instead of guessing what time it is.
@@ -507,6 +509,19 @@ def _log_exception_tree(e: BaseException, depth: int = 0) -> None:
         _log_exception_tree(sub, depth + 1)
 
 
+class StreamResponseError(RuntimeError):
+    """A failed stream with unexecuted partial output available for history.
+
+    Args:
+        partial: Collected text, reasoning, and incomplete tool-call fragments.
+    """
+
+    def __init__(self, partial: dict[str, Any]):
+        """Retain partial output without presenting it as a completed response."""
+        super().__init__("Model stream failed; partial output was not executed")
+        self.partial = partial
+
+
 class _SessionState:
     """Per-session lock, cancellation event, and passive event queue."""
 
@@ -531,6 +546,7 @@ class SessionOrchestrator:
         model_config = config.get("model", {})
         self.model = model_config.get("name", "")
         self.call_config = model_config.get("config") or {}
+        self.model_requests = ModelRequests(RetryPolicy(**(model_config.get("retry") or {})))
 
         # Feed persisted reasoning back on assistant messages. On by default:
         # models trained with preserved thinking history stop reasoning when
@@ -543,6 +559,7 @@ class SessionOrchestrator:
         self.llm = AsyncOpenAI(
             default_headers=model_config.get("extra_headers"),
             timeout=300,
+            max_retries=0,
             http_client=_request_dump_client(dump_dir) if dump_dir else None,
         )
 
@@ -761,51 +778,62 @@ class SessionOrchestrator:
                 "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
             }
 
-        async for chunk in await self.llm.chat.completions.create(**call_kwargs, stream=True):
-            if cancel.is_set():
-                logger.info("Stream interrupted by new message")
-                return None, collected()
+        stream = await self.model_requests.run(
+            lambda: self.llm.chat.completions.create(**call_kwargs, stream=True), cancel)
+        if stream is None:
+            return None, collected()
+        try:
+            async for chunk in stream:
+                if cancel.is_set():
+                    logger.info("Stream interrupted by new message")
+                    return None, collected()
 
-            # Usage rides on the final chunk; some providers send it as a
-            # stand-alone chunk with no choices.
-            if getattr(chunk, "usage", None) is not None:
-                usage = chunk.usage
-            if not chunk.choices:
-                continue
+                # Usage rides on the final chunk; some providers send it as a
+                # stand-alone chunk with no choices.
+                if getattr(chunk, "usage", None) is not None:
+                    usage = chunk.usage
+                if not chunk.choices:
+                    continue
 
-            choice = chunk.choices[0]
-            delta = choice.delta
-            if getattr(choice, "finish_reason", None):
-                finish_reason = choice.finish_reason
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
 
-            content = getattr(delta, "content", None)
-            if isinstance(content, str) and content:
-                content_parts.append(content)
+                content = getattr(delta, "content", None)
+                if isinstance(content, str) and content:
+                    content_parts.append(content)
 
-            # Non-standard but universal across the reasoning models we
-            # target: the thinking text arrives on its own delta field.
-            reasoning = getattr(delta, "reasoning_content", None)
-            if isinstance(reasoning, str) and reasoning:
-                reasoning_deltas += 1
-                reasoning_parts.append(reasoning)
-            elif reasoning is not None:
-                # Present but not a non-empty string — worth seeing, since it
-                # distinguishes "field absent" from "field arrived empty".
-                reasoning_deltas += 1
+                # Non-standard but universal across the reasoning models we
+                # target: the thinking text arrives on its own delta field.
+                reasoning = getattr(delta, "reasoning_content", None)
+                if isinstance(reasoning, str) and reasoning:
+                    reasoning_deltas += 1
+                    reasoning_parts.append(reasoning)
+                elif reasoning is not None:
+                    # Present but not a non-empty string — worth seeing, since it
+                    # distinguishes "field absent" from "field arrived empty".
+                    reasoning_deltas += 1
 
-            for tc in getattr(delta, "tool_calls", None) or []:
-                idx = getattr(tc, "index", 0) or 0
-                slot = tool_calls_by_idx.setdefault(
-                    idx, {"id": None, "type": "function",
-                          "function": {"name": "", "arguments": ""}})
-                if getattr(tc, "id", None):
-                    slot["id"] = tc.id
-                fn = getattr(tc, "function", None)
-                if fn is not None:
-                    if getattr(fn, "name", None):
-                        slot["function"]["name"] = fn.name
-                    if getattr(fn, "arguments", None):
-                        slot["function"]["arguments"] += fn.arguments
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    idx = getattr(tc, "index", 0) or 0
+                    slot = tool_calls_by_idx.setdefault(
+                        idx, {"id": None, "type": "function",
+                              "function": {"name": "", "arguments": ""}})
+                    if getattr(tc, "id", None):
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["function"]["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["function"]["arguments"] += fn.arguments
+        except Exception as error:
+            raise StreamResponseError(collected()) from error
+        finally:
+            close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
 
         result = collected()
         result["usage"] = usage
@@ -878,7 +906,7 @@ class SessionOrchestrator:
 
         return result
 
-    async def _compact_session_if_needed(self, session_id: str) -> None:
+    async def _compact_session_if_needed(self, session_id: str, cancel: asyncio.Event | None = None) -> None:
         """If the last call's reported `input_tokens` exceeded the trigger,
         ask the agent to fold older context into a structured summary and
         write a new version of the session file.
@@ -907,17 +935,20 @@ class SessionOrchestrator:
         )
 
         try:
-            summary_text = await self._summarize(fold_messages, keep_messages)
+            summary_text = await self._summarize(fold_messages, keep_messages, cancel)
         except Exception as e:
             logger.error("compaction: summary call failed, leaving session as-is: %r", e)
             return
 
+        if summary_text is None:
+            return
         summary_msg = _developer_event("context_summary", content=summary_text)
         clean_keep = SessionManager.strip_usage_comments(keep_messages)
         new_path = self.session.bump_version(session_id, [summary_msg, *clean_keep])
         logger.info("compaction: wrote %s (%d msgs)", new_path.name, 1 + len(clean_keep))
 
-    async def _summarize(self, fold_messages: list[dict], keep_messages: list[dict]) -> str:
+    async def _summarize(self, fold_messages: list[dict], keep_messages: list[dict],
+                         cancel: asyncio.Event | None = None) -> str | None:
         """Run an LLM call asking the agent to summarize `fold_messages`.
 
         `keep_messages` is the recency window that will stay in context
@@ -934,6 +965,9 @@ class SessionOrchestrator:
         without history persistence (this call's outputs aren't appended to
         the session — only the final summary lands in the next version's
         first message).
+
+        Returns None when cancelled during model backoff. Other model failures
+        propagate after the configured retry budget, leaving history unchanged.
         """
         # The fold is flattened to plain messages rather than the structured
         # function_call/function_call_output shape. The fold is an arbitrary
@@ -992,7 +1026,10 @@ class SessionOrchestrator:
 
         for _ in range(self.max_tool_iterations):
             call_kwargs["messages"] = messages
-            response = await self.llm.chat.completions.create(**call_kwargs)
+            response = await self.model_requests.run(
+                lambda: self.llm.chat.completions.create(**call_kwargs), cancel)
+            if response is None:
+                return None
 
             msg = response.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None) or []
@@ -1054,7 +1091,7 @@ class SessionOrchestrator:
         # Compaction runs before history load: if the last call's reported
         # input_tokens exceeded the trigger, fold older context into a
         # summary and write a new versioned file.
-        await self._compact_session_if_needed(session_id)
+        await self._compact_session_if_needed(session_id, cancel)
 
         raw_history = self.session.load(session_id)
 
@@ -1101,6 +1138,12 @@ class SessionOrchestrator:
                 response, partial = await self._stream_response(call_kwargs, cancel)
             except Exception as e:
                 logger.error("LLM call failed: %s: %r", type(e).__name__, e, exc_info=True)
+                failure: dict[str, Any] = {"error_type": type(e).__name__}
+                if isinstance(e, StreamResponseError):
+                    failure["error_type"] = type(e.__cause__).__name__
+                    failure["partial"] = e.partial
+                all_new_messages.append(_developer_event("model_error", **failure))
+                self.session.append(session_id, all_new_messages)
                 return None
 
             # --- Interrupted mid-stream ---
