@@ -183,7 +183,7 @@ def test_resource_opaque_binary_raises(tmp_path):
     """A resource that's neither image nor text can't be inlined as model
     context — raise so the agent knows to use a tool that handles the URI."""
     store = BinaryStore(store_dir=tmp_path / "bins", retention_days=30)
-    block = _resource_block("mxc://srv/doc", b"%PDF-1.4 ...", "application/pdf")
+    block = _resource_block("mxc://srv/doc", b"opaque binary", "application/octet-stream")
     with pytest.raises(ValueError, match="Cannot inline"):
         mcp_content_to_openai([block], store=store)
     assert not list(store.store_dir.iterdir())
