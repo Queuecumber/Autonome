@@ -24,6 +24,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import METHOD_NOT_FOUND
 
 from session_manager.binaries import BinaryStore
+from session_manager.pdf import MAX_PDF_BYTES, render_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -241,13 +242,57 @@ def _exif_summary(data: bytes) -> dict | None:
     return out or None
 
 
+def is_pdf_resource(block) -> bool:
+    """Identify PDF blobs by declared MIME type, or signature when MIME is unspecified."""
+    if block.type != "resource":
+        return False
+    resource = getattr(block, "resource", None)
+    blob = getattr(resource, "blob", None)
+    if not isinstance(blob, str):
+        return False
+    mime = (getattr(resource, "mimeType", None) or "").split(";", 1)[0].strip().lower()
+    if mime == "application/pdf":
+        return True
+    if mime in ("", "application/octet-stream", "binary/octet-stream"):
+        try:
+            return base64.b64decode(blob[:32], validate=True).startswith(b"%PDF-")
+        except ValueError:
+            pass
+    return False
+
+
+def _pdf_content(resource) -> list[dict]:
+    """Return ordered PDF page images and source metadata, or a safe preview error.
+
+    The original URI remains the document reference; preview images are not saved
+    as replacement binaries. Page-count metadata explicitly marks truncation.
+    """
+    description = {"uri": str(resource.uri), "content_type": "application/pdf"}
+    try:
+        if len(resource.blob) > 4 * ((MAX_PDF_BYTES + 2) // 3):
+            raise ValueError("PDF exceeds the 25 MiB input limit")
+        try:
+            raw = base64.b64decode(resource.blob, validate=True)
+        except ValueError:
+            raise ValueError("Invalid base64 PDF content") from None
+        preview = render_pdf(raw)
+    except ValueError as error:
+        description["error"] = str(error)
+        return [{"type": "input_text", "text": json.dumps({"pdf": description})}]
+    description.update({"total_pages": preview.total_pages, "rendered_pages": len(preview.pages),
+                        "truncated": len(preview.pages) < preview.total_pages})
+    return [{"type": "input_text", "text": json.dumps({"pdf": description})}, *[
+        {"type": "input_image", "detail": "high", "image_url": f"data:image/jpeg;base64,{page}"}
+        for page in preview.pages]]
+
+
 def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None) -> list[dict]:
     """Convert MCP content blocks to OpenAI Responses API message content parts.
 
-    Every binary gets persisted to the BinaryStore and produces an input_text
-    part carrying the pointer JSON. Images additionally produce an input_image
-    part so the model can see the bytes, and an EXIF summary text part when
-    metadata is present.
+    Standalone binaries produce pointer metadata, with image content and EXIF
+    when available. Resource images retain their source URI without another
+    stored copy. PDF resources become bounded page-image previews with source
+    metadata. Call PDF conversion outside the event loop.
     """
     parts = []
     for block in content_blocks:
@@ -279,7 +324,9 @@ def mcp_content_to_openai(content_blocks: list, store: BinaryStore | None = None
             text = getattr(resource, "text", None)
             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
             if blob is not None:
-                if mime.startswith("image/"):
+                if is_pdf_resource(block):
+                    parts.extend(_pdf_content(resource))
+                elif mime.startswith("image/"):
                     raw = base64.b64decode(blob)
                     exif = _exif_summary(raw)
                     if exif:

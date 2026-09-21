@@ -17,6 +17,7 @@ from session_manager.binaries import BinaryStore
 from session_manager.event import Event
 from session_manager.mcp import (
     MCPConnection,
+    is_pdf_resource,
     mcp_content_to_openai,
     parse_server_spec,
     resolve_uri_args,
@@ -383,8 +384,10 @@ def _media_user_message(media_items: list[dict[str, Any]]) -> dict[str, Any] | N
     for msg in media_items:
         for part in msg.get("content") or []:
             if isinstance(part, dict) and part.get("type") == "input_image":
-                parts.append({"type": "image_url",
-                              "image_url": {"url": part["image_url"]}})
+                image = {"url": part["image_url"]}
+                if "detail" in part:
+                    image["detail"] = part["detail"]
+                parts.append({"type": "image_url", "image_url": image})
     if not parts:
         return None
     return {"role": "user", "content": parts}
@@ -721,7 +724,13 @@ class SessionOrchestrator:
             content_blocks = await conn.call_tool(name, args)
             logger.debug("  %s returned %d block(s): %s", name, len(content_blocks),
                          [getattr(b, "type", type(b).__name__) for b in content_blocks])
-            openai_parts = mcp_content_to_openai(content_blocks, store=self.binaries)
+            openai_parts = []
+            for block in content_blocks:
+                if is_pdf_resource(block):
+                    converted = await asyncio.to_thread(mcp_content_to_openai, [block], store=self.binaries)
+                else:
+                    converted = mcp_content_to_openai([block], store=self.binaries)
+                openai_parts.extend(converted)
         except Exception as e:
             logger.error("Tool %s failed: %s: %s", name, type(e).__name__, e, exc_info=True)
             return {"type": "function_call_output", "call_id": call_id,
