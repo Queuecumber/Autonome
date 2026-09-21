@@ -101,6 +101,65 @@ async def test_default_attempt_budget_and_exponential_cap(clock, caplog):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code, extra_headers", [
+    ("rate_limit_exceeded", {}),
+    ("insufficient_quota", {}),
+    ("rate_limit_exceeded", {"x-should-retry": "false"}),
+])
+async def test_429_headers_logged_even_when_not_retrying(clock, caplog, code, extra_headers):
+    """Capture bounded allowlisted response headers, including terminal 429s, without secrets."""
+    selected = {name: "10" for name in llm_retry.RATE_LIMIT_HEADERS}
+    selected.update({"retry-after": "not-a-delay\r\nFORGED\t\x1b", "x-request-id": "r" * 300,
+                     **extra_headers})
+    headers = {name.upper(): value for name, value in selected.items()}
+    headers.update({"Authorization": "PRIVATE_AUTH", "Set-Cookie": "PRIVATE_COOKIE",
+                    "X-Unlisted": "PRIVATE_UNKNOWN", "X-RateLimit-Secret": "PRIVATE_PREFIX_SECRET"})
+    error = failure(headers=headers, code=code, message="PRIVATE_ERROR_BODY")
+    error.request.headers["X-Request-ID"] = "PRIVATE_REQUEST_HEADER"
+    with pytest.raises(RateLimitError):
+        await ModelRequests(RetryPolicy(max_attempts=1)).run(AsyncMock(side_effect=error))
+    records = [record.getMessage() for record in caplog.records if "response_headers=" in record.getMessage()]
+    assert len(records) == 1
+    assert "status=429 attempt=1/1" in records[0]
+    assert json.loads(records[0].split("response_headers=", 1)[1]) == {
+        name: value[:256] for name, value in selected.items()}
+    assert not any(character in records[0] for character in ("\r", "\n", "\t", "\x1b"))
+    assert "PRIVATE_" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_headerless_429_logs_explicit_empty_dump(clock, caplog):
+    """Missing backoff headers remain observable when the message fallback succeeds."""
+    request = AsyncMock(side_effect=[failure(message="Your limit will reset in 10 seconds."), "ok"])
+    assert await ModelRequests(RetryPolicy()).run(request) == "ok"
+    assert "status=429 attempt=1/8 response_headers={}" in caplog.text
+    assert "source=reset-message" in caplog.text
+    assert clock.waits == [10]
+
+
+@pytest.mark.asyncio
+async def test_each_429_attempt_logs_its_own_headers(clock, caplog):
+    """Repeated failures capture changing headers, including the exhausted final attempt."""
+    errors = [failure(headers={"retry-after": str(value)}) for value in (10, 20)]
+    with pytest.raises(RateLimitError):
+        await ModelRequests(RetryPolicy(max_attempts=2)).run(AsyncMock(side_effect=errors))
+    records = [record.getMessage() for record in caplog.records if "response_headers=" in record.getMessage()]
+    assert len(records) == 2
+    assert 'attempt=1/2 response_headers={"retry-after": "10"}' in records[0]
+    assert 'attempt=2/2 response_headers={"retry-after": "20"}' in records[1]
+    assert clock.waits == [10]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [failure(500), APIConnectionError(request=httpx.Request("POST", "https://model.test"))])
+async def test_other_errors_do_not_dump_headers(clock, caplog, error):
+    """The extra diagnostic is scoped to rate limits, not unrelated failures or successes."""
+    request = AsyncMock(side_effect=[error, "ok"])
+    assert await ModelRequests(RetryPolicy()).run(request) == "ok"
+    assert "response_headers=" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_server_wait_is_not_capped_or_shortened(clock, monkeypatch):
     """Positive jitter never retries early, even when a server delay exceeds the fallback cap."""
     monkeypatch.setattr(llm_retry.random, "uniform", lambda low, high: high)

@@ -41,6 +41,18 @@ jitter. A server wait that exceeds the remaining budget is never shortened to
 send an early retry. Retry logs contain status, attempt, delay, and hint source,
 not provider error bodies.
 
+Every HTTP 429 also emits a `Model rate limit response` warning, including the
+last attempt and non-retryable 429s. Its `response_headers` JSON contains only
+allowlisted retry, rate-limit, response-date, and request/call-ID headers. This
+includes `retry-after`, `retry-after-ms`, `x-should-retry`, `ratelimit` and
+`ratelimit-policy`, the limit/remaining/reset fields (including `x-ratelimit-*`
+request/token variants), and `x-request-id`, `request-id`, `x-litellm-call-id`.
+Names are normalized to lowercase; each value is limited to 256 characters and
+JSON-escaped to keep the diagnostic on one log line. `{}` means none of the
+allowlisted headers reached the SDK. Request headers, cookies, authorization,
+unlisted response headers, and the error body are not included in this diagnostic.
+Logging is enabled by default and does not change retry decisions.
+
 One orchestrator shares a cooldown across its sessions and compaction requests.
 This does not coordinate separate pods or other applications sharing the same
 upstream account, nor does it recall requests already in flight. SDK automatic

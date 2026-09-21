@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+import json
 import logging
 import math
 import random
@@ -15,6 +16,14 @@ from openai import APIConnectionError, APIStatusError
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+RATE_LIMIT_HEADERS = (
+    "retry-after", "retry-after-ms", "x-should-retry", "date",
+    "ratelimit", "ratelimit-policy", "ratelimit-limit", "ratelimit-remaining", "ratelimit-reset",
+    "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset",
+    "x-ratelimit-limit-requests", "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests",
+    "x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens",
+    "x-request-id", "request-id", "x-litellm-call-id",
+)
 
 
 @dataclass(frozen=True)
@@ -169,6 +178,11 @@ class ModelRequests:
             try:
                 return await request()
             except (APIConnectionError, APIStatusError) as error:
+                if isinstance(error, APIStatusError) and error.status_code == 429:
+                    headers = {name: value[:256] for name in RATE_LIMIT_HEADERS
+                               if (value := error.response.headers.get(name)) is not None}
+                    logger.warning("Model rate limit response: status=429 attempt=%d/%d response_headers=%s",
+                                   attempts, self.policy.max_attempts, json.dumps(headers, sort_keys=True))
                 if not retryable(error):
                     raise
                 hint = retry_hint(error) if isinstance(error, APIStatusError) else None
