@@ -9,9 +9,12 @@ storage:
   sessions:     { size: 5Gi }
   binaries:     { size: 10Gi }
   workspace:    { size: 10Gi }
+  # Retained archive for upgrades from markdown memory; no service mounts it.
+  # New installs can set storage.memory=null to omit this legacy claim.
   memory:       { size: 1Gi }
   matrixCrypto: { size: 100Mi }
   time:         { size: 100Mi }
+  graph:        { size: 5Gi }
 
 # agent.yaml and PERSONALITY.md contents — typically supplied via
 # `helm install --set-file agent.config=agent.yaml --set-file agent.personality=PERSONALITY.md`
@@ -74,6 +77,23 @@ services:
   sessionManager: { image: { name: autonome-session-manager }, port: 5000 }
   matrixAdapter:  { image: { name: autonome-matrix-adapter },  port: 8200 }
   workspaceFsMcp: { image: { name: autonome-workspace-fs-mcp }, port: 8000 }
-  memoryMcp:      { image: { name: autonome-memory-mcp },      port: 8001 }
   systemMcp:      { image: { name: autonome-system-mcp },      port: 8002 }
   timeMcp:        { image: { name: autonome-time-mcp },        port: 8300 }
+  graphitiMcp:
+    image: { name: autonome-graphiti-mcp }
+    port: 8005
+    embedding:
+      model: ""
+      baseUrl: ""
+      provider: nvidia
+      dim: 0
+      timeoutSeconds: 20
+      minScore: 0.6
+      apiKey: ""
+      apiKeySecretRef:
+        name: ""
+        key: EMBEDDING_API_KEY
+  # The graph store behind graphiti-mcp. Embeddings are optional: unset, the
+  # service still records and traverses facts, and keyword search still works —
+  # only semantic search is disabled.
+  falkordb:       { image: falkordb/falkordb:latest,           port: 6379 }

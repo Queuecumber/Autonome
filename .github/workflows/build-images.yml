@@ -23,10 +23,10 @@ jobs:
           - session-manager
           - matrix-adapter
           - signal-adapter
-          - memory-mcp
           - workspace-fs-mcp
           - system-mcp
           - time-mcp
+          - graphiti-mcp
     steps:
       - uses: actions/checkout@v4
 
