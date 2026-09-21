@@ -325,6 +325,90 @@ async def test_retry_after_tools_does_not_reexecute_or_lose_results(orchestrator
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("after_tool", [False, True])
+@pytest.mark.parametrize("restart", [False, True])
+async def test_failed_turn_is_folded_into_next_event(orchestrator, clock, after_tool, restart):
+    """A new event includes failed work exactly once, including after a process restart."""
+    orchestrator.model_requests = ModelRequests(RetryPolicy(max_attempts=2))
+    tool = AsyncMock(return_value=({"type": "function_call_output", "call_id": "call-1", "output": "sent"}, []))
+    orchestrator._execute_tool_call = tool
+    responses = ([completed(tool=True)] if after_tool else []) + [throttled(), throttled()]
+    failed_requests = await bind_transport(orchestrator, *responses)
+    original = Event(text="original unfinished request", source="matrix", metadata={"room_id": "!original"})
+    assert await orchestrator.handle_event(original) is None
+    persisted = orchestrator.session.load("main")
+    original_context = next(item["content"] for item in persisted
+                            if item.get("role") == "developer" and '"room_id": "!original"' in item["content"])
+    assert len(failed_requests) == len(responses)
+
+    resumed = orchestrator
+    if restart:
+        resumed = SessionOrchestrator(orchestrator.config, orchestrator.session.store_dir)
+        resumed._execute_tool_call = tool
+    try:
+        requests = await bind_transport(resumed, completed(text="handled both"))
+        assert await resumed.handle_event(Event(text="new event", source="time", event_type="cron")) == "handled both"
+        assert len(requests) == 1
+        messages = requests[0]["messages"]
+        parts = [part["text"] for item in messages if item["role"] == "user"
+                 for part in item["content"] if part["type"] == "text"]
+        assert parts.count("original unfinished request") == 1
+        assert parts.count(original_context) == 1
+        assert parts.count("new event") == 1
+        assert parts.index("original unfinished request") < parts.index("new event")
+        errors = [json.loads(part) for part in parts if part.startswith('{"event": "model_error"')]
+        assert len(errors) == 1
+        assert errors[0]["error_type"] == "RateLimitError"
+        assert "Consider unfinished work together with the newest event" in messages[0]["content"]
+        calls = [call for item in messages for call in item.get("tool_calls", [])]
+        results = [item for item in messages if item["role"] == "tool"]
+        assert len(calls) == len(results) == int(after_tool)
+        if after_tool:
+            assert calls[0]["id"] == results[0]["tool_call_id"] == "call-1"
+            assert results[0]["content"] == "sent"
+        assert tool.await_count == int(after_tool)
+        history = resumed.session.load("main")
+        assert history[:len(persisted)] == persisted
+        assert sum(item.get("content") == "original unfinished request" for item in history) == 1
+        assert sum(item.get("content") == "new event" for item in history) == 1
+    finally:
+        if restart:
+            await resumed.llm.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("energy", ["active", "passive"])
+async def test_event_queued_during_failed_turn_includes_failed_context(orchestrator, clock, monkeypatch, energy):
+    """An event arriving during backoff drains with the failed turn, without a second trigger."""
+    orchestrator.model_requests = ModelRequests(RetryPolicy(max_attempts=2))
+    original_wait = orchestrator.model_requests._wait
+    queued = False
+
+    async def wait(seconds, cancel):
+        """Queue the follow-up while the original turn still holds its session lock."""
+        nonlocal queued
+        if not queued:
+            queued = True
+            await orchestrator.handle_event(Event(text="arrived during backoff", source="matrix", energy=energy))
+        return await original_wait(seconds, cancel)
+
+    monkeypatch.setattr(orchestrator.model_requests, "_wait", wait)
+    requests = await bind_transport(orchestrator, throttled(), throttled(), completed(text="handled queued event"))
+    await orchestrator.handle_event(Event(text="failed original", source="matrix"))
+    assert len(requests) == 3
+    assert requests[0] == requests[1]
+    parts = [part["text"] for item in requests[-1]["messages"] if item["role"] == "user"
+             for part in item["content"] if part["type"] == "text"]
+    assert parts.count("failed original") == 1
+    assert parts.count("arrived during backoff") == 1
+    assert any(part.startswith('{"event": "model_error"') for part in parts)
+    assert parts.index("failed original") < parts.index("arrived during backoff")
+    assert orchestrator.session.load("main")[-1]["content"] == "handled queued event"
+    state = orchestrator._get_session("main")
+    assert not state.pending_steer and not state.passive_queue
+
+
+@pytest.mark.asyncio
 async def test_compaction_retries_without_repeating_tools(orchestrator, clock):
     """Non-streaming summary calls use the same backoff and tool-once boundary."""
     tool = AsyncMock(return_value=({"type": "function_call_output", "call_id": "call-1", "output": "saved"}, []))

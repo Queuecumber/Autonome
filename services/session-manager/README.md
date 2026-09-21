@@ -55,6 +55,12 @@ executable tool call.
 
 If a normal turn ultimately fails, its input events, completed tool calls/results,
 and a safe error marker are persisted so the next turn retains what happened.
+The next event in the same session, including one queued during backoff, is
+processed together with that retained context. This also works after restarting
+session-manager with the same session volume. Failed input is not enqueued a
+second time, and completed tool calls are replayed only as history, not executed
+again. The agent is instructed to consider unfinished work alongside the new
+event rather than treating the failed turn as completed.
 There is no automatic durable rescheduling after the retry budget is exhausted,
 and pending in-memory work does not survive a process restart. Compaction failure
 leaves the existing history version intact.

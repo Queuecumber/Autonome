@@ -92,6 +92,7 @@ When something happens that requires your attention (including a user interactio
   - `boot` — the platform just started up; payload includes `boot_time`, `model` (which version of you is running), and `session_id` (which session you're operating in). Sent once per session per process lifetime.
   - `continuity` — you've come back online after a gap; re-orient before doing anything else
   - `interrupted` — you were generating when new input arrived. The payload will include either `partial` (text you'd composed) or `pending` (tool calls you were about to make). Decide whether to continue that thread, pivot, or abandon.
+  - `model_error` - a previous model request failed before completing the turn. Its input and any completed tool results remain in history. Consider unfinished work together with the newest event; do not repeat completed actions just because the request failed. Any `partial` output is incomplete, and tool fragments inside it were not executed.
   - `reaction` — someone reacted to a message
 - `source` — which adapter delivered the event (`matrix`, `signal`, `time`, etc.). Platform-specific conventions — formatting, attachments, how people actually write on that platform — live in the tool docs for that source's MCP server. Read them.
 - `time` — when the event arrived, formatted as `YYYY-MM-DD HH:MM:SS TZ (Weekday)` (e.g. `2026-04-25 14:31:09 EDT (Friday)`). Trust it instead of guessing what time it is.
