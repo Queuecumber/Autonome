@@ -151,7 +151,8 @@ async def resources_read(uri: str) -> list[EmbeddedResource]:
 
     Returns:
         The resource's content. Images come back so you can see them,
-        text comes back as text.
+        text comes back as text. PDF reads are rendered into ordered page images
+        for the model, up to ten pages, with total-page and truncation metadata.
 
     Raises:
         ValueError: If no MCP server is registered for the URI's scheme.
