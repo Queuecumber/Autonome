@@ -19,6 +19,10 @@ helm install <release> ./charts/autonome \
 
 `--set-file` injects the file contents into the chart's ConfigMap. Session-manager mounts them at `/app/agent.yaml` and `/app/PERSONALITY.md`.
 
+Model rate-limit/backoff policy is configured under `model.retry` in that
+`agent.yaml`; see [session-manager retry settings](../../services/session-manager/README.md#model-retries).
+Existing configurations use the default retry policy without changes.
+
 ## Secrets
 
 `secrets.create: true` (default) writes a Secret from the inline values (`openai.apiKey`, `matrix.password`, `system.searchApiKey`). Plain-text in values, so don't commit them — fine in private files.
