@@ -122,6 +122,22 @@ def test_keyword_search_filters_dates_flags_and_native_dedup(indexed):
     assert (len(protocol.searches), len(protocol.fetches)) == before
 
 
+def test_hit_location_itself_satisfies_date_and_unread_filters(indexed):
+    """Deduplication must not display an unmatching copy's folder or receipt timestamp."""
+    service, protocol = indexed
+    protocol.receipts["Archive", 434] = NOW - timedelta(days=10)
+    service.sync_once()
+    unread = service.search(MailQuery(subject="weekly", unread=True))
+    before = service.search(MailQuery(subject="weekly", before=NOW))
+    for result in (unread, before):
+        assert len(result.results) == 1
+        assert result.results[0].message.folder == "Archive"
+        assert result.results[0].message.received_at == NOW - timedelta(days=10)
+        assert result.results[0].folders == ["Archive", "INBOX"]
+    after = service.search(MailQuery(subject="weekly", after=NOW))
+    assert after.results[0].message.folder == "INBOX"
+
+
 def test_browse_uses_receipt_date_not_uid_and_paginates(indexed):
     """Recent low UIDs precede older re-imported high UIDs, without folder-copy duplication."""
     service, _ = indexed

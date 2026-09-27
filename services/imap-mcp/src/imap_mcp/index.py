@@ -592,8 +592,12 @@ class MailIndex:
             hits = []
             for identifier in ids:
                 summary = Message.model_validate_json(self.db.execute("SELECT summary FROM mail WHERE id=?", (identifier,)).fetchone()[0])
-                locations = self.db.execute("SELECT folder,received FROM locations WHERE message=? ORDER BY received DESC,folder", (identifier,)).fetchall()
-                selected = next((row for row in locations if query.folder is None or row["folder"] == query.folder), locations[0])
+                locations = self.db.execute("SELECT folder,received,unread FROM locations WHERE message=? ORDER BY received DESC,folder", (identifier,)).fetchall()
+                selected = next(row for row in locations
+                    if (query.folder is None or row["folder"] == query.folder)
+                    and (query.unread is None or row["unread"] == int(query.unread))
+                    and (query.after is None or (row["received"] is not None and row["received"] >= query.after.timestamp()))
+                    and (query.before is None or (row["received"] is not None and row["received"] < query.before.timestamp())))
                 summary.folder = selected["folder"]
                 summary.received_at = datetime.fromtimestamp(selected["received"], timezone.utc) if selected["received"] is not None else None
                 hits.append(SearchHit(message=summary, folders=sorted({row["folder"] for row in locations}),
