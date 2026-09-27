@@ -67,6 +67,31 @@ spec:
             - { name: IMAP_POLL_SECONDS, value: {{ $svc.pollSeconds | quote }} }
             - { name: IMAP_MAX_MESSAGE_BYTES, value: {{ $svc.maxMessageBytes | int | quote }} }
             - { name: IMAP_STATE_PATH, value: /data/imap.sqlite3 }
+            - { name: IMAP_INDEX_ENABLED, value: {{ $svc.index.enabled | quote }} }
+            {{- if $svc.index.enabled }}
+            - { name: IMAP_INDEX_DIR, value: /index }
+            - { name: IMAP_INDEX_SYNC_SECONDS, value: {{ $svc.index.syncSeconds | quote }} }
+            - { name: IMAP_INDEX_HEADER_BATCH, value: {{ $svc.index.headerBatch | int | quote }} }
+            - { name: IMAP_INDEX_BODY_BATCH, value: {{ $svc.index.bodyBatch | int | quote }} }
+            - { name: IMAP_INDEX_FLAG_BATCH, value: {{ $svc.index.flagBatch | int | quote }} }
+            - { name: IMAP_INDEX_EMBEDDING_SECONDS, value: {{ $svc.index.embeddingSeconds | quote }} }
+            - { name: IMAP_INDEX_JOURNAL_MODE, value: {{ $svc.index.journalMode | quote }} }
+            {{- $embedding := $svc.index.embedding }}
+            - { name: IMAP_EMBEDDING_MODEL, value: {{ $embedding.model | quote }} }
+            {{- if $embedding.model }}
+            - { name: IMAP_EMBEDDING_BASE_URL, value: {{ required "services.imapMcp.index.embedding.baseUrl is required when embedding is enabled" $embedding.baseUrl | quote }} }
+            - { name: IMAP_EMBEDDING_PROVIDER, value: {{ $embedding.provider | quote }} }
+            - { name: IMAP_EMBEDDING_DIM, value: {{ $embedding.dim | int | quote }} }
+            - { name: IMAP_EMBEDDING_TIMEOUT_SECONDS, value: {{ $embedding.timeoutSeconds | quote }} }
+            - { name: IMAP_EMBEDDING_MIN_SCORE, value: {{ $embedding.minScore | quote }} }
+            - name: IMAP_EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $embedding.apiKeySecretRef.name | default (include "autonome.secretName" $) | quote }}
+                  key: {{ required "IMAP embedding apiKeySecretRef.key is required" $embedding.apiKeySecretRef.key | quote }}
+                  optional: false
+            {{- end }}
+            {{- end }}
             {{- else }}
             - { name: SMTP_FROM, value: {{ required "services.smtpMcp.from is required" $svc.from | quote }} }
             - { name: SMTP_ALLOWED_RECIPIENTS, value: {{ $svc.allowedRecipients | toJson | quote }} }
@@ -76,6 +101,9 @@ spec:
           {{- if eq $kind "imap" }}
           volumeMounts:
             - { name: state, mountPath: /data }
+            {{- if $svc.index.enabled }}
+            - { name: index, mountPath: /index }
+            {{- end }}
           {{- end }}
           readinessProbe:
             tcpSocket: { port: {{ $svc.port }} }
@@ -90,6 +118,19 @@ spec:
       {{- if eq $kind "imap" }}
       volumes:
         - { name: state, persistentVolumeClaim: { claimName: {{ $.Release.Name }}-imap } }
+        {{- if $svc.index.enabled }}
+        {{- if and $svc.index.storage.existingClaim (not $svc.index.storage.persistent) }}
+        {{- fail "IMAP index existingClaim requires storage.persistent=true" }}
+        {{- end }}
+        - name: index
+          {{- if $svc.index.storage.persistent }}
+          persistentVolumeClaim:
+            claimName: {{ $svc.index.storage.existingClaim | default (printf "%s-imap-index" $.Release.Name) | quote }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ $svc.index.storage.size | quote }}
+          {{- end }}
+        {{- end }}
       {{- end }}
 ---
 apiVersion: v1
@@ -119,6 +160,19 @@ spec:
   {{- with $.Values.storage.storageClass }}
   storageClassName: {{ . | quote }}
   {{- end }}
+{{- if and $svc.index.enabled $svc.index.storage.persistent (not $svc.index.storage.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $.Release.Name }}-imap-index
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $svc.index.storage.size }}
+  storageClassName: {{ required "IMAP index persistence requires an explicit local/block storageClass or existingClaim" $svc.index.storage.storageClass | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

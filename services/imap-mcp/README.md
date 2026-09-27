@@ -7,15 +7,29 @@ agent-side inbox checks. SMTP is a separate, explicitly invoked service.
 ## Tools
 
 - `list_folders()` returns selectable, case-sensitive folder names.
-- `search_mail(search, folder=null, limit=10)` accepts IMAP criteria, not KQL.
+- `search_mail(query="", folder=null, sender=null, recipient=null, subject=null,
+  after=null, before=null, unread=null, mode="hybrid", limit=10, offset=0)` searches
+  the local index. It returns typed hits, actual search mode, `next_offset`,
+  coverage/freshness, and warnings. It does not issue IMAP SEARCH requests.
+- `index_status()` reports header/body/embedding backfill and stale/error state.
+- `search_server(search, folder=null, limit=10)` accepts raw IMAP criteria, not KQL.
+  This is the explicit, potentially slow live-server escape hatch.
   Omit `folder` or set it to null to search all selectable folders, including
   Archive, Spam, and Trash when exposed by the server. An explicit folder such
   as `INBOX` narrows the search. Results contain headers, not bodies or attachment
   claims. The total limit is 1..100, applied after sorting by server receipt time
   (`INTERNALDATE`) across all selected folders, not by UID or folder order.
-- `get_mail(message_id)` returns the body, recipients, and attachment metadata.
+- `get_mail(message_id, refresh=false)` returns the body, recipients, and attachment
+  metadata. Indexed bodies include `cached`, `as_of`, and `stale`; `refresh=true`
+  forces a live read. Uncached mail also uses the live backend.
 - `get_attachment(message_id, attachment_id)` returns an embedded binary resource.
   The same bytes are available at `imap://attachments/{message_id}/{attachment_id}`.
+
+**API change:** the old `search_mail(search="SUBJECT ...")` call is now
+`search_server(search="SUBJECT ...")`. Local search uses literal text and structured
+filters, not IMAP syntax. Reload the MCP tool schema/instructions after deployment.
+See [local indexing and hybrid search](INDEX.md) for storage, embedding opt-in,
+coverage semantics, and examples. The IMAP server remains authoritative.
 
 ## Inline Images
 
@@ -92,7 +106,7 @@ Losing the cache does not change native IDs; it makes their next lookup cold.
 Preserve the state PVC because the same file also contains notification checkpoints
 and the outbox, which are not disposable.
 
-A normal native-ID read validates a cached folder/epoch/UID and checks the native
+A live native-ID read validates a cached folder/epoch/UID and checks the native
 identifier before and after fetching the body. If a location is stale, EMAILID
 uses standard per-folder `SEARCH EMAILID`. Provider recovery enumerates selectable
 folder UIDs and reads only bounded `BODY.PEEK[HEADER.FIELDS (X-PM-INTERNAL-ID)]`
@@ -112,12 +126,18 @@ Recovery also considers unwatched folders. It does not move mail, change read
 flags, replay historical notifications, or advance notification checkpoints.
 Network/protocol failures propagate instead of being reported as missing mail.
 Cache size grows with observed metadata; provision the existing state PVC for the
-mailbox size. Only identifiers and locations are added, not message bodies.
+mailbox size. Only identifiers and locations are added to that existing state file,
+not message bodies. The new full-text/body/vector index is a separate, rebuildable
+database; bulk indexing does not fill notification state with historical locations.
+Requested live reads can warm their lookup hints from the bulk index, and still
+validate those hints against IMAP before returning original bytes.
+
+### Live Search Ordering
 
 Search summaries and full details include `folder` and `received_at`. The existing
 `date_time` field is still the sender's Date header, not the sorting timestamp.
 Missing/invalid receipt dates sort last; folder and UID only break ties.
-Copies exposed in multiple folders remain separate mailbox entries, so `All Mail`
+For `search_server`, copies in multiple folders remain separate entries, so `All Mail`
 and label folders can yield duplicates of the same underlying email.
 
 The implementation works without IMAP SORT support, including Proton Bridge:
@@ -128,9 +148,10 @@ cannot push newer low-UID messages below the result cap. It never fetches messag
 bodies or attachments merely to sort search results. A folder epoch change during
 the search raises a retryable error; concurrent removals can shorten the result.
 
-A capped list is not a full mailbox audit. Use narrower criteria or disjoint date
-ranges when looking beyond the returned results; there is no pagination cursor in
-this API. Search remains independent of notification cutoffs and watch folders.
+A capped live-server list is not a full mailbox audit. Use narrower criteria or
+disjoint date ranges when looking beyond `search_server` results. Local search has
+offset pagination and groups native-ID copies across folders. Both paths remain
+independent of notification cutoffs and watch folders.
 
 ## Push Events
 
@@ -223,6 +244,21 @@ and `MAILCAL_MCP_*` variables are not retained.
 | `IMAP_TIMEOUT_SECONDS` | `20` | IMAP connection/socket timeout |
 | `IMAP_MAX_MESSAGE_BYTES` | `26214400` | Maximum full mail size for detail/attachment reads |
 | `IMAP_STATE_PATH` | `/data/imap.sqlite3` | Persistent checkpoints, outbox, and native-ID location cache |
+| `IMAP_INDEX_ENABLED` | `true` | Local search and background indexing |
+| `IMAP_INDEX_DIR` | `/tmp/imap-index` | Separate derived index directory; chart mounts `/index` |
+| `IMAP_INDEX_SYNC_SECONDS` | `15` | Delay between bounded indexing sweeps; IDLE can wake earlier |
+| `IMAP_INDEX_HEADER_BATCH` | `100` | New headers per folder per sweep |
+| `IMAP_INDEX_BODY_BATCH` | `10` | Bodies per sweep, also bounded by the message-byte limit in aggregate |
+| `IMAP_INDEX_FLAG_BATCH` | `1000` | Existing flags refreshed per folder per sweep |
+| `IMAP_INDEX_JOURNAL_MODE` | `DELETE` | WAL is only suitable for local/block-backed storage |
+| `IMAP_INDEX_EMBEDDING_SECONDS` | `5` | Delay between batches of up to 16 embeddings |
+| `IMAP_EMBEDDING_MODEL` | empty | Explicit opt-in; no embedding requests when unset |
+| `IMAP_EMBEDDING_BASE_URL` | empty | Required explicit HTTP(S) embedding endpoint when enabled |
+| `IMAP_EMBEDDING_API_KEY` | empty | Embedding-provider credential, separate from IMAP login |
+| `IMAP_EMBEDDING_PROVIDER` | `nvidia` | NVIDIA query/passage encoding, or generic openai |
+| `IMAP_EMBEDDING_DIM` | `0` | Native dimensions; positive values are requested and validated |
+| `IMAP_EMBEDDING_TIMEOUT_SECONDS` | `20` | Per-request embedding timeout |
+| `IMAP_EMBEDDING_MIN_SCORE` | `0.5` | Minimum cosine similarity for semantic candidates |
 
 TLS certificate validation is enabled, including STARTTLS before login. Plaintext
 `imap://` exists only for trusted in-cluster relays such as a co-located Proton Mail

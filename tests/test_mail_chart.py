@@ -109,3 +109,70 @@ def test_imap_native_identity_settings_reach_the_adapter(render):
     values = {item["name"]: item.get("value") for item in env}
     assert values["IMAP_ID_PROVIDER"] == "proton"
     assert values["IMAP_LOOKUP_MAX_MESSAGES"] == "50"
+
+
+def test_index_defaults_do_not_put_new_database_on_notification_pvc(render):
+    """Default indexing uses a bounded pod-local directory even when global storage is NFS."""
+    objects = resources(render({**configured("imap"), "storage": {"storageClass": "nfs"}}))
+    pod = deployment(objects, "imap")["spec"]["template"]["spec"]
+    volumes = {volume["name"]: volume for volume in pod["volumes"]}
+    assert volumes["index"]["emptyDir"] == {"sizeLimit": "5Gi"}
+    assert volumes["state"]["persistentVolumeClaim"]["claimName"] == "embedding-test-imap"
+    env = {item["name"]: item.get("value") for item in pod["containers"][0]["env"]}
+    assert env["IMAP_INDEX_DIR"] == "/index" and env["IMAP_INDEX_JOURNAL_MODE"] == "DELETE"
+    assert env["IMAP_INDEX_ENABLED"] == "true" and env["IMAP_EMBEDDING_MODEL"] == ""
+    assert "IMAP_EMBEDDING_API_KEY" not in env
+
+
+@pytest.mark.parametrize("storage", [
+    {"persistent": True, "storageClass": "local-block", "size": "8Gi"},
+    {"persistent": True, "existingClaim": "mail-search"},
+])
+def test_index_persistence_is_separate_and_explicit(render, storage):
+    """A dedicated block/local claim can preserve index progress without resizing event state."""
+    objects = resources(render(configured("imap", index={"storage": storage})))
+    pod = deployment(objects, "imap")["spec"]["template"]["spec"]
+    volume = next(item for item in pod["volumes"] if item["name"] == "index")
+    assert volume["persistentVolumeClaim"]["claimName"] == storage.get("existingClaim", "embedding-test-imap-index")
+    claims = [item for item in objects if item["kind"] == "PersistentVolumeClaim"
+              and item["metadata"]["name"] == "embedding-test-imap-index"]
+    if "existingClaim" in storage:
+        assert not claims
+    else:
+        assert claims[0]["spec"]["storageClassName"] == "local-block"
+        assert claims[0]["spec"]["resources"]["requests"]["storage"] == "8Gi"
+
+
+def test_index_embedding_settings_and_secret_references(render):
+    """NVIDIA encoding and operator-selected endpoint/model credentials reach only the IMAP pod."""
+    config = {"model": "nvidia/nvidia/nemotron-3-embed-1b", "baseUrl": "https://embedding.test/v1",
+              "provider": "nvidia", "dim": 2048, "minScore": 0.6,
+              "apiKeySecretRef": {"name": "embedding-secret", "key": "KEY"}}
+    objects = resources(render(configured("imap", index={"embedding": config})))
+    env = {item["name"]: item for item in deployment(objects, "imap")["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["IMAP_EMBEDDING_MODEL"]["value"] == config["model"]
+    assert env["IMAP_EMBEDDING_DIM"]["value"] == "2048"
+    assert env["IMAP_EMBEDDING_API_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "name": "embedding-secret", "key": "KEY", "optional": False}
+
+
+def test_disabling_index_omits_index_storage_and_embedding_credentials(render):
+    """Live server search remains deployable without the optional local index worker."""
+    objects = resources(render(configured("imap", index={"enabled": False})))
+    pod = deployment(objects, "imap")["spec"]["template"]["spec"]
+    assert [item["name"] for item in pod["volumes"]] == ["state"]
+    env = {item["name"]: item for item in pod["containers"][0]["env"]}
+    assert env["IMAP_INDEX_ENABLED"]["value"] == "false"
+    assert "IMAP_INDEX_DIR" not in env and "IMAP_EMBEDDING_API_KEY" not in env
+
+
+@pytest.mark.parametrize("change", [
+    {"syncSeconds": 0}, {"headerBatch": 0}, {"bodyBatch": 2001}, {"flagBatch": 1.5},
+    {"journalMode": "unsafe"}, {"embeddingSeconds": 0},
+    {"storage": {"persistent": True}}, {"storage": {"existingClaim": "mail"}},
+    {"embedding": {"model": "m"}}, {"embedding": {"dim": -1}},
+    {"embedding": {"provider": "bad"}}, {"embedding": {"minScore": 2}},
+])
+def test_invalid_index_chart_configuration_is_rejected(render, change):
+    """Unsafe persistence defaults, typos, and invalid limits fail before deployment."""
+    assert render(configured("imap", index=change)).returncode != 0

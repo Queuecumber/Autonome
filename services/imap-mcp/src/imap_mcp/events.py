@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from typing import Callable
 
 import httpx
 from imapclient import IMAPClient
@@ -126,18 +127,21 @@ class Monitor:
         poll_seconds: Fallback interval only for servers without IDLE.
         retry_seconds: Delay after connection/authentication/scan failures.
         energy: Passive by default; active preempts the agent's current turn.
+        on_change: Optional nonblocking index wakeup hint; never emits historical notifications.
 
     Raises:
         ValueError: For invalid energy or intervals.
     """
     def __init__(self, mailbox: Mailbox, store: EventStore, session_id: str = "",
-                 poll_seconds: float = 60, retry_seconds: float = 5, energy: str = "passive"):
+                 poll_seconds: float = 60, retry_seconds: float = 5, energy: str = "passive",
+                 on_change: Callable[[], None] | None = None):
         """Configure workers without opening IMAP or HTTP connections."""
         if energy not in {"passive", "active"} or min(poll_seconds, retry_seconds) <= 0:
             raise ValueError("Invalid IMAP event energy or intervals")
         self.mailbox, self.store = mailbox, store
         self.session_id, self.energy = session_id, energy
         self.poll_seconds, self.retry_seconds = poll_seconds, retry_seconds
+        self.on_change = on_change
         self.stop = threading.Event()
         for folder in mailbox.settings.folders:
             self.notification_floor(folder)
@@ -221,6 +225,8 @@ class Monitor:
                         logger.warning("IMAP IDLE unavailable; using adapter-side polling")
                     while not self.stop.is_set():
                         self.scan(client, folder, validity, baseline, capabilities)
+                        if self.on_change is not None:
+                            self.on_change()
                         self.wait_for_change(client, idle)
             except Exception as error:
                 logger.warning("IMAP watcher reconnecting after %s", type(error).__name__)

@@ -98,6 +98,29 @@ services:
     timeoutSeconds: 20
     maxMessageBytes: 26214400
     stateStorage: { size: 100Mi }
+    index:
+      enabled: true
+      syncSeconds: 15
+      headerBatch: 100
+      bodyBatch: 10
+      flagBatch: 1000
+      embeddingSeconds: 5
+      journalMode: DELETE
+      # Pod-local by default: the notification PVC may be NFS-backed.
+      # Enable persistence only with a separate local/block-backed claim.
+      storage:
+        persistent: false
+        existingClaim: ""
+        storageClass: ""
+        size: 5Gi
+      embedding:
+        model: ""
+        baseUrl: ""
+        provider: nvidia
+        dim: 0
+        timeoutSeconds: 20
+        minScore: 0.5
+        apiKeySecretRef: { name: "", key: OPENAI_API_KEY }
   smtpMcp:
     enabled: false
     image: { name: autonome-smtp-mcp }
