@@ -80,3 +80,58 @@ leaves the existing history version intact.
 For Helm, continue passing `agent.yaml` through `--set-file agent.config=...`.
 Restart session-manager after updating its image or configuration; MCP servers
 and channel adapters do not need restarting for this change.
+
+## Mid-Turn Context Recovery
+
+Normal compaction still runs before a turn. Between tool rounds, session-manager
+also checks the latest provider-reported prompt usage against
+`session.compaction_trigger_tokens`. A known context-window HTTP 400/413 rejection
+can trigger emergency compaction even when the previous usage was below that
+threshold or the provider omitted usage. Other invalid requests do not compact,
+and the ordinary retry layer does not blindly retry the same oversized payload.
+
+Before compacting, input events and all completed current-turn calls/results are
+appended once to the original session version. Recovery uses a separate tool-free
+summarization request: it cannot execute tools, send messages, or save memories.
+The continuation resumes the existing tool loop with a smaller context rather
+than restarting the task or replaying completed actions.
+
+Recovery preserves complete tool-call/result batches and event metadata/text
+pairs in its recent tail. Original event-routing metadata is also retained verbatim
+when it fits a 16,000-character bound, so summary generation need not reconstruct
+room/recipient identifiers. Oversized routing metadata is explicitly marked omitted.
+An oversized latest exchange is summarized as a whole,
+not split into invalid orphaned tool messages. A provider rejection can also force
+summarization of a transcript below the normal tail budget. Original full records remain in
+the previous on-disk version. The new active version is published by atomic rename
+only after serialization, writing, and summary validation succeed. Summary/write
+failure leaves the original transcript available, including completed work.
+
+Bounds per turn:
+
+- At most two compaction attempts, including a proactive attempt between rounds.
+- Verbatim tail budgets of 64,000 then 16,000 JSON characters. These are payload
+  bounds, not an exact tokenizer count for arbitrary provider models.
+- Recovery summaries consume transcript fragments of at most 64,000 characters,
+  shrinking to as little as 1,024 if the provider rejects a summary request too.
+- At most 32 logical summary requests per attempt; each uses the normal transient
+  request retry policy and cooperatively observes cancellation.
+- Summary output allowance is at most 8,192 tokens, respecting a smaller configured
+  output allowance. Empty, oversized, truncated, filtered, or tool-calling responses
+  cannot become a checkpoint.
+
+Transient images are not put into textual summaries or saved as base64 in the new
+history. Recovery retains the most recent image batch when possible and explicitly
+records omitted image counts in a `context_recovered` event. A stronger recovery,
+or image-only overflow with no smaller usable batch, can omit all transient images;
+the agent is told to fetch only needed resources/pages again rather than assume
+those images were read. This does not add PDF page-range controls.
+
+The original system instructions, available tools, and normal generation output
+budget are not silently reduced. If those fixed inputs alone cannot fit, the
+summary provider fails, or recovery cannot produce smaller input within its limits,
+the turn ends with a persisted `model_error` marker. Retained work joins the next
+event as usual. No hard provider-window guarantee is inferred from character counts.
+
+This needs only an updated session-manager image and restart. No session-volume
+migration or adapter/MCP restart is required.

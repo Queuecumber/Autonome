@@ -11,8 +11,10 @@ the model, not a char-count heuristic.
 """
 
 import json
+import os
 import re
 from pathlib import Path
+import tempfile
 from typing import Any
 
 
@@ -78,13 +80,25 @@ class SessionManager:
 
         Previous versions are kept on disk as audit trail. The new version
         becomes the active file for subsequent `load` / `append` calls.
+        Publication is atomic: serialization/write failures leave the previous
+        version active. Filesystem and serialization errors propagate to the caller.
         """
         versions = self._versioned_files(session_id)
         next_n = (versions[-1][0] + 1) if versions else 0
         new_path = self.store_dir / f"{self._safe_id(session_id)}.{next_n}.jsonl"
-        with new_path.open("w") as f:
-            for msg in messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.store_dir,
+                                             prefix=".compaction-", suffix=".tmp", delete=False) as f:
+                temporary = Path(f.name)
+                for msg in messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, new_path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return new_path
 
     # ── compaction support ───────────────────────────────────
