@@ -89,6 +89,8 @@ async def transport(orch, handle):
 async def test_overflow_mid_tool_round_compacts_and_resumes_once(orchestrator, large_latest_result):
     """Completed actions run once; both historical growth and a giant latest result are recoverable."""
     orch = orchestrator
+    orch.openai_tools = [{"name": "synthetic_action", "description": "Run a synthetic action",
+                          "parameters": {"type": "object", "properties": {}}}]
     if not large_latest_result:
         orch.session.append("main", [{"role": "user", "content": "OLDER_CONTEXT " * 8000},
                                      {"role": "assistant", "content": "old answer"}])
@@ -114,6 +116,8 @@ async def test_overflow_mid_tool_round_compacts_and_resumes_once(orchestrator, l
     await transport(orch, handle)
     assert await orch.handle_event(Event(text="Do this once", metadata={"room_id": "!synthetic"})) == "finished"
     assert tool.await_count == 1 and len(main) == 3 and summaries
+    assert main[0]["tools"] == main[1]["tools"] == main[2]["tools"]
+    assert main[-1]["tools"][0]["function"]["name"] == "synthetic_action"
     assert len(json.dumps(main[-1])) < len(json.dumps(main[-2]))
     assert "!synthetic" in json.dumps(main[-1])
     old_path = orch.session.store_dir / "main.0.jsonl"
