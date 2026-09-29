@@ -2,7 +2,7 @@
 
 Compaction is triggered when the most recent `usage` comment's
 `input_tokens` exceeds `compaction_trigger_tokens`. The orchestrator
-asks the agent (via a no-tools LLM call) to produce a structured
+asks the agent (with its normal prompt and tools) to produce a structured
 summary of the older context, then writes a new versioned session
 file with the summary at the top followed by the recency window.
 """
@@ -94,7 +94,7 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     # Walking back, the 400 delta alone reaches recency=200 — split after
     # the usage just before the latest content block.
     orch.session.append("main", [
-        {"role": "user", "content": "very old"},                            # 0
+        {"role": "user", "content": "very old " * 50},                       # 0
         {"type": "comment", "kind": "usage", "input_tokens": 100},          # 1
         {"role": "user", "content": "old"},                                  # 2
         {"type": "comment", "kind": "usage", "input_tokens": 300},          # 3
@@ -155,7 +155,7 @@ async def test_compaction_runs_summary_and_writes_new_version(tmp_path):
     # Fold messages ride as flattened items. Comments and reasoning are
     # filtered out.
     fold_msgs = input_items[2:-2]
-    assert {"role": "user", "content": "very old"} in fold_msgs
+    assert {"role": "user", "content": "very old " * 50} in fold_msgs
     assert all(m["role"] in ("user", "assistant") for m in fold_msgs)
     assert {"role": "user", "content": "new"} not in fold_msgs
     assert all(
