@@ -1,9 +1,12 @@
 # PDF Image Content
 
 When an MCP tool returns a PDF binary resource, including an attachment fetched
-through `resources_read`, session-manager renders its pages into image content
-for the model. This follows the existing attachment flow: receiving an event
-containing a resource URI does not itself download the attachment.
+through `resources_read` or a PDF downloaded with system-mcp's `web_fetch`,
+session-manager renders its pages into image content for the model. `web_fetch`
+returns the PDF bytes as an embedded MCP resource with the final response URL
+as its URI; `max_chars` applies only to text responses, not PDF downloads.
+This follows the existing attachment flow: receiving an event containing a
+resource URI does not itself download the attachment.
 
 Declared `application/pdf` resources are supported, including MIME parameters.
 Resources with missing or generic binary MIME types are also recognized when
@@ -19,7 +22,8 @@ image inputs.
 
 Limits per document:
 
-- 25 MiB input PDF.
+- 25 MiB input PDF. `web_fetch` also rejects PDF responses exceeding 25 MiB
+  rather than returning a partial document.
 - First 10 pages maximum.
 - 10 MiB total JPEG bytes, keeping complete pages only.
 - 20-second renderer timeout, with a 15-second CPU limit and 512 MiB address-space
@@ -42,5 +46,8 @@ Generated images are sent in the current turn, not persisted as base64 in sessio
 history. The original URI and preview metadata remain in history so the document
 can be fetched again through its owning MCP.
 
-Deploy the updated session-manager image and restart session-manager only.
-No Helm values, adapter changes, or source MCP changes are required.
+Deploy the updated session-manager image and restart session-manager for PDF
+resource rendering. PDF URLs fetched through `web_fetch` additionally require
+the updated system-mcp image and a system-mcp restart; older system-mcp versions
+return decoded, possibly truncated PDF bytes as text. No Helm values or adapter
+changes are required.
