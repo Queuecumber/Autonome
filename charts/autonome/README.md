@@ -315,6 +315,16 @@ Keep the IMAP deployment at one replica, with its Recreate strategy and persiste
 `<release>-imap` PVC, to retain checkpoints and pending events. The PVC is only
 created when IMAP is enabled. SMTP requires no additional volume.
 
+Local IMAP search is enabled by default and uses a separate 5 GiB pod-local index;
+pod replacement rebuilds it. For persistence, set `services.imapMcp.index.storage`
+to an explicit local/block-backed storage class or existing claim, not the NFS
+notification PVC. Optional NVIDIA embeddings are configured under
+`services.imapMcp.index.embedding` and are disabled until a model and endpoint are
+set. See [index storage, search API, and embedding configuration](../../services/imap-mcp/INDEX.md).
+The old IMAP-criteria search tool is now `search_server`; `search_mail` uses local
+text/structured filters and returns coverage metadata. Reconnect session-manager
+after upgrading to load the new tool schemas.
+
 Add whichever services are enabled to the existing agent configuration:
 
 ```yaml

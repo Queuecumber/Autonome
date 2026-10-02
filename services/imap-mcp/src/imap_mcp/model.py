@@ -448,13 +448,15 @@ class Mailbox:
         return IdentityCapabilities(emailid=emailid, proton=proton)
 
     def observe(self, location: MessageKey, record: dict,
-                capabilities: IdentityCapabilities) -> NativeKey | None:
+                capabilities: IdentityCapabilities, *, cache: bool = True) -> NativeKey | None:
         """Cache fetched native fields and return the highest-priority available identity.
 
         Args:
             location: The mailbox epoch and UID associated with the fetch.
             record: A header or full-message FETCH record, including requested EMAILID.
             capabilities: Known supported identifier mechanisms for this connection.
+            cache: Persist locations in the tool lookup cache; False is used by
+                bulk indexing, which owns a separate location database.
 
         Returns:
             EMAILID, otherwise a recognized Proton ID, otherwise None. Both native
@@ -465,26 +467,28 @@ class Mailbox:
             if not enabled:
                 continue
             value = native_value(record, kind)
-            self.identities.remember(location, kind, value)
+            if cache:
+                self.identities.remember(location, kind, value)
             if value is not None and preferred is None:
                 preferred = NativeKey(account=location.account, kind=kind, value=value)
         return preferred
 
     def summarize(self, location: MessageKey, record: dict,
-                  capabilities: IdentityCapabilities) -> Message:
+                  capabilities: IdentityCapabilities, *, cache: bool = True) -> Message:
         """Return a typed header summary and remember its native identity/location mapping.
 
         Args:
             location: Selected mailbox epoch and fetched UID.
             record: Header FETCH record with receipt time and supported native fields.
             capabilities: Identifier fields requested for this connection.
+            cache: Whether to warm the small live-tool identity cache.
 
         Returns:
             A header-only Message whose ID is independent of location when supported.
         """
         return parse_message(record[b"BODY[HEADER]"], location, summary=True,
                              received_at=received_time(record.get(b"INTERNALDATE")),
-                             identity=self.observe(location, record, capabilities))
+                             identity=self.observe(location, record, capabilities, cache=cache))
 
     def received_at(self, message_id: str) -> datetime | None:
         """Read a message's authoritative receipt time for legacy queued notifications.

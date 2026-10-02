@@ -134,7 +134,7 @@ def fresh_mcp():
     from fastmcp import FastMCP
 
     app = FastMCP("imap-test", lifespan=server.lifespan, mask_error_details=True)
-    for handler in [server.get_mail, server.search_mail, server.get_attachment, server.list_folders]:
+    for handler in [server.get_mail, server.search_server, server.search_mail, server.index_status, server.get_attachment, server.list_folders]:
         app.tool(handler)
     app.resource("imap://attachments/{message_id}/{attachment_id}")(server.attachment_resource)
     return app
@@ -369,8 +369,9 @@ async def test_native_mail_and_attachment_ids_work_through_mcp(mailbox, protocol
     monkeypatch.setattr(server, "Mailbox", lambda settings, state_path=None: mailbox)
     monkeypatch.setattr(events.Monitor, "watch", lambda self, folder: self.stop.wait(5))
     monkeypatch.setenv("IMAP_STATE_PATH", str(tmp_path / "events.sqlite3"))
+    monkeypatch.setenv("IMAP_INDEX_ENABLED", "false")
     async with Client(fresh_mcp()) as client:
-        search = await client.call_tool("search_mail", {"search": "ALL"})
+        search = await client.call_tool("search_server", {"search": "ALL"})
         identifier = search.structured_content["result"][0]["id"]
         assert search.structured_content["result"][0]["identity_kind"] == "proton"
         protocol.messages["Archive"][9] = protocol.messages["INBOX"].pop(7)
@@ -507,6 +508,7 @@ async def test_incomplete_lookup_is_actionable_over_mcp(mailbox, protocol, monke
     monkeypatch.setattr(server, "Mailbox", lambda settings, state_path=None: mailbox)
     monkeypatch.setattr(events.Monitor, "watch", lambda self, folder: self.stop.wait(5))
     monkeypatch.setenv("IMAP_STATE_PATH", str(tmp_path / "events.sqlite3"))
+    monkeypatch.setenv("IMAP_INDEX_ENABLED", "false")
     async with Client(fresh_mcp()) as client:
         with pytest.raises(ToolError, match="incomplete"):
             await client.call_tool("get_mail", {"message_id": key.encode()})

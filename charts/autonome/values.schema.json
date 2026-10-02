@@ -24,6 +24,7 @@
         "imapMcp": {
           "type": "object",
           "properties": {
+            "index": { "$ref": "#/definitions/mailIndex" },
             "idProvider": { "enum": ["auto", "generic", "proton"] },
             "lookupMaxMessages": { "type": "integer", "minimum": 1, "maximum": 5000 },
             "notifySince": { "$ref": "#/definitions/notificationSince" },
@@ -84,6 +85,42 @@
     }
   },
   "definitions": {
+    "mailIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "syncSeconds": { "type": "number", "exclusiveMinimum": 0 },
+        "headerBatch": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "bodyBatch": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "flagBatch": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "embeddingSeconds": { "type": "number", "exclusiveMinimum": 0 },
+        "journalMode": { "enum": ["DELETE", "WAL"] },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "persistent": { "type": "boolean" },
+            "existingClaim": { "type": "string" },
+            "storageClass": { "type": "string" },
+            "size": { "type": "string", "minLength": 1 }
+          }
+        },
+        "embedding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": { "type": "string" },
+            "baseUrl": { "type": "string" },
+            "provider": { "enum": ["nvidia", "openai"] },
+            "dim": { "type": "integer", "minimum": 0, "maximum": 16384 },
+            "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "minScore": { "type": "number", "minimum": 0, "maximum": 1 },
+            "apiKeySecretRef": { "$ref": "#/definitions/mailPassword" }
+          }
+        }
+      }
+    },
     "notificationSince": {
       "type": "string",
       "oneOf": [

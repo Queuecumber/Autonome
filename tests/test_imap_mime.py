@@ -230,8 +230,9 @@ async def test_inline_image_tools_and_resources_reach_the_agent_as_images(mailbo
     monkeypatch.setattr(server, "Mailbox", lambda settings, state_path=None: mailbox)
     monkeypatch.setattr(events.Monitor, "watch", lambda self, folder: self.stop.wait(5))
     monkeypatch.setenv("IMAP_STATE_PATH", str(tmp_path / "events.sqlite3"))
+    monkeypatch.setenv("IMAP_INDEX_ENABLED", "false")
     async with Client(fresh_mcp()) as client:
-        result = await client.call_tool("search_mail", {"search": "ALL", "folder": "INBOX"})
+        result = await client.call_tool("search_server", {"search": "ALL", "folder": "INBOX"})
         identifier = result.structured_content["result"][0]["id"]
         result = await client.call_tool("get_mail", {"message_id": identifier})
         mail_detail = result.structured_content

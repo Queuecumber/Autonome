@@ -533,7 +533,7 @@ def test_attachment_tools_return_portable_binary_resources(mailbox, key, monkeyp
     assert resource.content == b"\x00\xffbinary"
     assert resource.mime_type == "application/octet-stream"
     assert server.get_mail(key.encode()).subject == "Status update"
-    assert server.search_mail("ALL", key.folder)[0].id == key.encode()
+    assert server.search_server("ALL", key.folder)[0].id == key.encode()
     assert server.list_folders() == [key.folder]
     monkeypatch.setattr(server, "mailbox", None)
     with pytest.raises(RuntimeError):
@@ -548,6 +548,7 @@ async def test_mcp_lifespan_tools_resources_and_worker_shutdown(mailbox, key, mo
     monkeypatch.setattr(server.Settings, "from_env", lambda: mailbox.settings)
     monkeypatch.setattr(server, "Mailbox", lambda settings, state_path=None: mailbox)
     monkeypatch.setenv("IMAP_STATE_PATH", str(tmp_path / "lifespan.sqlite3"))
+    monkeypatch.setenv("IMAP_INDEX_ENABLED", "false")
     stopped = []
 
     def wait_until_shutdown(self, client, idle):
@@ -558,10 +559,10 @@ async def test_mcp_lifespan_tools_resources_and_worker_shutdown(mailbox, key, mo
     monkeypatch.setattr(events.Monitor, "wait_for_change", wait_until_shutdown)
     async with Client(server.mcp) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
-        assert {"get_mail", "search_mail", "get_attachment", "list_folders"} == set(tools)
+        assert {"get_mail", "search_server", "search_mail", "index_status", "get_attachment", "list_folders"} == set(tools)
         assert all(tool.annotations.readOnlyHint for tool in tools.values())
-        assert tools["search_mail"].inputSchema["properties"]["folder"]["default"] is None
-        search = await client.call_tool("search_mail", {"search": "ALL", "limit": 1})
+        assert tools["search_server"].inputSchema["properties"]["folder"]["default"] is None
+        search = await client.call_tool("search_server", {"search": "ALL", "limit": 1})
         summary = search.structured_content["result"][0]
         assert summary["folder"] == key.folder
         assert summary["received_at"] == "2026-09-14T13:00:00Z"
