@@ -226,6 +226,39 @@ async def test_text_fetch_remains_text(fetch_client, mime, body, expected):
 
 
 @pytest.mark.asyncio
+async def test_web_search_formats_ranked_results(fetch_client):
+    """Search results render as markdown sections in rank order."""
+    fetch_client["https://api.perplexity.ai/search"] = httpx.Response(
+        200, json={"results": [
+            {"title": "One", "url": "https://one.example", "snippet": "first"},
+            {"title": "Two", "url": "https://two.example", "snippet": "second"},
+        ]},
+    )
+    result = await server.web_search("query", max_results=2)
+    assert result == (
+        "### One\nhttps://one.example\nfirst"
+        "\n\n### Two\nhttps://two.example\nsecond"
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_search_no_results(fetch_client):
+    """An empty result set yields a clear message rather than blank output."""
+    fetch_client["https://api.perplexity.ai/search"] = httpx.Response(
+        200, json={"results": []},
+    )
+    assert await server.web_search("query") == "No results found."
+
+
+@pytest.mark.asyncio
+async def test_web_search_http_error_is_preserved(fetch_client):
+    """Search backend failures propagate rather than returning empty results."""
+    fetch_client["https://api.perplexity.ai/search"] = httpx.Response(429)
+    with pytest.raises(httpx.HTTPStatusError):
+        await server.web_search("query")
+
+
+@pytest.mark.asyncio
 async def test_fetch_http_error_is_preserved(fetch_client):
     """HTTP failures still propagate rather than becoming resource content."""
     url = "https://example.org/missing.pdf"
