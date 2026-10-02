@@ -10,6 +10,8 @@ Autonome is a platform for running autonomous agents. It is not an OpenClaw clon
 
 ## Using
 
+Session-manager can render [PDF attachments as image content](services/session-manager/PDF.md).
+
 ## Contributing
 
 Contribution are welcome, and we of course value AI in the coding process, but please make sure a human reviews your PR before sending it in
