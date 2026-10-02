@@ -1,14 +1,18 @@
 """System MCP server — web search, web fetch, and general system tools."""
 
+import base64
 import os
 
 import html2text
 import httpx
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import BlobResourceContents, EmbeddedResource
 
 SEARCH_URL = os.environ.get("SEARCH_URL", "https://api.perplexity.ai/search")
 SEARCH_API_KEY = os.environ.get("SEARCH_API_KEY", "")
 MAX_FETCH_CHARS = int(os.environ.get("MAX_FETCH_CHARS", "20000"))
+MAX_PDF_BYTES = 25 * 1024 * 1024
 
 mcp = FastMCP("system", instructions=(
   """
@@ -65,34 +69,61 @@ async def web_search(query: str, max_results: int = 5) -> str:
 
 
 @mcp.tool
-async def web_fetch(url: str, max_chars: int = MAX_FETCH_CHARS) -> str:
-    """Fetch a URL and return its contents.
+async def web_fetch(url: str, max_chars: int = MAX_FETCH_CHARS) -> str | ToolResult:
+    """Fetch a URL, returning text or a PDF binary resource.
 
-    HTML pages are converted to markdown; other content types come back
-    as-is. Redirects are followed. Large responses are truncated. If you
-    don't get the right information from a truncated response, try asking
-    for more characters.
+    HTML becomes markdown; other non-PDF content is decoded as text.
+    Declared application/pdf responses (case-insensitive, including MIME
+    parameters) and PDFs with missing or generic binary MIME types are
+    returned as MCP embedded resources with the final response URL as URI.
+    Redirects are followed. PDF responses are limited to 25 MiB; text
+    responses retain their existing character truncation behavior.
 
     Args:
         url: The URL to fetch.
-        max_chars: Truncation threshold; longer responses get a
-            `[truncated at N chars]` marker appended.
+        max_chars: Text-only truncation threshold; longer text gets a
+            `[truncated at N chars]` marker. Does not truncate PDFs.
 
     Returns:
-        The page contents (markdown for HTML, raw text otherwise),
-        possibly with a truncation marker.
+        Markdown for HTML, decoded text for other non-PDF responses, or
+        a PDF embedded binary resource for rendering by the session manager.
 
     Raises:
         httpx.HTTPStatusError: If the fetch returns a non-2xx response.
+        ValueError: If a PDF exceeds 25 MiB; no partial PDF is returned.
     """
-    resp = await _http.get(url, follow_redirects=True)
-    resp.raise_for_status()
+    async with _http.stream("GET", url, follow_redirects=True) as resp:
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+        mime = content_type.split(";", 1)[0].strip().lower()
+        generic = mime in ("", "application/octet-stream", "binary/octet-stream")
+        pdf = mime == "application/pdf"
+        chunks = bytearray()
+        async for chunk in resp.aiter_bytes():
+            chunks.extend(chunk)
+            if generic and len(chunks) >= 5:
+                pdf = chunks.startswith(b"%PDF-")
+                generic = False
+            if pdf and len(chunks) > MAX_PDF_BYTES:
+                raise ValueError("PDF exceeds the 25 MiB input limit")
 
-    content_type = resp.headers.get("content-type", "")
-    if "html" in content_type:
-        text = _h2t.handle(resp.text)
-    else:
-        text = resp.text
+        if pdf:
+            return ToolResult(content=[EmbeddedResource(
+                type="resource",
+                resource=BlobResourceContents(
+                    uri=str(resp.url), mimeType="application/pdf",
+                    blob=base64.b64encode(chunks).decode("ascii"),
+                ),
+            )])
+
+        # aiter_bytes has already decoded Content-Encoding; retain only charset metadata.
+        decoded = httpx.Response(
+            resp.status_code,
+            headers={"content-type": content_type},
+            content=bytes(chunks),
+            default_encoding=resp.default_encoding,
+        ).text
+        text = _h2t.handle(decoded) if "html" in content_type else decoded
 
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n\n[truncated at {max_chars} chars]"

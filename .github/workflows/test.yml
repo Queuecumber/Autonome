@@ -13,7 +13,11 @@ jobs:
       contents: read
     services:
       falkordb:
-        image: falkordb/falkordb:latest
+        # Pinned: FalkorDB 6.x (Rust engine) rejects the multi-argument
+        # db.idx.fulltext.createNodeIndex calls that graphiti-core 0.30.x makes
+        # in build_indices_and_constraints. Only unpin alongside a graphiti-core
+        # bump that is compatible with newer FalkorDB.
+        image: falkordb/falkordb:v4.22.0
         ports:
           - 6379:6379
         options: >-

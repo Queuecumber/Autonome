@@ -24,7 +24,8 @@ from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
 from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.helpers import validate_node_labels
 from graphiti_core.models.edges.edge_db_queries import get_entity_edge_return_query
-from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
+from graphiti_core.models.nodes.node_db_queries import get_entity_node_return_query
+from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode, get_entity_node_from_record
 from redis.exceptions import ResponseError
 
 Direction = Literal["both", "outgoing", "incoming"]
@@ -245,10 +246,10 @@ async def get_edge(fact_id: str) -> EntityEdge:
     if not records:
         raise EdgeNotFoundError(fact_id)
     if len(records) != 1:
-        raise ValueError("Multiple facts share this ID; refusing an ambiguous lookup")
+        raise ValueError("Multiple relationships share this ID; refusing an ambiguous lookup")
     edge = get_entity_edge_from_record(records[0], driver().provider)
     if edge.group_id != GROUP_ID:
-        raise ValueError("Fact does not belong to the configured memory group")
+        raise ValueError("Relationship does not belong to the configured memory group")
     return edge
 
 
@@ -268,7 +269,7 @@ async def update_edge(edge: EntityEdge) -> None:
         RuntimeError: If the fact is missing, ambiguous, or its identity changed.
     """
     if edge.group_id != GROUP_ID:
-        raise ValueError("Fact does not belong to the configured memory group")
+        raise ValueError("Relationship does not belong to the configured memory group")
     properties = edge.model_dump(exclude={
         "source_node_uuid", "target_node_uuid", "attributes", "fact_embedding"})
     properties.update(source_uuid=edge.source_node_uuid, target_uuid=edge.target_node_uuid)
@@ -290,7 +291,7 @@ async def update_edge(edge: EntityEdge) -> None:
         target_uuid=edge.target_node_uuid, properties=properties,
     )
     if len(records) != 1:
-        raise RuntimeError("Fact no longer has one matching identity; retry the lookup")
+        raise RuntimeError("Relationship no longer has one matching identity; retry the lookup")
 
 
 async def link_episode(ep: EpisodicNode, edge_uuids: list[str]) -> None:
@@ -328,6 +329,27 @@ async def page_edges(limit: int, cursor: str | None = None) -> list[EntityEdge]:
         group_id=GROUP_ID, cursor=cursor, limit=limit,
     )
     return [get_entity_edge_from_record(record, driver().provider) for record in records]
+
+
+async def page_entities(limit: int, cursor: str | None = None) -> list[EntityNode]:
+    """Read a bounded entity inventory in the configured memory group.
+
+    Args:
+        limit: Maximum entities to read, including any pagination lookahead.
+        cursor: Exclude IDs at or above this boundary in descending UUID order.
+
+    Returns:
+        Entities in descending UUID order, including entities without relationships.
+        Embedding vectors are not loaded. Concurrent writes are not a snapshot.
+    """
+    boundary = "AND toString(n.uuid) < $cursor " if cursor is not None else ""
+    records, _, _ = await driver().execute_query(
+        "MATCH (n:Entity) WHERE n.group_id = $group_id " + boundary + "RETURN "
+        + get_entity_node_return_query(driver().provider)
+        + " ORDER BY n.uuid DESC LIMIT $limit",
+        group_id=GROUP_ID, cursor=cursor, limit=limit,
+    )
+    return [get_entity_node_from_record(record, driver().provider) for record in records]
 
 
 async def adjacent_edges(node_uuids: list[str], excluded: list[str], limit: int,
