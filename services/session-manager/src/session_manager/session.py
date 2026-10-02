@@ -11,9 +11,13 @@ the model, not a char-count heuristic.
 """
 
 import json
+import os
 import re
 from pathlib import Path
+import tempfile
 from typing import Any
+
+from session_manager.context import paired_cutoff
 
 
 class SessionManager:
@@ -78,13 +82,25 @@ class SessionManager:
 
         Previous versions are kept on disk as audit trail. The new version
         becomes the active file for subsequent `load` / `append` calls.
+        Publication is atomic: serialization/write failures leave the previous
+        version active. Filesystem and serialization errors propagate to the caller.
         """
         versions = self._versioned_files(session_id)
         next_n = (versions[-1][0] + 1) if versions else 0
         new_path = self.store_dir / f"{self._safe_id(session_id)}.{next_n}.jsonl"
-        with new_path.open("w") as f:
-            for msg in messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.store_dir,
+                                             prefix=".compaction-", suffix=".tmp", delete=False) as f:
+                temporary = Path(f.name)
+                for msg in messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, new_path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return new_path
 
     # ── compaction support ───────────────────────────────────
@@ -103,42 +119,45 @@ class SessionManager:
 
     @staticmethod
     def recency_split(messages: list[dict[str, Any]], recency_tokens: int) -> int:
-        """Find the index where `messages[index:]` covers ~recency_tokens
-        of *cross-turn* input.
+        """Choose a paired recent tail using reported prompt-token growth.
 
-        Only considers iteration==0 usage comments — the first call of
-        each turn. Their `input_tokens` reflects what the model actually
-        saw after load-time filtering (reasoning items stripped, images
-        not persisted, etc.), which is the same shape the post-compaction
-        call will face. In-loop usages bake in within-turn bloat that
-        doesn't replay and can't drive the recency budget.
+        Args:
+            messages: Persisted items, including usage from every tool iteration.
+            recency_tokens: Soft token target for the retained recent window.
 
-        Returns 0 (keep all) if there isn't enough turn-boundary data to
-        identify a cutoff.
+        Returns:
+            A safe cutoff, or zero if no meaningful prefix can be folded. The
+            crossing delta stays in the tail. Decreases (for example when old
+            transient images disappear) do not cancel later observed growth.
+            If growth is insufficient but the oldest recorded prompt already
+            exceeds the target, its preceding history can be folded while all
+            subsequently observed conversation stays verbatim.
+
+        Prompt usage includes fixed instructions and transient content, so this
+        is an approximate recency window, not exact per-message token accounting.
         """
         usages: list[tuple[int, int]] = []
         for i, m in enumerate(messages):
             if (m.get("type") == "comment"
                     and m.get("kind") == "usage"
-                    and m.get("input_tokens") is not None
-                    and m.get("iteration", 0) == 0):
+                    and m.get("input_tokens") is not None):
                 usages.append((i, m["input_tokens"]))
 
-        if len(usages) < 2:
-            return 0
-
         cumulative = 0
+        cutoff = 0
         for i in range(len(usages) - 1, 0, -1):
-            line_curr, tok_curr = usages[i]
+            _line_curr, tok_curr = usages[i]
             line_prev, tok_prev = usages[i - 1]
-            cumulative += tok_curr - tok_prev
+            cumulative += max(0, tok_curr - tok_prev)
             if cumulative >= recency_tokens:
-                # Always include the crossing delta in keep. Overshooting
-                # recency_tokens is fine (keep is slightly larger than
-                # target); undershooting means fold balloons toward the
-                # summarize call's context window limit.
-                return line_prev + 1
-        return 0
+                cutoff = line_prev + 1
+                break
+        if not cutoff and usages and usages[0][1] > recency_tokens:
+            cutoff = usages[0][0] + 1
+        cutoff = paired_cutoff(messages, cutoff)
+        if not any(m.get("type") not in {"comment", "reasoning"} for m in messages[:cutoff]):
+            return 0
+        return cutoff
 
     @staticmethod
     def strip_usage_comments(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

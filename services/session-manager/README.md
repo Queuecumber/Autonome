@@ -80,3 +80,49 @@ leaves the existing history version intact.
 For Helm, continue passing `agent.yaml` through `--set-file agent.config=...`.
 Restart session-manager after updating its image or configuration; MCP servers
 and channel adapters do not need restarting for this change.
+
+## Compaction During Turns
+
+The same compaction routine runs before turns and is checked after every completed
+tool batch, before the next model request. For parallel calls it waits for the
+entire batch so no call loses its matching result. Each check compares the latest
+provider-reported prompt usage with `session.compaction_trigger_tokens`; a long
+turn can compact more than once.
+
+`session.recency_tokens` selects the recent tail using usage from every model
+iteration, not just the first call of each turn. Decreases in prompt usage do not
+cancel later growth. If recorded growth is insufficient but the oldest measured
+prompt already exceeds the recency target, its preceding history can be summarized
+while the subsequently measured conversation remains intact. Cutoffs move backward
+to preserve tool batches, event metadata/text pairs, and reasoning with responses.
+This is a soft recency target: usage includes instructions and transient content,
+and the latest tool results have not yet been measured by the provider.
+
+The older portion is sent together through the normal summary prompt, with the
+agent's usual system instructions, personality, model settings, and tools. The agent
+can save memories before returning its summary. There is no separate emergency
+prompt, character-sized chunk loop, or rolling summary of summaries. Logs identify
+the fold/keep counts, summary requests and tool rounds, and publication elapsed time.
+
+Before an in-turn compaction, input events and completed calls/results are appended
+once to the current history version. Publication is atomic; old versions remain
+the full audit trail. Empty, truncated, or filtered summaries and failed writes
+cannot replace history. Compaction resumes the current tool loop without restarting
+completed actions. Original routing metadata is carried forward within a bounded
+16,000-character envelope, with larger metadata explicitly marked omitted.
+
+Images belonging to retained tool batches stay in live context. Images from folded
+batches are omitted explicitly in a `context_resumed` event and can be fetched again
+using their resource references. Base64 is neither persisted nor included in textual
+summaries. This does not add PDF page-range controls.
+
+A known context-window HTTP 400/413 rejection can force one attempt through this
+same compaction routine, even below the configured trigger. The reduced request is
+retried once; other invalid requests do not compact. No token cutoffs are invented
+when usage is unavailable. An individual oversized result, excessive fixed prompt
+or tool overhead, or an already-overfull summary input can still fail. These failures
+preserve history and record `model_error` for the next event instead of entering a
+second summarization strategy. Configure the trigger with headroom for tool output.
+
+This needs only an updated session-manager image and restart. No session-volume
+migration or adapter/MCP restart is required.

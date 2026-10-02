@@ -113,7 +113,7 @@ def test_latest_input_tokens_none_when_no_usage():
 
 
 def test_recency_split_returns_zero_with_too_few_usages():
-    """With <2 usage comments we can't compute any delta, so keep everything."""
+    """Empty history or usage without conversation cannot yield a useful fold."""
     assert SessionManager.recency_split([], 100) == 0
     assert SessionManager.recency_split(
         [{"type": "comment", "kind": "usage", "input_tokens": 100}], 50
@@ -161,10 +161,8 @@ def test_recency_split_always_includes_crossing_delta():
         {"role": "user", "content": "y"},                             # 3
         {"type": "comment", "kind": "usage", "input_tokens": 1200},  # 4, delta 100
     ]
-    # Recency 200. Walking back: delta 100 → cumulative 100, delta 1000
-    # → cumulative 1100 ≥ 200, return line_prev + 1 = 1. Keep everything
-    # from index 1 onward (overshoot is fine).
-    assert SessionManager.recency_split(messages, 200) == 1
+    # The crossing delta stays; its proposed prefix contains only a usage marker.
+    assert SessionManager.recency_split(messages, 200) == 0
 
 
 def test_strip_usage_comments_drops_only_usage_kind():
